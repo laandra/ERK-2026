@@ -63,7 +63,7 @@ def get_30_user_ids():
 
 def load_notebook_cells():
     """Return dict {cell_index: source_string} for code cells only."""
-    with open(NOTEBOOK_PATH) as f:
+    with open(NOTEBOOK_PATH, encoding='utf-8') as f:
         nb = nbformat.read(f, as_version=4)
     return {i: "".join(cell.source)
             for i, cell in enumerate(nb.cells)
@@ -325,6 +325,6 @@ def main():
         df = pd.read_csv(SUMMARY_CSV)
         print(df.to_string(index=False))
 
-
+ 
 if __name__ == "__main__":
     main()
