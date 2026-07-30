@@ -34,7 +34,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 # Keep sibling imports working even when this file is loaded via a root shim.
 _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR) not in sys.path:
-    sys.path.insert(0, str(_THIS_DIR))
+    # Keep sibling imports resolvable without shadowing the root shim module.
+    sys.path.append(str(_THIS_DIR))
 
 from si_cas import bloki_v_mesecu, casovni_blok, je_visja_sezona, v_lokalni_cas
 from si_obracun import Pravila, dobava, samooskrba
@@ -673,3 +674,18 @@ def compute_prorated_fixed_charge_eur(
         dogovorjena_moc=_resolve_dogovorjena_moc(dogovorjena_moc),
         apply_ddv=bool(apply_ddv), eko_racun=bool(eko_racun),
     )
+
+
+# -----------------------------------------------------------------------------
+# Invoice API re-exports
+# -----------------------------------------------------------------------------
+# Compatibility: if this implementation file is imported directly as
+# `Pricing_Functions` (for example due to path ordering in notebooks), expose
+# the same invoice symbols as the root shim.
+from si_invoice import (  # noqa: E402
+    InvoiceBuilder,
+    aggregate_line_items,
+    build_invoice_household,
+    racun_to_line_items,
+    write_rows_csv,
+)

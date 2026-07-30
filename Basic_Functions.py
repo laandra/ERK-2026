@@ -499,5 +499,42 @@ def milp_total_cost(env, **kwargs):
     return float(df["Cum_Cost"].iloc[-1])
 
 
+def cumulative_interval_price_series(consumption, generation, pricing_env, dataset):
+    cumulative_payment = 0.0
+    cumulative_series = []
+    interval_minutes = 1440.0 / pricing_env.korakov_na_dan
+    peak_kw = pricing_env.compute_seed_peak_kw(0)
 
+    peak_window_id = (
+        int(pricing_env._window_id_arr[0])
+        if pricing_env._window_id_arr is not None and len(dataset) > 0
+        else 0
+        )
+
+    for i, timestamp in enumerate(dataset.index):
+        if pricing_env._window_id_arr is not None:
+            current_window_id = int(pricing_env._window_id_arr[i])
+            if current_window_id != peak_window_id:
+                peak_kw = {b: 0.0 for b in range(1, 6)}
+                peak_window_id = current_window_id
+
+        net_kwh = float(consumption.iloc[i] - generation.iloc[i])
+        interval_cost = calculate_interval_price(
+            smp_market_price_kwh=float(dataset["SMP"].iloc[i]),
+            total_consumed_kwh=net_kwh,
+            utc_date=timestamp,
+            interval_minutes=interval_minutes,
+            scheme=pricing_env.pricing_scheme,
+            compare_all=pricing_env.pricing_compare_all,
+            dogovorjena_moc=pricing_env.dogovorjena_moc,
+            prev_peak_kw=peak_kw,
+            **pricing_env.pricing_options,
+        )
+
+        peak_kw = dict(interval_cost["new_peak_kw"])
+        cumulative_payment += float(interval_cost["constant_price_aud"])
+        cumulative_payment += float(interval_cost["variable_price_aud"])
+        cumulative_series.append(cumulative_payment)
+
+    return cumulative_series
 
