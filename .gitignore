@@ -1,0 +1,6 @@
+
+# Local large dataset (do not track)
+Ausgrid_2010_2013_Orange_Combined.csv
+
+# Local Claude config
+.claude/
