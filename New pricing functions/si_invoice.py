@@ -400,6 +400,41 @@ def aggregate_line_items(rows: List[Dict[str, Any]], obdobje_label: str) -> List
     return out
 
 
+def aggregate_household_invoices(
+    household_rows: Dict[str, List[Dict[str, Any]]],
+    obdobje_label: str,
+) -> Dict[str, Any]:
+    """Build separate and group invoice views from household line items.
+
+    Args:
+        household_rows: Mapping household_id -> monthly line-item rows.
+        obdobje_label: Label used in the whole-period aggregated views.
+
+    Returns:
+        Dict with:
+          - separate: aggregated line-items per household
+          - group: one aggregated line-item list over all households
+    """
+    separate: Dict[str, List[Dict[str, Any]]] = {}
+    combined_rows: List[Dict[str, Any]] = []
+
+    for household_id, rows in household_rows.items():
+        hh_rows = list(rows or [])
+        separate[household_id] = aggregate_line_items(hh_rows, obdobje_label)
+        combined_rows.extend(hh_rows)
+
+    group = aggregate_line_items(combined_rows, obdobje_label)
+
+    # Keep a deterministic title row for group-level reporting.
+    if group and group[0].get("kategorija") == "naslov":
+        group[0]["produkt"] = "Skupni obračun gospodinjstev"
+
+    return {
+        "separate": separate,
+        "group": group,
+    }
+
+
 # ---------------------------------------------------------------------------
 # CSV export
 # ---------------------------------------------------------------------------
@@ -500,3 +535,25 @@ class InvoiceBuilder:
             label = period_label or self.run_label
             agg = aggregate_line_items(self.monthly_line_items, label)
             write_rows_csv(agg, self.output_dir / f"{self.run_label}_period.csv")
+
+    def get_monthly_line_items(self) -> List[Dict[str, Any]]:
+        """Returns all collected monthly line-items (in chronological order)."""
+        self._finalize_month()
+        return list(self.monthly_line_items)
+
+    def get_period_line_items(self, period_label: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Returns whole-period aggregated line-items without writing to disk."""
+        rows = self.get_monthly_line_items()
+        if not rows:
+            return []
+        label = period_label or self.run_label
+        return aggregate_line_items(rows, label)
+
+    def get_invoice_views(self, period_label: Optional[str] = None) -> Dict[str, Any]:
+        """Returns monthly and period views in one object for API consumers."""
+        monthly = self.get_monthly_line_items()
+        period = self.get_period_line_items(period_label=period_label)
+        return {
+            "monthly": monthly,
+            "period": period,
+        }

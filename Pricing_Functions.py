@@ -40,4 +40,5 @@ InvoiceBuilder = _INVOICE_MODULE.InvoiceBuilder
 build_invoice_household = _INVOICE_MODULE.build_invoice_household
 racun_to_line_items = _INVOICE_MODULE.racun_to_line_items
 aggregate_line_items = _INVOICE_MODULE.aggregate_line_items
+aggregate_household_invoices = _INVOICE_MODULE.aggregate_household_invoices
 write_rows_csv = _INVOICE_MODULE.write_rows_csv

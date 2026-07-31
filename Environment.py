@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import gymnasium as gym
 import numpy as np
@@ -12,6 +12,7 @@ from Basic_Functions import (
 )
 
 from Pricing_Functions import (
+    aggregate_household_invoices,
     PRIVZETO_REFERENCNO_LETO,
     InvoiceBuilder,
     calculate_interval_price,
@@ -795,6 +796,121 @@ class HouseholdEnvironment(gym.Env):
             )
 
         return obs, float(reward), bool(terminated), bool(truncated), info
+
+    def render(self):
+        return None
+
+    def close(self):
+        return None
+
+
+class CommunityEnvironment(gym.Env):
+    """Wrapper that runs multiple HouseholdEnvironment instances together.
+
+    This class intentionally keeps each household independent (no VPP/community
+    optimization coupling yet). It provides grouped stepping, per-household flow
+    history tracking, and invoice views (separate + group aggregate).
+    """
+
+    metadata = {"render_modes": []}
+
+    def __init__(self, household_envs: Dict[str, HouseholdEnvironment]):
+        if not household_envs:
+            raise ValueError("household_envs must contain at least one household environment.")
+
+        normalized: Dict[str, HouseholdEnvironment] = {}
+        for household_id, env in household_envs.items():
+            if not isinstance(env, HouseholdEnvironment):
+                raise TypeError(
+                    f"Environment for household {household_id!r} is not HouseholdEnvironment."
+                )
+            normalized[str(household_id)] = env
+
+        self.household_envs = normalized
+        self.household_ids = tuple(normalized.keys())
+
+        self.action_space = gym.spaces.Dict(
+            {hid: env.action_space for hid, env in self.household_envs.items()}
+        )
+        self.observation_space = gym.spaces.Dict(
+            {hid: env.observation_space for hid, env in self.household_envs.items()}
+        )
+
+        self._flow_history: Dict[str, list] = {hid: [] for hid in self.household_ids}
+        self._last_info: Dict[str, Dict[str, Any]] = {hid: {} for hid in self.household_ids}
+
+    def _default_action(self, household_id: str) -> int:
+        """Action 4 keeps the battery idle and is the safest fallback default."""
+        env = self.household_envs[household_id]
+        return min(4, int(env.action_space.n) - 1)
+
+    def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
+        observations: Dict[str, Any] = {}
+        infos: Dict[str, Dict[str, Any]] = {}
+
+        for idx, hid in enumerate(self.household_ids):
+            env_seed = None if seed is None else int(seed) + idx
+            obs, info = self.household_envs[hid].reset(seed=env_seed, options=options)
+            observations[hid] = obs
+            infos[hid] = info
+            self._last_info[hid] = dict(info)
+            self._flow_history[hid] = []
+
+        return observations, infos
+
+    def step(self, actions: Dict[str, int]):
+        observations: Dict[str, Any] = {}
+        rewards: Dict[str, float] = {}
+        terminated: Dict[str, bool] = {}
+        truncated: Dict[str, bool] = {}
+        infos: Dict[str, Dict[str, Any]] = {}
+
+        for hid in self.household_ids:
+            action = actions.get(hid, self._default_action(hid))
+            obs, reward, done, cut, info = self.household_envs[hid].step(action)
+            observations[hid] = obs
+            rewards[hid] = float(reward)
+            terminated[hid] = bool(done)
+            truncated[hid] = bool(cut)
+            infos[hid] = info
+            self._last_info[hid] = dict(info)
+
+            flow = info.get("energy_flows")
+            if flow is not None:
+                flow_row = {
+                    "step_idx": int(info.get("step_idx", -1)),
+                    "household_id": hid,
+                    **{k: float(v) for k, v in flow.items()},
+                }
+                self._flow_history[hid].append(flow_row)
+
+        return observations, rewards, terminated, truncated, infos
+
+    def get_flow_history(self) -> Dict[str, list]:
+        """Returns energy-flow history captured from household info dicts."""
+        return {hid: list(rows) for hid, rows in self._flow_history.items()}
+
+    def get_cumulative_payment(self) -> Dict[str, float]:
+        """Returns current cumulative payment per household."""
+        out: Dict[str, float] = {}
+        for hid in self.household_ids:
+            last_info = self._last_info.get(hid, {})
+            out[hid] = float(last_info.get("cumulative_payment", 0.0))
+        return out
+
+    def get_invoice_views(self, period_label: Optional[str] = None) -> Dict[str, Any]:
+        """Returns separate household invoices and one group aggregate invoice."""
+        household_rows: Dict[str, list] = {}
+
+        for hid in self.household_ids:
+            builder = getattr(self.household_envs[hid], "_invoice_builder", None)
+            if builder is None:
+                household_rows[hid] = []
+                continue
+            household_rows[hid] = builder.get_monthly_line_items()
+
+        label = period_label or "Skupno_obdobje"
+        return aggregate_household_invoices(household_rows, label)
 
     def render(self):
         return None
