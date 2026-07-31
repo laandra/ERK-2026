@@ -1,0 +1,16 @@
+numpy==2.5.1
+pandas==3.0.5
+matplotlib==3.11.1
+gymnasium==1.3.0
+scikit-learn==1.9.0
+scipy==1.18.0
+seaborn==0.13.2
+PuLP==3.3.2
+holidays==0.101
+xlsxwriter==3.2.9
+optuna==4.9.0
+plotly==6.9.0
+tqdm==4.70.0
+torch==2.13.0
+ipykernel==7.3.0
+ipywidgets==8.1.8
