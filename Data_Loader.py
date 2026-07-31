@@ -21,23 +21,107 @@ def _find_workspace_root(start: Optional[Path] = None) -> Path:
 WORKSPACE_ROOT = _find_workspace_root()
 IN_COLAB = os.path.exists("/content")
 INPUT_DATA_DIR = WORKSPACE_ROOT / "Input data"
-AUSGRID_DIR = INPUT_DATA_DIR / "Ausgrid"
 
 
-def ausgrid_household_path(household_id: int) -> Path:
-    return AUSGRID_DIR / f"Ausgrid {int(household_id)}.csv"
+def _dataset_dir_map() -> dict[str, Path]:
+    dataset_dirs = {
+        path.name.lower(): path
+        for path in INPUT_DATA_DIR.iterdir()
+        if path.is_dir()
+    }
+    dataset_dirs["greek"] = INPUT_DATA_DIR / "GreekSmartHome.csv"
+    dataset_dirs["greeksmarthome"] = INPUT_DATA_DIR / "GreekSmartHome.csv"
+    return dataset_dirs
 
 
-def load_household_data(household_id: int, *, dataset: str = "ausgrid") -> pd.DataFrame:
-    """Load one household profile and normalize index/columns for the env."""
-    dataset_key = str(dataset).lower()
+def available_input_datasets() -> List[str]:
+    """List accepted dataset names based on folders in Input data plus single-file datasets."""
+    dataset_names = sorted(path.name for path in INPUT_DATA_DIR.iterdir() if path.is_dir())
+    if (INPUT_DATA_DIR / "GreekSmartHome.csv").exists():
+        dataset_names.append("GreekSmartHome")
+    return dataset_names
 
-    if dataset_key == "ausgrid":
-        csv_path = ausgrid_household_path(household_id)
-    elif dataset_key in {"greek", "greeksmarthome"}:
-        csv_path = INPUT_DATA_DIR / "GreekSmartHome.csv"
+
+def _resolve_dataset_source(dataset: str) -> Path:
+    dataset_map = _dataset_dir_map()
+    dataset_key = str(dataset).strip().lower()
+
+    try:
+        return dataset_map[dataset_key]
+    except KeyError as exc:
+        available = ", ".join(available_input_datasets())
+        raise ValueError(
+            f"Unsupported dataset={dataset!r}. Available datasets: {available}."
+        ) from exc
+
+
+def _finalize_timeseries(df: pd.DataFrame, csv_path: Path) -> pd.DataFrame:
+    if "Timestamp_UTC" not in df.columns:
+        raise ValueError(f"Missing 'Timestamp_UTC' column in {csv_path}.")
+
+    df = df.copy()
+    df.index = pd.to_datetime(df["Timestamp_UTC"], format="ISO8601")
+    return df.drop(columns=["Timestamp_UTC"])
+
+
+def _household_csv_path(dataset_dir: Path, household_id: int) -> Path:
+    csv_matches = sorted(dataset_dir.glob(f"* {int(household_id)}.csv"))
+    if not csv_matches:
+        raise FileNotFoundError(
+            f"Household id {household_id} not found in dataset {dataset_dir.name!r}."
+        )
+    return csv_matches[0]
+
+
+def household_column_names(household_id: int, *, dataset: str = "Ausgrid") -> List[str]:
+    """Return the original column names for one household dataset file."""
+    dataset_source = _resolve_dataset_source(dataset)
+
+    if not dataset_source.is_dir():
+        csv_path = dataset_source
+    elif dataset_source.name.lower() == "smp":
+        raise ValueError(
+            "Dataset 'SMP' is price-only. Use load_smp_data(country_id=...) instead."
+        )
     else:
-        raise ValueError(f"Unsupported dataset={dataset!r}. Use 'ausgrid' or 'greek'.")
+        csv_path = _household_csv_path(dataset_source, household_id)
+
+    return pd.read_csv(csv_path, nrows=0).columns.tolist()
+
+
+def load_smp_data(country_id: str) -> pd.DataFrame:
+    """Load SMP market prices for a given country file under Input data/SMP."""
+    smp_dir = INPUT_DATA_DIR / "SMP"
+    csv_path = smp_dir / f"{str(country_id).strip()}.csv"
+
+    if not csv_path.exists():
+        available = sorted(path.stem for path in smp_dir.glob("*.csv")) if smp_dir.exists() else []
+        raise FileNotFoundError(
+            f"SMP country {country_id!r} not found under {smp_dir}. "
+            f"Available countries: {', '.join(available)}."
+        )
+
+    df = pd.read_csv(csv_path)
+    return _finalize_timeseries(df, csv_path)
+
+
+def load_household_data(
+    household_id: int,
+    *,
+    dataset: str = "Ausgrid",
+    print_column_names: bool = False,
+) -> pd.DataFrame:
+    """Load one household profile and optionally print its original column names."""
+    dataset_source = _resolve_dataset_source(dataset)
+
+    if dataset_source.is_dir():
+        if dataset_source.name.lower() == "smp":
+            raise ValueError(
+                "Dataset 'SMP' is price-only. Use load_smp_data(country_id=...) instead."
+            )
+        csv_path = _household_csv_path(dataset_source, household_id)
+    else:
+        csv_path = dataset_source
 
     if not csv_path.exists():
         raise FileNotFoundError(
@@ -45,14 +129,12 @@ def load_household_data(household_id: int, *, dataset: str = "ausgrid") -> pd.Da
         )
 
     df = pd.read_csv(csv_path)
-    if "Timestamp_UTC" not in df.columns:
-        raise ValueError(f"Missing 'Timestamp_UTC' column in {csv_path}.")
-
-    df.index = pd.to_datetime(df["Timestamp_UTC"], format="ISO8601")
-    return df.drop(columns=["Timestamp_UTC"])
+    if print_column_names:
+        print(df.columns.tolist())
+    return _finalize_timeseries(df, csv_path)
 
 
-def load_multiple_households(household_ids: Iterable[int], *, dataset: str = "ausgrid") -> dict:
+def load_multiple_households(household_ids: Iterable[int], *, dataset: str = "Ausgrid") -> dict:
     """Load multiple household datasets keyed by household id."""
     result = {}
     for hid in household_ids:
@@ -60,14 +142,15 @@ def load_multiple_households(household_ids: Iterable[int], *, dataset: str = "au
     return result
 
 
-def available_ausgrid_households(limit: Optional[int] = None) -> List[int]:
-    """List discovered Ausgrid household ids from filenames."""
-    if not AUSGRID_DIR.exists():
+def available_households(dataset: str = "Ausgrid", limit: Optional[int] = None) -> List[int]:
+    """List discovered household ids from filenames in a household dataset folder."""
+    dataset_source = _resolve_dataset_source(dataset)
+    if not dataset_source.is_dir() or dataset_source.name.lower() == "smp":
         return []
 
     ids = []
-    for csv_path in AUSGRID_DIR.glob("Ausgrid *.csv"):
-        suffix = csv_path.stem.replace("Ausgrid ", "", 1)
+    for csv_path in dataset_source.glob("*.csv"):
+        suffix = csv_path.stem.rsplit(" ", 1)[-1]
         if suffix.isdigit():
             ids.append(int(suffix))
 

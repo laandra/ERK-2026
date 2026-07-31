@@ -88,6 +88,9 @@ class HouseholdEnvironment(gym.Env):
         self,
         dataset,
         dataset_norm=None,
+        price_column="SMP",
+        generation_column="Energy_Generation",
+        consumption_column="Energy_Consumption",
         observation_mode="sliding_window",
         reset_mode="deterministic",
         episode_length=None,
@@ -117,7 +120,11 @@ class HouseholdEnvironment(gym.Env):
         self.dataset = dataset
         self.dataset_norm = dataset_norm if dataset_norm is not None else dataset
 
-        required_cols = ["SMP", "Energy_Generation", "Energy_Consumption"]
+        self.price_column = str(price_column)
+        self.generation_column = str(generation_column)
+        self.consumption_column = str(consumption_column)
+        required_cols = [self.price_column, self.generation_column, self.consumption_column]
+
         for col in required_cols:
             if col not in self.dataset.columns:
                 raise ValueError(f"Missing required column in dataset: {col}")
@@ -200,9 +207,9 @@ class HouseholdEnvironment(gym.Env):
         if self.data_length == 0:
             raise ValueError("Dataset is empty. Please provide a valid dataset.")
 
-        self.arr_SMP = self.dataset["SMP"].to_numpy(dtype=np.float64)
-        self.arr_Gen = self.dataset["Energy_Generation"].to_numpy(dtype=np.float64)
-        self.arr_Con = self.dataset["Energy_Consumption"].to_numpy(dtype=np.float64)
+        self.arr_SMP = self.dataset[self.price_column].to_numpy(dtype=np.float64)
+        self.arr_Gen = self.dataset[self.generation_column].to_numpy(dtype=np.float64)
+        self.arr_Con = self.dataset[self.consumption_column].to_numpy(dtype=np.float64)
 
         # --- PV presence + pricing_scheme validation -------------------------------
         self.pricing_warnings = []
@@ -211,7 +218,7 @@ class HouseholdEnvironment(gym.Env):
         if self.pricing_scheme == "si_dobava" and self._has_pv:
             msg = (
                 "pricing_scheme='si_dobava' assumes no on-site production, but "
-                "Energy_Generation has nonzero values. si_dobava has no export-netting "
+                f"{self.generation_column} has nonzero values. si_dobava has no export-netting "
                 "logic and would mis-tax exported energy (full retail rate + network "
                 "charges + VAT applied to exported kWh). Use pricing_scheme="
                 "'si_samooskrba', or set pricing_validate_pv=False to bypass this check."
@@ -221,7 +228,7 @@ class HouseholdEnvironment(gym.Env):
             self.pricing_warnings.append(msg)
         elif self.pricing_scheme == "si_samooskrba" and not self._has_pv:
             self.pricing_warnings.append(
-                "pricing_scheme='si_samooskrba' selected but Energy_Generation is "
+                f"pricing_scheme='si_samooskrba' selected but {self.generation_column} is "
                 "always zero; self-supply netting has no effect (numerically "
                 "equivalent to si_dobava)."
             )
@@ -245,9 +252,9 @@ class HouseholdEnvironment(gym.Env):
         self._peak_kw = {b: 0.0 for b in range(1, 6)}
         self._peak_window_id = 0
 
-        self.arr_SMP_norm = self.dataset_norm["SMP"].to_numpy(dtype=np.float64)
-        self.arr_Gen_norm = self.dataset_norm["Energy_Generation"].to_numpy(dtype=np.float64)
-        self.arr_Con_norm = self.dataset_norm["Energy_Consumption"].to_numpy(dtype=np.float64)
+        self.arr_SMP_norm = self.dataset_norm[self.price_column].to_numpy(dtype=np.float64)
+        self.arr_Gen_norm = self.dataset_norm[self.generation_column].to_numpy(dtype=np.float64)
+        self.arr_Con_norm = self.dataset_norm[self.consumption_column].to_numpy(dtype=np.float64)
 
         if hasattr(self.dataset.index, "month"):
             self.arr_Month = self.dataset.index.month.to_numpy()
@@ -262,7 +269,7 @@ class HouseholdEnvironment(gym.Env):
 
         window_size = max(1, int(median_window_days * self.korakov_na_dan))
         self.arr_MedianPrice = (
-            self.dataset["SMP"].rolling(window=window_size, min_periods=1).median().to_numpy(dtype=np.float64)
+            self.dataset[self.price_column].rolling(window=window_size, min_periods=1).median().to_numpy(dtype=np.float64)
         )
         epsilon = 1e-8
         self.arr_RelativePrice = (

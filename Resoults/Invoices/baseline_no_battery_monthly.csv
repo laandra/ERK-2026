@@ -1,433 +1,143 @@
 obdobje,produkt,kolicina,enota,cena_eur_em,znesek_eur_brez_ddv,kategorija
-30.06.2012–30.06.2012,BISOL Energija – DINAMIČNA Samooskrba,,,,,naslov
-30.06.2012–30.06.2012,Električna energija – blok 3,2.46,kWh,0.040772,0.1003,energija
-30.06.2012–30.06.2012,Električna energija – blok 4,3.348,kWh,0.043638,0.1461,energija
-30.06.2012–30.06.2012,Električna energija – blok 5,2.107,kWh,0.038259,0.08061,energija
-30.06.2012–30.06.2012,Skupaj električna energija,,,,0.32701,skupaj
-30.06.2012–30.06.2012,Dogovorjena moč za časovni blok 2,3.0,kW,1.0923,3.2769,omreznina
-30.06.2012–30.06.2012,Dogovorjena moč za časovni blok 3,3.0,kW,0.289033,0.8671,omreznina
-30.06.2012–30.06.2012,Dogovorjena moč za časovni blok 4,3.0,kW,0.024367,0.0731,omreznina
-30.06.2012–30.06.2012,Dogovorjena moč za časovni blok 5,3.0,kW,0.002433,0.0073,omreznina
-30.06.2012–30.06.2012,Prevzeta EE za časovni blok 3,2.46,kWh,0.01717,0.04224,omreznina
-30.06.2012–30.06.2012,Prevzeta EE za časovni blok 4,3.348,kWh,0.01805,0.06043,omreznina
-30.06.2012–30.06.2012,Prevzeta EE za časovni blok 5,2.107,kWh,0.01299,0.02737,omreznina
-30.06.2012–30.06.2012,Skupaj omrežnina za elektroenergetski sistem,,,,4.35444,skupaj
-30.06.2012–30.06.2012,Prispevek za delovanje operaterja trga,7.915,kWh,0.00013,0.00103,prispevki
-30.06.2012–30.06.2012,Prispevek za energetsko učinkovitost,7.915,kWh,0.0008,0.00633,prispevki
-30.06.2012–30.06.2012,Prispevek za SPTE in OVE,3.0,kW,0.38781,1.16343,prispevki
-30.06.2012–30.06.2012,Skupaj prispevki in ostale dajatve,,,,1.17079,skupaj
-30.06.2012–30.06.2012,Trošarina,7.915,kWh,0.00153,0.01211,trosarina
-30.06.2012–30.06.2012,Skupaj trošarina,,,,0.01211,skupaj
-30.06.2012–30.06.2012,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
-30.06.2012–30.06.2012,Pavšalni strošek poslovanja,1.0,kos,1.63,1.63,poslovanje
-30.06.2012–30.06.2012,Obračun storitev pogodbenega računa,,,,1.63,skupaj
-30.06.2012–30.06.2012,Skupaj brez DDV,,,,7.49434,skupaj
-30.06.2012–30.06.2012,DDV 22%,,,,1.64875,ddv
-30.06.2012–30.06.2012,Skupaj z DDV,,,,9.1431,skupaj
-30.06.2012–30.06.2012,ZA PLAČILO,,,,9.1431,za_placilo
-30.06.2012–30.06.2012,Paket 'DINAMIČNA Samooskrba' predpostavlja 15-min meritve; brez njih se uporabi nadomestna cena (ET).,,,,,opozorilo
-30.06.2012–30.06.2012,"Paket 'DINAMIČNA Samooskrba' velja šele od 2026-01-01, obračunavaš pa 2012-06-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
-01.07.2012–31.07.2012,BISOL Energija – DINAMIČNA Samooskrba,,,,,naslov
-01.07.2012–31.07.2012,Električna energija – blok 2,206.876,kWh,0.058008,12.00037,energija
-01.07.2012–31.07.2012,Električna energija – blok 3,191.382,kWh,0.06489,12.41886,energija
-01.07.2012–31.07.2012,Električna energija – blok 4,159.019,kWh,0.057769,9.1863,energija
-01.07.2012–31.07.2012,Električna energija – blok 5,46.122,kWh,0.052359,2.4149,energija
-01.07.2012–31.07.2012,Skupaj električna energija,,,,36.02043,skupaj
-01.07.2012–31.07.2012,Dogovorjena moč za časovni blok 2,3.0,kW,1.0923,3.2769,omreznina
-01.07.2012–31.07.2012,Dogovorjena moč za časovni blok 3,3.0,kW,0.289033,0.8671,omreznina
-01.07.2012–31.07.2012,Dogovorjena moč za časovni blok 4,3.0,kW,0.024367,0.0731,omreznina
-01.07.2012–31.07.2012,Dogovorjena moč za časovni blok 5,3.0,kW,0.002433,0.0073,omreznina
-01.07.2012–31.07.2012,Prevzeta EE za časovni blok 2,206.876,kWh,0.01998,4.13338,omreznina
-01.07.2012–31.07.2012,Prevzeta EE za časovni blok 3,191.382,kWh,0.01717,3.28603,omreznina
-01.07.2012–31.07.2012,Prevzeta EE za časovni blok 4,159.019,kWh,0.01805,2.87029,omreznina
-01.07.2012–31.07.2012,Prevzeta EE za časovni blok 5,46.122,kWh,0.01299,0.59912,omreznina
-01.07.2012–31.07.2012,Presežna moč,,,,4.46008,omreznina
-01.07.2012–31.07.2012,Skupaj omrežnina za elektroenergetski sistem,,,,19.57331,skupaj
-01.07.2012–31.07.2012,Prispevek za delovanje operaterja trga,603.399,kWh,0.00013,0.07844,prispevki
-01.07.2012–31.07.2012,Prispevek za energetsko učinkovitost,603.399,kWh,0.0008,0.48272,prispevki
-01.07.2012–31.07.2012,Prispevek za SPTE in OVE,3.0,kW,0.38781,1.16343,prispevki
-01.07.2012–31.07.2012,Skupaj prispevki in ostale dajatve,,,,1.72459,skupaj
-01.07.2012–31.07.2012,Trošarina,603.399,kWh,0.00153,0.9232,trosarina
-01.07.2012–31.07.2012,Skupaj trošarina,,,,0.9232,skupaj
-01.07.2012–31.07.2012,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
-01.07.2012–31.07.2012,Pavšalni strošek poslovanja,1.0,kos,1.63,1.63,poslovanje
-01.07.2012–31.07.2012,Obračun storitev pogodbenega računa,,,,1.63,skupaj
-01.07.2012–31.07.2012,Skupaj brez DDV,,,,59.87152,skupaj
-01.07.2012–31.07.2012,DDV 22%,,,,13.17173,ddv
-01.07.2012–31.07.2012,Skupaj z DDV,,,,73.04326,skupaj
-01.07.2012–31.07.2012,Dobropis za oddano energijo,,,,-0.23342,dobropis
-01.07.2012–31.07.2012,ZA PLAČILO,,,,72.80983,za_placilo
-01.07.2012–31.07.2012,Paket 'DINAMIČNA Samooskrba' predpostavlja 15-min meritve; brez njih se uporabi nadomestna cena (ET).,,,,,opozorilo
-01.07.2012–31.07.2012,"Paket 'DINAMIČNA Samooskrba' velja šele od 2026-01-01, obračunavaš pa 2012-07-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
-01.08.2012–31.08.2012,BISOL Energija – DINAMIČNA Samooskrba,,,,,naslov
-01.08.2012–31.08.2012,Električna energija – blok 2,170.209,kWh,0.051722,8.80357,energija
-01.08.2012–31.08.2012,Električna energija – blok 3,168.517,kWh,0.052264,8.80745,energija
-01.08.2012–31.08.2012,Električna energija – blok 4,133.562,kWh,0.050533,6.74924,energija
-01.08.2012–31.08.2012,Električna energija – blok 5,40.081,kWh,0.05007,2.00684,energija
-01.08.2012–31.08.2012,Skupaj električna energija,,,,26.36711,skupaj
-01.08.2012–31.08.2012,Dogovorjena moč za časovni blok 2,3.0,kW,1.0923,3.2769,omreznina
-01.08.2012–31.08.2012,Dogovorjena moč za časovni blok 3,3.0,kW,0.289033,0.8671,omreznina
-01.08.2012–31.08.2012,Dogovorjena moč za časovni blok 4,3.0,kW,0.024367,0.0731,omreznina
-01.08.2012–31.08.2012,Dogovorjena moč za časovni blok 5,3.0,kW,0.002433,0.0073,omreznina
-01.08.2012–31.08.2012,Prevzeta EE za časovni blok 2,170.209,kWh,0.01998,3.40078,omreznina
-01.08.2012–31.08.2012,Prevzeta EE za časovni blok 3,168.517,kWh,0.01717,2.89344,omreznina
-01.08.2012–31.08.2012,Prevzeta EE za časovni blok 4,133.562,kWh,0.01805,2.41079,omreznina
-01.08.2012–31.08.2012,Prevzeta EE za časovni blok 5,40.081,kWh,0.01299,0.52065,omreznina
-01.08.2012–31.08.2012,Presežna moč,,,,2.85274,omreznina
-01.08.2012–31.08.2012,Skupaj omrežnina za elektroenergetski sistem,,,,16.3028,skupaj
-01.08.2012–31.08.2012,Prispevek za delovanje operaterja trga,512.369,kWh,0.00013,0.06661,prispevki
-01.08.2012–31.08.2012,Prispevek za energetsko učinkovitost,512.369,kWh,0.0008,0.4099,prispevki
-01.08.2012–31.08.2012,Prispevek za SPTE in OVE,3.0,kW,0.38781,1.16343,prispevki
-01.08.2012–31.08.2012,Skupaj prispevki in ostale dajatve,,,,1.63993,skupaj
-01.08.2012–31.08.2012,Trošarina,512.369,kWh,0.00153,0.78392,trosarina
-01.08.2012–31.08.2012,Skupaj trošarina,,,,0.78392,skupaj
-01.08.2012–31.08.2012,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
-01.08.2012–31.08.2012,Pavšalni strošek poslovanja,1.0,kos,1.63,1.63,poslovanje
-01.08.2012–31.08.2012,Obračun storitev pogodbenega računa,,,,1.63,skupaj
-01.08.2012–31.08.2012,Skupaj brez DDV,,,,46.72375,skupaj
-01.08.2012–31.08.2012,DDV 22%,,,,10.27923,ddv
-01.08.2012–31.08.2012,Skupaj z DDV,,,,57.00298,skupaj
-01.08.2012–31.08.2012,Dobropis za oddano energijo,,,,-1.60218,dobropis
-01.08.2012–31.08.2012,ZA PLAČILO,,,,55.40079,za_placilo
-01.08.2012–31.08.2012,Paket 'DINAMIČNA Samooskrba' predpostavlja 15-min meritve; brez njih se uporabi nadomestna cena (ET).,,,,,opozorilo
-01.08.2012–31.08.2012,"Paket 'DINAMIČNA Samooskrba' velja šele od 2026-01-01, obračunavaš pa 2012-08-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
-01.09.2012–30.09.2012,BISOL Energija – DINAMIČNA Samooskrba,,,,,naslov
-01.09.2012–30.09.2012,Električna energija – blok 2,53.086,kWh,0.046636,2.47575,energija
-01.09.2012–30.09.2012,Električna energija – blok 3,73.338,kWh,0.047154,3.45815,energija
-01.09.2012–30.09.2012,Električna energija – blok 4,82.247,kWh,0.047182,3.8806,energija
-01.09.2012–30.09.2012,Električna energija – blok 5,32.507,kWh,0.047352,1.53927,energija
-01.09.2012–30.09.2012,Skupaj električna energija,,,,11.35376,skupaj
-01.09.2012–30.09.2012,Dogovorjena moč za časovni blok 2,3.0,kW,1.0923,3.2769,omreznina
-01.09.2012–30.09.2012,Dogovorjena moč za časovni blok 3,3.0,kW,0.289033,0.8671,omreznina
-01.09.2012–30.09.2012,Dogovorjena moč za časovni blok 4,3.0,kW,0.024367,0.0731,omreznina
-01.09.2012–30.09.2012,Dogovorjena moč za časovni blok 5,3.0,kW,0.002433,0.0073,omreznina
-01.09.2012–30.09.2012,Prevzeta EE za časovni blok 2,53.086,kWh,0.01998,1.06066,omreznina
-01.09.2012–30.09.2012,Prevzeta EE za časovni blok 3,73.338,kWh,0.01717,1.25921,omreznina
-01.09.2012–30.09.2012,Prevzeta EE za časovni blok 4,82.247,kWh,0.01805,1.48456,omreznina
-01.09.2012–30.09.2012,Prevzeta EE za časovni blok 5,32.507,kWh,0.01299,0.42227,omreznina
-01.09.2012–30.09.2012,Presežna moč,,,,1.0009,omreznina
-01.09.2012–30.09.2012,Skupaj omrežnina za elektroenergetski sistem,,,,9.452,skupaj
-01.09.2012–30.09.2012,Prispevek za delovanje operaterja trga,241.178,kWh,0.00013,0.03135,prispevki
-01.09.2012–30.09.2012,Prispevek za energetsko učinkovitost,241.178,kWh,0.0008,0.19294,prispevki
-01.09.2012–30.09.2012,Prispevek za SPTE in OVE,3.0,kW,0.38781,1.16343,prispevki
-01.09.2012–30.09.2012,Skupaj prispevki in ostale dajatve,,,,1.38773,skupaj
-01.09.2012–30.09.2012,Trošarina,241.178,kWh,0.00153,0.369,trosarina
-01.09.2012–30.09.2012,Skupaj trošarina,,,,0.369,skupaj
-01.09.2012–30.09.2012,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
-01.09.2012–30.09.2012,Pavšalni strošek poslovanja,1.0,kos,1.63,1.63,poslovanje
-01.09.2012–30.09.2012,Obračun storitev pogodbenega računa,,,,1.63,skupaj
-01.09.2012–30.09.2012,Skupaj brez DDV,,,,24.19248,skupaj
-01.09.2012–30.09.2012,DDV 22%,,,,5.32234,ddv
-01.09.2012–30.09.2012,Skupaj z DDV,,,,29.51482,skupaj
-01.09.2012–30.09.2012,Dobropis za oddano energijo,,,,-2.87065,dobropis
-01.09.2012–30.09.2012,ZA PLAČILO,,,,26.64417,za_placilo
-01.09.2012–30.09.2012,Paket 'DINAMIČNA Samooskrba' predpostavlja 15-min meritve; brez njih se uporabi nadomestna cena (ET).,,,,,opozorilo
-01.09.2012–30.09.2012,"Paket 'DINAMIČNA Samooskrba' velja šele od 2026-01-01, obračunavaš pa 2012-09-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
-01.10.2012–31.10.2012,BISOL Energija – DINAMIČNA Samooskrba,,,,,naslov
-01.10.2012–31.10.2012,Električna energija – blok 2,35.263,kWh,0.051518,1.81668,energija
-01.10.2012–31.10.2012,Električna energija – blok 3,60.584,kWh,0.049076,2.97323,energija
-01.10.2012–31.10.2012,Električna energija – blok 4,71.733,kWh,0.047155,3.38254,energija
-01.10.2012–31.10.2012,Električna energija – blok 5,26.251,kWh,0.047022,1.23437,energija
-01.10.2012–31.10.2012,Skupaj električna energija,,,,9.40682,skupaj
-01.10.2012–31.10.2012,Dogovorjena moč za časovni blok 2,3.0,kW,1.0923,3.2769,omreznina
-01.10.2012–31.10.2012,Dogovorjena moč za časovni blok 3,3.0,kW,0.289033,0.8671,omreznina
-01.10.2012–31.10.2012,Dogovorjena moč za časovni blok 4,3.0,kW,0.024367,0.0731,omreznina
-01.10.2012–31.10.2012,Dogovorjena moč za časovni blok 5,3.0,kW,0.002433,0.0073,omreznina
-01.10.2012–31.10.2012,Prevzeta EE za časovni blok 2,35.263,kWh,0.01998,0.70455,omreznina
-01.10.2012–31.10.2012,Prevzeta EE za časovni blok 3,60.584,kWh,0.01717,1.04023,omreznina
-01.10.2012–31.10.2012,Prevzeta EE za časovni blok 4,71.733,kWh,0.01805,1.29478,omreznina
-01.10.2012–31.10.2012,Prevzeta EE za časovni blok 5,26.251,kWh,0.01299,0.341,omreznina
-01.10.2012–31.10.2012,Presežna moč,,,,0.09405,omreznina
-01.10.2012–31.10.2012,Skupaj omrežnina za elektroenergetski sistem,,,,7.69901,skupaj
-01.10.2012–31.10.2012,Prispevek za delovanje operaterja trga,193.831,kWh,0.00013,0.0252,prispevki
-01.10.2012–31.10.2012,Prispevek za energetsko učinkovitost,193.831,kWh,0.0008,0.15506,prispevki
-01.10.2012–31.10.2012,Prispevek za SPTE in OVE,3.0,kW,0.38781,1.16343,prispevki
-01.10.2012–31.10.2012,Skupaj prispevki in ostale dajatve,,,,1.34369,skupaj
-01.10.2012–31.10.2012,Trošarina,193.831,kWh,0.00153,0.29656,trosarina
-01.10.2012–31.10.2012,Skupaj trošarina,,,,0.29656,skupaj
-01.10.2012–31.10.2012,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
-01.10.2012–31.10.2012,Pavšalni strošek poslovanja,1.0,kos,1.63,1.63,poslovanje
-01.10.2012–31.10.2012,Obračun storitev pogodbenega računa,,,,1.63,skupaj
-01.10.2012–31.10.2012,Skupaj brez DDV,,,,20.37607,skupaj
-01.10.2012–31.10.2012,DDV 22%,,,,4.48274,ddv
-01.10.2012–31.10.2012,Skupaj z DDV,,,,24.85881,skupaj
-01.10.2012–31.10.2012,Dobropis za oddano energijo,,,,-3.54282,dobropis
-01.10.2012–31.10.2012,ZA PLAČILO,,,,21.31599,za_placilo
-01.10.2012–31.10.2012,Paket 'DINAMIČNA Samooskrba' predpostavlja 15-min meritve; brez njih se uporabi nadomestna cena (ET).,,,,,opozorilo
-01.10.2012–31.10.2012,"Paket 'DINAMIČNA Samooskrba' velja šele od 2026-01-01, obračunavaš pa 2012-10-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
-01.11.2012–30.11.2012,BISOL Energija – DINAMIČNA Samooskrba,,,,,naslov
-01.11.2012–30.11.2012,Električna energija – blok 1,48.135,kWh,0.055168,2.65551,energija
-01.11.2012–30.11.2012,Električna energija – blok 2,61.33,kWh,0.047657,2.92278,energija
-01.11.2012–30.11.2012,Električna energija – blok 3,64.047,kWh,0.045341,2.90397,energija
-01.11.2012–30.11.2012,Električna energija – blok 4,19.116,kWh,0.045259,0.86516,energija
-01.11.2012–30.11.2012,Skupaj električna energija,,,,9.34742,skupaj
-01.11.2012–30.11.2012,Dogovorjena moč za časovni blok 1,3.0,kW,2.6761,8.0283,omreznina
-01.11.2012–30.11.2012,Dogovorjena moč za časovni blok 2,3.0,kW,1.0923,3.2769,omreznina
-01.11.2012–30.11.2012,Dogovorjena moč za časovni blok 3,3.0,kW,0.289033,0.8671,omreznina
-01.11.2012–30.11.2012,Dogovorjena moč za časovni blok 4,3.0,kW,0.024367,0.0731,omreznina
-01.11.2012–30.11.2012,Prevzeta EE za časovni blok 1,48.135,kWh,0.02217,1.06715,omreznina
-01.11.2012–30.11.2012,Prevzeta EE za časovni blok 2,61.33,kWh,0.01998,1.22537,omreznina
-01.11.2012–30.11.2012,Prevzeta EE za časovni blok 3,64.047,kWh,0.01717,1.09969,omreznina
-01.11.2012–30.11.2012,Prevzeta EE za časovni blok 4,19.116,kWh,0.01805,0.34504,omreznina
-01.11.2012–30.11.2012,Skupaj omrežnina za elektroenergetski sistem,,,,15.98266,skupaj
-01.11.2012–30.11.2012,Prispevek za delovanje operaterja trga,192.628,kWh,0.00013,0.02504,prispevki
-01.11.2012–30.11.2012,Prispevek za energetsko učinkovitost,192.628,kWh,0.0008,0.1541,prispevki
-01.11.2012–30.11.2012,Prispevek za SPTE in OVE,3.0,kW,0.38781,1.16343,prispevki
-01.11.2012–30.11.2012,Skupaj prispevki in ostale dajatve,,,,1.34257,skupaj
-01.11.2012–30.11.2012,Trošarina,192.628,kWh,0.00153,0.29472,trosarina
-01.11.2012–30.11.2012,Skupaj trošarina,,,,0.29472,skupaj
-01.11.2012–30.11.2012,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
-01.11.2012–30.11.2012,Pavšalni strošek poslovanja,1.0,kos,1.63,1.63,poslovanje
-01.11.2012–30.11.2012,Obračun storitev pogodbenega računa,,,,1.63,skupaj
-01.11.2012–30.11.2012,Skupaj brez DDV,,,,28.59734,skupaj
-01.11.2012–30.11.2012,DDV 22%,,,,6.29142,ddv
-01.11.2012–30.11.2012,Skupaj z DDV,,,,34.88876,skupaj
-01.11.2012–30.11.2012,Dobropis za oddano energijo,,,,-3.23164,dobropis
-01.11.2012–30.11.2012,ZA PLAČILO,,,,31.65711,za_placilo
-01.11.2012–30.11.2012,Paket 'DINAMIČNA Samooskrba' predpostavlja 15-min meritve; brez njih se uporabi nadomestna cena (ET).,,,,,opozorilo
-01.11.2012–30.11.2012,"Paket 'DINAMIČNA Samooskrba' velja šele od 2026-01-01, obračunavaš pa 2012-11-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
-01.12.2012–31.12.2012,BISOL Energija – DINAMIČNA Samooskrba,,,,,naslov
-01.12.2012–31.12.2012,Električna energija – blok 1,41.985,kWh,0.044098,1.85145,energija
-01.12.2012–31.12.2012,Električna energija – blok 2,64.282,kWh,0.043884,2.82097,energija
-01.12.2012–31.12.2012,Električna energija – blok 3,62.665,kWh,0.043701,2.73851,energija
-01.12.2012–31.12.2012,Električna energija – blok 4,27.932,kWh,0.04331,1.20972,energija
-01.12.2012–31.12.2012,Skupaj električna energija,,,,8.62065,skupaj
-01.12.2012–31.12.2012,Dogovorjena moč za časovni blok 1,3.0,kW,2.6761,8.0283,omreznina
-01.12.2012–31.12.2012,Dogovorjena moč za časovni blok 2,3.0,kW,1.0923,3.2769,omreznina
-01.12.2012–31.12.2012,Dogovorjena moč za časovni blok 3,3.0,kW,0.289033,0.8671,omreznina
-01.12.2012–31.12.2012,Dogovorjena moč za časovni blok 4,3.0,kW,0.024367,0.0731,omreznina
-01.12.2012–31.12.2012,Prevzeta EE za časovni blok 1,41.985,kWh,0.02217,0.93081,omreznina
-01.12.2012–31.12.2012,Prevzeta EE za časovni blok 2,64.282,kWh,0.01998,1.28435,omreznina
-01.12.2012–31.12.2012,Prevzeta EE za časovni blok 3,62.665,kWh,0.01717,1.07596,omreznina
-01.12.2012–31.12.2012,Prevzeta EE za časovni blok 4,27.932,kWh,0.01805,0.50417,omreznina
-01.12.2012–31.12.2012,Presežna moč,,,,0.18545,omreznina
-01.12.2012–31.12.2012,Skupaj omrežnina za elektroenergetski sistem,,,,16.22615,skupaj
-01.12.2012–31.12.2012,Prispevek za delovanje operaterja trga,196.864,kWh,0.00013,0.02559,prispevki
-01.12.2012–31.12.2012,Prispevek za energetsko učinkovitost,196.864,kWh,0.0008,0.15749,prispevki
-01.12.2012–31.12.2012,Prispevek za SPTE in OVE,3.0,kW,0.38781,1.16343,prispevki
-01.12.2012–31.12.2012,Skupaj prispevki in ostale dajatve,,,,1.34651,skupaj
-01.12.2012–31.12.2012,Trošarina,196.864,kWh,0.00153,0.3012,trosarina
-01.12.2012–31.12.2012,Skupaj trošarina,,,,0.3012,skupaj
-01.12.2012–31.12.2012,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
-01.12.2012–31.12.2012,Pavšalni strošek poslovanja,1.0,kos,1.63,1.63,poslovanje
-01.12.2012–31.12.2012,Obračun storitev pogodbenega računa,,,,1.63,skupaj
-01.12.2012–31.12.2012,Skupaj brez DDV,,,,28.12448,skupaj
-01.12.2012–31.12.2012,DDV 22%,,,,6.18739,ddv
-01.12.2012–31.12.2012,Skupaj z DDV,,,,34.31187,skupaj
-01.12.2012–31.12.2012,Dobropis za oddano energijo,,,,-1.99506,dobropis
-01.12.2012–31.12.2012,ZA PLAČILO,,,,32.31681,za_placilo
-01.12.2012–31.12.2012,Paket 'DINAMIČNA Samooskrba' predpostavlja 15-min meritve; brez njih se uporabi nadomestna cena (ET).,,,,,opozorilo
-01.12.2012–31.12.2012,"Paket 'DINAMIČNA Samooskrba' velja šele od 2026-01-01, obračunavaš pa 2012-12-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
-01.01.2013–31.01.2013,BISOL Energija – DINAMIČNA Samooskrba,,,,,naslov
-01.01.2013–31.01.2013,Električna energija – blok 1,56.202,kWh,0.05062,2.84495,energija
-01.01.2013–31.01.2013,Električna energija – blok 2,75.329,kWh,0.044498,3.35197,energija
-01.01.2013–31.01.2013,Električna energija – blok 3,82.204,kWh,0.043391,3.56694,energija
-01.01.2013–31.01.2013,Električna energija – blok 4,24.751,kWh,0.043124,1.06736,energija
-01.01.2013–31.01.2013,Skupaj električna energija,,,,10.83121,skupaj
-01.01.2013–31.01.2013,Dogovorjena moč za časovni blok 1,3.0,kW,2.6761,8.0283,omreznina
-01.01.2013–31.01.2013,Dogovorjena moč za časovni blok 2,3.0,kW,1.0923,3.2769,omreznina
-01.01.2013–31.01.2013,Dogovorjena moč za časovni blok 3,3.0,kW,0.289033,0.8671,omreznina
-01.01.2013–31.01.2013,Dogovorjena moč za časovni blok 4,3.0,kW,0.024367,0.0731,omreznina
-01.01.2013–31.01.2013,Prevzeta EE za časovni blok 1,56.202,kWh,0.02217,1.246,omreznina
-01.01.2013–31.01.2013,Prevzeta EE za časovni blok 2,75.329,kWh,0.01998,1.50507,omreznina
-01.01.2013–31.01.2013,Prevzeta EE za časovni blok 3,82.204,kWh,0.01717,1.41144,omreznina
-01.01.2013–31.01.2013,Prevzeta EE za časovni blok 4,24.751,kWh,0.01805,0.44676,omreznina
-01.01.2013–31.01.2013,Presežna moč,,,,0.04673,omreznina
-01.01.2013–31.01.2013,Skupaj omrežnina za elektroenergetski sistem,,,,16.9014,skupaj
-01.01.2013–31.01.2013,Prispevek za delovanje operaterja trga,238.486,kWh,0.00013,0.031,prispevki
-01.01.2013–31.01.2013,Prispevek za energetsko učinkovitost,238.486,kWh,0.0008,0.19079,prispevki
-01.01.2013–31.01.2013,Prispevek za SPTE in OVE,3.0,kW,0.38781,1.16343,prispevki
-01.01.2013–31.01.2013,Skupaj prispevki in ostale dajatve,,,,1.38522,skupaj
-01.01.2013–31.01.2013,Trošarina,238.486,kWh,0.00153,0.36488,trosarina
-01.01.2013–31.01.2013,Skupaj trošarina,,,,0.36488,skupaj
-01.01.2013–31.01.2013,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
-01.01.2013–31.01.2013,Pavšalni strošek poslovanja,1.0,kos,1.63,1.63,poslovanje
-01.01.2013–31.01.2013,Obračun storitev pogodbenega računa,,,,1.63,skupaj
-01.01.2013–31.01.2013,Skupaj brez DDV,,,,31.11269,skupaj
-01.01.2013–31.01.2013,DDV 22%,,,,6.84479,ddv
-01.01.2013–31.01.2013,Skupaj z DDV,,,,37.95748,skupaj
-01.01.2013–31.01.2013,Dobropis za oddano energijo,,,,-1.8249,dobropis
-01.01.2013–31.01.2013,ZA PLAČILO,,,,36.13258,za_placilo
-01.01.2013–31.01.2013,Paket 'DINAMIČNA Samooskrba' predpostavlja 15-min meritve; brez njih se uporabi nadomestna cena (ET).,,,,,opozorilo
-01.01.2013–31.01.2013,"Paket 'DINAMIČNA Samooskrba' velja šele od 2026-01-01, obračunavaš pa 2013-01-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
-01.02.2013–28.02.2013,BISOL Energija – DINAMIČNA Samooskrba,,,,,naslov
-01.02.2013–28.02.2013,Električna energija – blok 1,39.576,kWh,0.046451,1.83834,energija
-01.02.2013–28.02.2013,Električna energija – blok 2,49.986,kWh,0.044878,2.24326,energija
-01.02.2013–28.02.2013,Električna energija – blok 3,52.194,kWh,0.044146,2.30414,energija
-01.02.2013–28.02.2013,Električna energija – blok 4,20.054,kWh,0.043938,0.88114,energija
-01.02.2013–28.02.2013,Skupaj električna energija,,,,7.26687,skupaj
-01.02.2013–28.02.2013,Dogovorjena moč za časovni blok 1,3.0,kW,2.6761,8.0283,omreznina
-01.02.2013–28.02.2013,Dogovorjena moč za časovni blok 2,3.0,kW,1.0923,3.2769,omreznina
-01.02.2013–28.02.2013,Dogovorjena moč za časovni blok 3,3.0,kW,0.289033,0.8671,omreznina
-01.02.2013–28.02.2013,Dogovorjena moč za časovni blok 4,3.0,kW,0.024367,0.0731,omreznina
-01.02.2013–28.02.2013,Prevzeta EE za časovni blok 1,39.576,kWh,0.02217,0.8774,omreznina
-01.02.2013–28.02.2013,Prevzeta EE za časovni blok 2,49.986,kWh,0.01998,0.99872,omreznina
-01.02.2013–28.02.2013,Prevzeta EE za časovni blok 3,52.194,kWh,0.01717,0.89617,omreznina
-01.02.2013–28.02.2013,Prevzeta EE za časovni blok 4,20.054,kWh,0.01805,0.36197,omreznina
-01.02.2013–28.02.2013,Skupaj omrežnina za elektroenergetski sistem,,,,15.37967,skupaj
-01.02.2013–28.02.2013,Prispevek za delovanje operaterja trga,161.81,kWh,0.00013,0.02104,prispevki
-01.02.2013–28.02.2013,Prispevek za energetsko učinkovitost,161.81,kWh,0.0008,0.12945,prispevki
-01.02.2013–28.02.2013,Prispevek za SPTE in OVE,3.0,kW,0.38781,1.16343,prispevki
-01.02.2013–28.02.2013,Skupaj prispevki in ostale dajatve,,,,1.31391,skupaj
-01.02.2013–28.02.2013,Trošarina,161.81,kWh,0.00153,0.24757,trosarina
-01.02.2013–28.02.2013,Skupaj trošarina,,,,0.24757,skupaj
-01.02.2013–28.02.2013,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
-01.02.2013–28.02.2013,Pavšalni strošek poslovanja,1.0,kos,1.63,1.63,poslovanje
-01.02.2013–28.02.2013,Obračun storitev pogodbenega računa,,,,1.63,skupaj
-01.02.2013–28.02.2013,Skupaj brez DDV,,,,25.83799,skupaj
-01.02.2013–28.02.2013,DDV 22%,,,,5.68436,ddv
-01.02.2013–28.02.2013,Skupaj z DDV,,,,31.52235,skupaj
-01.02.2013–28.02.2013,Dobropis za oddano energijo,,,,-2.16555,dobropis
-01.02.2013–28.02.2013,ZA PLAČILO,,,,29.3568,za_placilo
-01.02.2013–28.02.2013,Paket 'DINAMIČNA Samooskrba' predpostavlja 15-min meritve; brez njih se uporabi nadomestna cena (ET).,,,,,opozorilo
-01.02.2013–28.02.2013,"Paket 'DINAMIČNA Samooskrba' velja šele od 2026-01-01, obračunavaš pa 2013-02-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
-01.03.2013–31.03.2013,BISOL Energija – DINAMIČNA Samooskrba,,,,,naslov
-01.03.2013–31.03.2013,Električna energija – blok 2,46.855,kWh,0.046911,2.19801,energija
-01.03.2013–31.03.2013,Električna energija – blok 3,61.387,kWh,0.046018,2.82494,energija
-01.03.2013–31.03.2013,Električna energija – blok 4,69.211,kWh,0.044927,3.10946,energija
-01.03.2013–31.03.2013,Električna energija – blok 5,23.4,kWh,0.043951,1.02846,energija
-01.03.2013–31.03.2013,Skupaj električna energija,,,,9.16086,skupaj
-01.03.2013–31.03.2013,Dogovorjena moč za časovni blok 2,3.0,kW,1.0923,3.2769,omreznina
-01.03.2013–31.03.2013,Dogovorjena moč za časovni blok 3,3.0,kW,0.289033,0.8671,omreznina
-01.03.2013–31.03.2013,Dogovorjena moč za časovni blok 4,3.0,kW,0.024367,0.0731,omreznina
-01.03.2013–31.03.2013,Dogovorjena moč za časovni blok 5,3.0,kW,0.002433,0.0073,omreznina
-01.03.2013–31.03.2013,Prevzeta EE za časovni blok 2,46.855,kWh,0.01998,0.93616,omreznina
-01.03.2013–31.03.2013,Prevzeta EE za časovni blok 3,61.387,kWh,0.01717,1.05401,omreznina
-01.03.2013–31.03.2013,Prevzeta EE za časovni blok 4,69.211,kWh,0.01805,1.24926,omreznina
-01.03.2013–31.03.2013,Prevzeta EE za časovni blok 5,23.4,kWh,0.01299,0.30397,omreznina
-01.03.2013–31.03.2013,Skupaj omrežnina za elektroenergetski sistem,,,,7.7678,skupaj
-01.03.2013–31.03.2013,Prispevek za delovanje operaterja trga,200.853,kWh,0.00013,0.02611,prispevki
-01.03.2013–31.03.2013,Prispevek za energetsko učinkovitost,200.853,kWh,0.0008,0.16068,prispevki
-01.03.2013–31.03.2013,Prispevek za SPTE in OVE,3.0,kW,0.38781,1.16343,prispevki
-01.03.2013–31.03.2013,Skupaj prispevki in ostale dajatve,,,,1.35022,skupaj
-01.03.2013–31.03.2013,Trošarina,200.853,kWh,0.00153,0.30731,trosarina
-01.03.2013–31.03.2013,Skupaj trošarina,,,,0.30731,skupaj
-01.03.2013–31.03.2013,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
-01.03.2013–31.03.2013,Pavšalni strošek poslovanja,1.0,kos,1.63,1.63,poslovanje
-01.03.2013–31.03.2013,Obračun storitev pogodbenega računa,,,,1.63,skupaj
-01.03.2013–31.03.2013,Skupaj brez DDV,,,,20.21618,skupaj
-01.03.2013–31.03.2013,DDV 22%,,,,4.44756,ddv
-01.03.2013–31.03.2013,Skupaj z DDV,,,,24.66374,skupaj
-01.03.2013–31.03.2013,Dobropis za oddano energijo,,,,-2.46961,dobropis
-01.03.2013–31.03.2013,ZA PLAČILO,,,,22.19414,za_placilo
-01.03.2013–31.03.2013,Paket 'DINAMIČNA Samooskrba' predpostavlja 15-min meritve; brez njih se uporabi nadomestna cena (ET).,,,,,opozorilo
-01.03.2013–31.03.2013,"Paket 'DINAMIČNA Samooskrba' velja šele od 2026-01-01, obračunavaš pa 2013-03-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
-01.04.2013–30.04.2013,BISOL Energija – DINAMIČNA Samooskrba,,,,,naslov
-01.04.2013–30.04.2013,Električna energija – blok 2,59.424,kWh,0.047778,2.83914,energija
-01.04.2013–30.04.2013,Električna energija – blok 3,69.533,kWh,0.048566,3.37696,energija
-01.04.2013–30.04.2013,Električna energija – blok 4,75.17,kWh,0.046468,3.49298,energija
-01.04.2013–30.04.2013,Električna energija – blok 5,28.511,kWh,0.044939,1.28125,energija
-01.04.2013–30.04.2013,Skupaj električna energija,,,,10.99034,skupaj
-01.04.2013–30.04.2013,Dogovorjena moč za časovni blok 2,3.0,kW,1.0923,3.2769,omreznina
-01.04.2013–30.04.2013,Dogovorjena moč za časovni blok 3,3.0,kW,0.289033,0.8671,omreznina
-01.04.2013–30.04.2013,Dogovorjena moč za časovni blok 4,3.0,kW,0.024367,0.0731,omreznina
-01.04.2013–30.04.2013,Dogovorjena moč za časovni blok 5,3.0,kW,0.002433,0.0073,omreznina
-01.04.2013–30.04.2013,Prevzeta EE za časovni blok 2,59.424,kWh,0.01998,1.18729,omreznina
-01.04.2013–30.04.2013,Prevzeta EE za časovni blok 3,69.533,kWh,0.01717,1.19388,omreznina
-01.04.2013–30.04.2013,Prevzeta EE za časovni blok 4,75.17,kWh,0.01805,1.35682,omreznina
-01.04.2013–30.04.2013,Prevzeta EE za časovni blok 5,28.511,kWh,0.01299,0.37036,omreznina
-01.04.2013–30.04.2013,Skupaj omrežnina za elektroenergetski sistem,,,,8.33275,skupaj
-01.04.2013–30.04.2013,Prispevek za delovanje operaterja trga,232.638,kWh,0.00013,0.03024,prispevki
-01.04.2013–30.04.2013,Prispevek za energetsko učinkovitost,232.638,kWh,0.0008,0.18611,prispevki
-01.04.2013–30.04.2013,Prispevek za SPTE in OVE,3.0,kW,0.38781,1.16343,prispevki
-01.04.2013–30.04.2013,Skupaj prispevki in ostale dajatve,,,,1.37978,skupaj
-01.04.2013–30.04.2013,Trošarina,232.638,kWh,0.00153,0.35594,trosarina
-01.04.2013–30.04.2013,Skupaj trošarina,,,,0.35594,skupaj
-01.04.2013–30.04.2013,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
-01.04.2013–30.04.2013,Pavšalni strošek poslovanja,1.0,kos,1.63,1.63,poslovanje
-01.04.2013–30.04.2013,Obračun storitev pogodbenega računa,,,,1.63,skupaj
-01.04.2013–30.04.2013,Skupaj brez DDV,,,,22.6888,skupaj
-01.04.2013–30.04.2013,DDV 22%,,,,4.99154,ddv
-01.04.2013–30.04.2013,Skupaj z DDV,,,,27.68033,skupaj
-01.04.2013–30.04.2013,Dobropis za oddano energijo,,,,-1.72598,dobropis
-01.04.2013–30.04.2013,ZA PLAČILO,,,,25.95435,za_placilo
-01.04.2013–30.04.2013,Paket 'DINAMIČNA Samooskrba' predpostavlja 15-min meritve; brez njih se uporabi nadomestna cena (ET).,,,,,opozorilo
-01.04.2013–30.04.2013,"Paket 'DINAMIČNA Samooskrba' velja šele od 2026-01-01, obračunavaš pa 2013-04-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
-01.05.2013–31.05.2013,BISOL Energija – DINAMIČNA Samooskrba,,,,,naslov
-01.05.2013–31.05.2013,Električna energija – blok 2,118.207,kWh,0.050495,5.96883,energija
-01.05.2013–31.05.2013,Električna energija – blok 3,119.282,kWh,0.049814,5.94192,energija
-01.05.2013–31.05.2013,Električna energija – blok 4,108.443,kWh,0.047634,5.16552,energija
-01.05.2013–31.05.2013,Električna energija – blok 5,33.674,kWh,0.046711,1.57295,energija
-01.05.2013–31.05.2013,Skupaj električna energija,,,,18.64922,skupaj
-01.05.2013–31.05.2013,Dogovorjena moč za časovni blok 2,3.0,kW,1.0923,3.2769,omreznina
-01.05.2013–31.05.2013,Dogovorjena moč za časovni blok 3,3.0,kW,0.289033,0.8671,omreznina
-01.05.2013–31.05.2013,Dogovorjena moč za časovni blok 4,3.0,kW,0.024367,0.0731,omreznina
-01.05.2013–31.05.2013,Dogovorjena moč za časovni blok 5,3.0,kW,0.002433,0.0073,omreznina
-01.05.2013–31.05.2013,Prevzeta EE za časovni blok 2,118.207,kWh,0.01998,2.36178,omreznina
-01.05.2013–31.05.2013,Prevzeta EE za časovni blok 3,119.282,kWh,0.01717,2.04807,omreznina
-01.05.2013–31.05.2013,Prevzeta EE za časovni blok 4,108.443,kWh,0.01805,1.9574,omreznina
-01.05.2013–31.05.2013,Prevzeta EE za časovni blok 5,33.674,kWh,0.01299,0.43743,omreznina
-01.05.2013–31.05.2013,Presežna moč,,,,1.11107,omreznina
-01.05.2013–31.05.2013,Skupaj omrežnina za elektroenergetski sistem,,,,12.14014,skupaj
-01.05.2013–31.05.2013,Prispevek za delovanje operaterja trga,379.606,kWh,0.00013,0.04935,prispevki
-01.05.2013–31.05.2013,Prispevek za energetsko učinkovitost,379.606,kWh,0.0008,0.30368,prispevki
-01.05.2013–31.05.2013,Prispevek za SPTE in OVE,3.0,kW,0.38781,1.16343,prispevki
-01.05.2013–31.05.2013,Skupaj prispevki in ostale dajatve,,,,1.51646,skupaj
-01.05.2013–31.05.2013,Trošarina,379.606,kWh,0.00153,0.5808,trosarina
-01.05.2013–31.05.2013,Skupaj trošarina,,,,0.5808,skupaj
-01.05.2013–31.05.2013,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
-01.05.2013–31.05.2013,Pavšalni strošek poslovanja,1.0,kos,1.63,1.63,poslovanje
-01.05.2013–31.05.2013,Obračun storitev pogodbenega računa,,,,1.63,skupaj
-01.05.2013–31.05.2013,Skupaj brez DDV,,,,34.51661,skupaj
-01.05.2013–31.05.2013,DDV 22%,,,,7.59365,ddv
-01.05.2013–31.05.2013,Skupaj z DDV,,,,42.11026,skupaj
-01.05.2013–31.05.2013,Dobropis za oddano energijo,,,,-0.41615,dobropis
-01.05.2013–31.05.2013,ZA PLAČILO,,,,41.69411,za_placilo
-01.05.2013–31.05.2013,Paket 'DINAMIČNA Samooskrba' predpostavlja 15-min meritve; brez njih se uporabi nadomestna cena (ET).,,,,,opozorilo
-01.05.2013–31.05.2013,"Paket 'DINAMIČNA Samooskrba' velja šele od 2026-01-01, obračunavaš pa 2013-05-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
-01.06.2013–30.06.2013,BISOL Energija – DINAMIČNA Samooskrba,,,,,naslov
-01.06.2013–30.06.2013,Električna energija – blok 2,180.675,kWh,0.050103,9.05244,energija
-01.06.2013–30.06.2013,Električna energija – blok 3,179.588,kWh,0.050515,9.07187,energija
-01.06.2013–30.06.2013,Električna energija – blok 4,123.466,kWh,0.049444,6.10464,energija
-01.06.2013–30.06.2013,Električna energija – blok 5,42.698,kWh,0.049711,2.12257,energija
-01.06.2013–30.06.2013,Skupaj električna energija,,,,26.35151,skupaj
-01.06.2013–30.06.2013,Dogovorjena moč za časovni blok 2,3.0,kW,1.0923,3.2769,omreznina
-01.06.2013–30.06.2013,Dogovorjena moč za časovni blok 3,3.0,kW,0.289033,0.8671,omreznina
-01.06.2013–30.06.2013,Dogovorjena moč za časovni blok 4,3.0,kW,0.024367,0.0731,omreznina
-01.06.2013–30.06.2013,Dogovorjena moč za časovni blok 5,3.0,kW,0.002433,0.0073,omreznina
-01.06.2013–30.06.2013,Prevzeta EE za časovni blok 2,180.675,kWh,0.01998,3.60989,omreznina
-01.06.2013–30.06.2013,Prevzeta EE za časovni blok 3,179.588,kWh,0.01717,3.08353,omreznina
-01.06.2013–30.06.2013,Prevzeta EE za časovni blok 4,123.466,kWh,0.01805,2.22856,omreznina
-01.06.2013–30.06.2013,Prevzeta EE za časovni blok 5,42.698,kWh,0.01299,0.55465,omreznina
-01.06.2013–30.06.2013,Presežna moč,,,,0.31384,omreznina
-01.06.2013–30.06.2013,Skupaj omrežnina za elektroenergetski sistem,,,,14.01486,skupaj
-01.06.2013–30.06.2013,Prispevek za delovanje operaterja trga,526.427,kWh,0.00013,0.06844,prispevki
-01.06.2013–30.06.2013,Prispevek za energetsko učinkovitost,526.427,kWh,0.0008,0.42114,prispevki
-01.06.2013–30.06.2013,Prispevek za SPTE in OVE,3.0,kW,0.38781,1.16343,prispevki
-01.06.2013–30.06.2013,Skupaj prispevki in ostale dajatve,,,,1.65301,skupaj
-01.06.2013–30.06.2013,Trošarina,526.427,kWh,0.00153,0.80543,trosarina
-01.06.2013–30.06.2013,Skupaj trošarina,,,,0.80543,skupaj
-01.06.2013–30.06.2013,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
-01.06.2013–30.06.2013,Pavšalni strošek poslovanja,1.0,kos,1.63,1.63,poslovanje
-01.06.2013–30.06.2013,Obračun storitev pogodbenega računa,,,,1.63,skupaj
-01.06.2013–30.06.2013,Skupaj brez DDV,,,,44.45481,skupaj
-01.06.2013–30.06.2013,DDV 22%,,,,9.78006,ddv
-01.06.2013–30.06.2013,Skupaj z DDV,,,,54.23487,skupaj
-01.06.2013–30.06.2013,Dobropis za oddano energijo,,,,-0.10371,dobropis
-01.06.2013–30.06.2013,ZA PLAČILO,,,,54.13116,za_placilo
-01.06.2013–30.06.2013,Paket 'DINAMIČNA Samooskrba' predpostavlja 15-min meritve; brez njih se uporabi nadomestna cena (ET).,,,,,opozorilo
-01.06.2013–30.06.2013,"Paket 'DINAMIČNA Samooskrba' velja šele od 2026-01-01, obračunavaš pa 2013-06-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
-01.07.2013–01.07.2013,BISOL Energija – DINAMIČNA Samooskrba,,,,,naslov
-01.07.2013–01.07.2013,Električna energija – blok 4,0.604,kWh,0.045039,0.0272,energija
-01.07.2013–01.07.2013,Skupaj električna energija,,,,0.0272,skupaj
-01.07.2013–01.07.2013,Dogovorjena moč za časovni blok 2,3.0,kW,1.0923,3.2769,omreznina
-01.07.2013–01.07.2013,Dogovorjena moč za časovni blok 3,3.0,kW,0.289033,0.8671,omreznina
-01.07.2013–01.07.2013,Dogovorjena moč za časovni blok 4,3.0,kW,0.024367,0.0731,omreznina
-01.07.2013–01.07.2013,Dogovorjena moč za časovni blok 5,3.0,kW,0.002433,0.0073,omreznina
-01.07.2013–01.07.2013,Prevzeta EE za časovni blok 4,0.604,kWh,0.01805,0.0109,omreznina
-01.07.2013–01.07.2013,Skupaj omrežnina za elektroenergetski sistem,,,,4.2353,skupaj
-01.07.2013–01.07.2013,Prispevek za delovanje operaterja trga,0.604,kWh,0.00013,8e-05,prispevki
-01.07.2013–01.07.2013,Prispevek za energetsko učinkovitost,0.604,kWh,0.0008,0.00048,prispevki
-01.07.2013–01.07.2013,Prispevek za SPTE in OVE,3.0,kW,0.38781,1.16343,prispevki
-01.07.2013–01.07.2013,Skupaj prispevki in ostale dajatve,,,,1.16399,skupaj
-01.07.2013–01.07.2013,Trošarina,0.604,kWh,0.00153,0.00092,trosarina
-01.07.2013–01.07.2013,Skupaj trošarina,,,,0.00092,skupaj
-01.07.2013–01.07.2013,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
-01.07.2013–01.07.2013,Pavšalni strošek poslovanja,1.0,kos,1.63,1.63,poslovanje
-01.07.2013–01.07.2013,Obračun storitev pogodbenega računa,,,,1.63,skupaj
-01.07.2013–01.07.2013,Skupaj brez DDV,,,,7.05741,skupaj
-01.07.2013–01.07.2013,DDV 22%,,,,1.55263,ddv
-01.07.2013–01.07.2013,Skupaj z DDV,,,,8.61004,skupaj
-01.07.2013–01.07.2013,ZA PLAČILO,,,,8.61004,za_placilo
-01.07.2013–01.07.2013,Paket 'DINAMIČNA Samooskrba' predpostavlja 15-min meritve; brez njih se uporabi nadomestna cena (ET).,,,,,opozorilo
-01.07.2013–01.07.2013,"Paket 'DINAMIČNA Samooskrba' velja šele od 2026-01-01, obračunavaš pa 2013-07-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
+01.09.2024–30.09.2024,BISOL Energija – DINAMIČNA Samooskrba,,,,,naslov
+01.09.2024–30.09.2024,Električna energija – blok 2,61.759,kWh,0.151035,9.32775,energija
+01.09.2024–30.09.2024,Električna energija – blok 3,82.489,kWh,0.1103,9.09857,energija
+01.09.2024–30.09.2024,Električna energija – blok 4,74.41,kWh,0.086546,6.43987,energija
+01.09.2024–30.09.2024,Električna energija – blok 5,19.38,kWh,0.089587,1.73619,energija
+01.09.2024–30.09.2024,Skupaj električna energija,,,,26.60238,skupaj
+01.09.2024–30.09.2024,Dogovorjena moč za časovni blok 2,5.0,kW,1.0923,5.4615,omreznina
+01.09.2024–30.09.2024,Dogovorjena moč za časovni blok 3,5.0,kW,0.28902,1.4451,omreznina
+01.09.2024–30.09.2024,Dogovorjena moč za časovni blok 4,5.0,kW,0.02436,0.1218,omreznina
+01.09.2024–30.09.2024,Dogovorjena moč za časovni blok 5,5.0,kW,0.00246,0.0123,omreznina
+01.09.2024–30.09.2024,Prevzeta EE za časovni blok 2,61.759,kWh,0.01998,1.23394,omreznina
+01.09.2024–30.09.2024,Prevzeta EE za časovni blok 3,82.489,kWh,0.01717,1.41634,omreznina
+01.09.2024–30.09.2024,Prevzeta EE za časovni blok 4,74.41,kWh,0.01805,1.3431,omreznina
+01.09.2024–30.09.2024,Prevzeta EE za časovni blok 5,19.38,kWh,0.01299,0.25175,omreznina
+01.09.2024–30.09.2024,Presežna moč,,,,0.3349,omreznina
+01.09.2024–30.09.2024,Skupaj omrežnina za elektroenergetski sistem,,,,11.62073,skupaj
+01.09.2024–30.09.2024,Prispevek za delovanje operaterja trga,238.038,kWh,0.00013,0.03094,prispevki
+01.09.2024–30.09.2024,Prispevek za energetsko učinkovitost,238.038,kWh,0.0008,0.19043,prispevki
+01.09.2024–30.09.2024,Prispevek za SPTE in OVE,5.0,kW,0.38781,1.93905,prispevki
+01.09.2024–30.09.2024,Skupaj prispevki in ostale dajatve,,,,2.16043,skupaj
+01.09.2024–30.09.2024,Trošarina,238.038,kWh,0.00153,0.3642,trosarina
+01.09.2024–30.09.2024,Skupaj trošarina,,,,0.3642,skupaj
+01.09.2024–30.09.2024,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
+01.09.2024–30.09.2024,Pavšalni strošek poslovanja,1.0,kos,1.63,1.63,poslovanje
+01.09.2024–30.09.2024,Obračun storitev pogodbenega računa,,,,1.63,skupaj
+01.09.2024–30.09.2024,Skupaj brez DDV,,,,42.37768,skupaj
+01.09.2024–30.09.2024,DDV 22%,,,,9.32309,ddv
+01.09.2024–30.09.2024,Skupaj z DDV,,,,51.70077,skupaj
+01.09.2024–30.09.2024,ZA PLAČILO,,,,51.70077,za_placilo
+01.09.2024–30.09.2024,"Paket 'DINAMIČNA Samooskrba' velja šele od 2026-01-01, obračunavaš pa 2024-09-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
+01.10.2024–31.10.2024,BISOL Energija – DINAMIČNA Samooskrba,,,,,naslov
+01.10.2024–31.10.2024,Električna energija – blok 2,63.56,kWh,0.130856,8.31721,energija
+01.10.2024–31.10.2024,Električna energija – blok 3,86.64,kWh,0.106897,9.26158,energija
+01.10.2024–31.10.2024,Električna energija – blok 4,97.31,kWh,0.084436,8.21649,energija
+01.10.2024–31.10.2024,Električna energija – blok 5,29.716,kWh,0.075585,2.24607,energija
+01.10.2024–31.10.2024,Skupaj električna energija,,,,28.04135,skupaj
+01.10.2024–31.10.2024,Dogovorjena moč za časovni blok 2,5.0,kW,1.0923,5.4615,omreznina
+01.10.2024–31.10.2024,Dogovorjena moč za časovni blok 3,5.0,kW,0.28902,1.4451,omreznina
+01.10.2024–31.10.2024,Dogovorjena moč za časovni blok 4,5.0,kW,0.02436,0.1218,omreznina
+01.10.2024–31.10.2024,Dogovorjena moč za časovni blok 5,5.0,kW,0.00246,0.0123,omreznina
+01.10.2024–31.10.2024,Prevzeta EE za časovni blok 2,63.56,kWh,0.01998,1.26993,omreznina
+01.10.2024–31.10.2024,Prevzeta EE za časovni blok 3,86.64,kWh,0.01717,1.48761,omreznina
+01.10.2024–31.10.2024,Prevzeta EE za časovni blok 4,97.31,kWh,0.01805,1.75645,omreznina
+01.10.2024–31.10.2024,Prevzeta EE za časovni blok 5,29.716,kWh,0.01299,0.38601,omreznina
+01.10.2024–31.10.2024,Presežna moč,,,,0.66836,omreznina
+01.10.2024–31.10.2024,Skupaj omrežnina za elektroenergetski sistem,,,,12.60905,skupaj
+01.10.2024–31.10.2024,Prispevek za delovanje operaterja trga,277.226,kWh,0.00013,0.03604,prispevki
+01.10.2024–31.10.2024,Prispevek za energetsko učinkovitost,277.226,kWh,0.0008,0.22178,prispevki
+01.10.2024–31.10.2024,Prispevek za SPTE in OVE,5.0,kW,0.38781,1.93905,prispevki
+01.10.2024–31.10.2024,Skupaj prispevki in ostale dajatve,,,,2.19687,skupaj
+01.10.2024–31.10.2024,Trošarina,277.226,kWh,0.00153,0.42416,trosarina
+01.10.2024–31.10.2024,Skupaj trošarina,,,,0.42416,skupaj
+01.10.2024–31.10.2024,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
+01.10.2024–31.10.2024,Pavšalni strošek poslovanja,1.0,kos,1.63,1.63,poslovanje
+01.10.2024–31.10.2024,Obračun storitev pogodbenega računa,,,,1.63,skupaj
+01.10.2024–31.10.2024,Skupaj brez DDV,,,,44.90138,skupaj
+01.10.2024–31.10.2024,DDV 22%,,,,9.8783,ddv
+01.10.2024–31.10.2024,Skupaj z DDV,,,,54.77968,skupaj
+01.10.2024–31.10.2024,ZA PLAČILO,,,,54.77968,za_placilo
+01.10.2024–31.10.2024,"Paket 'DINAMIČNA Samooskrba' velja šele od 2026-01-01, obračunavaš pa 2024-10-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
+01.11.2024–30.11.2024,BISOL Energija – DINAMIČNA Samooskrba,,,,,naslov
+01.11.2024–30.11.2024,Električna energija – blok 1,74.77,kWh,0.20344,15.21121,energija
+01.11.2024–30.11.2024,Električna energija – blok 2,82.518,kWh,0.153777,12.68939,energija
+01.11.2024–30.11.2024,Električna energija – blok 3,67.78,kWh,0.126542,8.57702,energija
+01.11.2024–30.11.2024,Električna energija – blok 4,20.033,kWh,0.113231,2.26836,energija
+01.11.2024–30.11.2024,Skupaj električna energija,,,,38.74597,skupaj
+01.11.2024–30.11.2024,Dogovorjena moč za časovni blok 1,5.0,kW,2.6761,13.3805,omreznina
+01.11.2024–30.11.2024,Dogovorjena moč za časovni blok 2,5.0,kW,1.0923,5.4615,omreznina
+01.11.2024–30.11.2024,Dogovorjena moč za časovni blok 3,5.0,kW,0.28902,1.4451,omreznina
+01.11.2024–30.11.2024,Dogovorjena moč za časovni blok 4,5.0,kW,0.02436,0.1218,omreznina
+01.11.2024–30.11.2024,Prevzeta EE za časovni blok 1,74.77,kWh,0.02217,1.65765,omreznina
+01.11.2024–30.11.2024,Prevzeta EE za časovni blok 2,82.518,kWh,0.01998,1.64871,omreznina
+01.11.2024–30.11.2024,Prevzeta EE za časovni blok 3,67.78,kWh,0.01717,1.16378,omreznina
+01.11.2024–30.11.2024,Prevzeta EE za časovni blok 4,20.033,kWh,0.01805,0.3616,omreznina
+01.11.2024–30.11.2024,Presežna moč,,,,0.36243,omreznina
+01.11.2024–30.11.2024,Skupaj omrežnina za elektroenergetski sistem,,,,25.60306,skupaj
+01.11.2024–30.11.2024,Prispevek za delovanje operaterja trga,245.101,kWh,0.00013,0.03186,prispevki
+01.11.2024–30.11.2024,Prispevek za energetsko učinkovitost,245.101,kWh,0.0008,0.19608,prispevki
+01.11.2024–30.11.2024,Prispevek za SPTE in OVE,5.0,kW,0.38781,1.93905,prispevki
+01.11.2024–30.11.2024,Skupaj prispevki in ostale dajatve,,,,2.16699,skupaj
+01.11.2024–30.11.2024,Trošarina,245.101,kWh,0.00153,0.375,trosarina
+01.11.2024–30.11.2024,Skupaj trošarina,,,,0.375,skupaj
+01.11.2024–30.11.2024,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
+01.11.2024–30.11.2024,Pavšalni strošek poslovanja,1.0,kos,1.63,1.63,poslovanje
+01.11.2024–30.11.2024,Obračun storitev pogodbenega računa,,,,1.63,skupaj
+01.11.2024–30.11.2024,Skupaj brez DDV,,,,68.52109,skupaj
+01.11.2024–30.11.2024,DDV 22%,,,,15.07464,ddv
+01.11.2024–30.11.2024,Skupaj z DDV,,,,83.59573,skupaj
+01.11.2024–30.11.2024,ZA PLAČILO,,,,83.59573,za_placilo
+01.11.2024–30.11.2024,"Paket 'DINAMIČNA Samooskrba' velja šele od 2026-01-01, obračunavaš pa 2024-11-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
+01.12.2024–31.12.2024,BISOL Energija – DINAMIČNA Samooskrba,,,,,naslov
+01.12.2024–31.12.2024,Električna energija – blok 1,91.903,kWh,0.182463,16.76893,energija
+01.12.2024–31.12.2024,Električna energija – blok 2,113.393,kWh,0.144714,16.40955,energija
+01.12.2024–31.12.2024,Električna energija – blok 3,85.854,kWh,0.122029,10.47665,energija
+01.12.2024–31.12.2024,Električna energija – blok 4,25.298,kWh,0.108523,2.74542,energija
+01.12.2024–31.12.2024,Skupaj električna energija,,,,46.40055,skupaj
+01.12.2024–31.12.2024,Dogovorjena moč za časovni blok 1,5.0,kW,2.6761,13.3805,omreznina
+01.12.2024–31.12.2024,Dogovorjena moč za časovni blok 2,5.0,kW,1.0923,5.4615,omreznina
+01.12.2024–31.12.2024,Dogovorjena moč za časovni blok 3,5.0,kW,0.28902,1.4451,omreznina
+01.12.2024–31.12.2024,Dogovorjena moč za časovni blok 4,5.0,kW,0.02436,0.1218,omreznina
+01.12.2024–31.12.2024,Prevzeta EE za časovni blok 1,91.903,kWh,0.02217,2.03749,omreznina
+01.12.2024–31.12.2024,Prevzeta EE za časovni blok 2,113.393,kWh,0.01998,2.26559,omreznina
+01.12.2024–31.12.2024,Prevzeta EE za časovni blok 3,85.854,kWh,0.01717,1.47411,omreznina
+01.12.2024–31.12.2024,Prevzeta EE za časovni blok 4,25.298,kWh,0.01805,0.45663,omreznina
+01.12.2024–31.12.2024,Skupaj omrežnina za elektroenergetski sistem,,,,26.64272,skupaj
+01.12.2024–31.12.2024,Prispevek za delovanje operaterja trga,316.448,kWh,0.00013,0.04114,prispevki
+01.12.2024–31.12.2024,Prispevek za energetsko učinkovitost,316.448,kWh,0.0008,0.25316,prispevki
+01.12.2024–31.12.2024,Prispevek za SPTE in OVE,5.0,kW,0.38781,1.93905,prispevki
+01.12.2024–31.12.2024,Skupaj prispevki in ostale dajatve,,,,2.23335,skupaj
+01.12.2024–31.12.2024,Trošarina,316.448,kWh,0.00153,0.48417,trosarina
+01.12.2024–31.12.2024,Skupaj trošarina,,,,0.48417,skupaj
+01.12.2024–31.12.2024,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
+01.12.2024–31.12.2024,Pavšalni strošek poslovanja,1.0,kos,1.63,1.63,poslovanje
+01.12.2024–31.12.2024,Obračun storitev pogodbenega računa,,,,1.63,skupaj
+01.12.2024–31.12.2024,Skupaj brez DDV,,,,77.39083,skupaj
+01.12.2024–31.12.2024,DDV 22%,,,,17.02598,ddv
+01.12.2024–31.12.2024,Skupaj z DDV,,,,94.41682,skupaj
+01.12.2024–31.12.2024,ZA PLAČILO,,,,94.41682,za_placilo
+01.12.2024–31.12.2024,"Paket 'DINAMIČNA Samooskrba' velja šele od 2026-01-01, obračunavaš pa 2024-12-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
+01.01.2025–01.01.2025,BISOL Energija – DINAMIČNA Samooskrba,,,,,naslov
+01.01.2025–01.01.2025,Električna energija – blok 4,0.234,kWh,0.13146,0.03076,energija
+01.01.2025–01.01.2025,Skupaj električna energija,,,,0.03076,skupaj
+01.01.2025–01.01.2025,Dogovorjena moč za časovni blok 1,5.0,kW,2.6761,13.3805,omreznina
+01.01.2025–01.01.2025,Dogovorjena moč za časovni blok 2,5.0,kW,1.0923,5.4615,omreznina
+01.01.2025–01.01.2025,Dogovorjena moč za časovni blok 3,5.0,kW,0.28902,1.4451,omreznina
+01.01.2025–01.01.2025,Dogovorjena moč za časovni blok 4,5.0,kW,0.02436,0.1218,omreznina
+01.01.2025–01.01.2025,Prevzeta EE za časovni blok 4,0.234,kWh,0.01805,0.00422,omreznina
+01.01.2025–01.01.2025,Skupaj omrežnina za elektroenergetski sistem,,,,20.41312,skupaj
+01.01.2025–01.01.2025,Prispevek za delovanje operaterja trga,0.234,kWh,0.00013,3e-05,prispevki
+01.01.2025–01.01.2025,Prispevek za energetsko učinkovitost,0.234,kWh,0.0008,0.00019,prispevki
+01.01.2025–01.01.2025,Prispevek za SPTE in OVE,5.0,kW,0.38781,1.93905,prispevki
+01.01.2025–01.01.2025,Skupaj prispevki in ostale dajatve,,,,1.93927,skupaj
+01.01.2025–01.01.2025,Trošarina,0.234,kWh,0.00153,0.00036,trosarina
+01.01.2025–01.01.2025,Skupaj trošarina,,,,0.00036,skupaj
+01.01.2025–01.01.2025,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
+01.01.2025–01.01.2025,Pavšalni strošek poslovanja,1.0,kos,1.63,1.63,poslovanje
+01.01.2025–01.01.2025,Obračun storitev pogodbenega računa,,,,1.63,skupaj
+01.01.2025–01.01.2025,Skupaj brez DDV,,,,24.01356,skupaj
+01.01.2025–01.01.2025,DDV 22%,,,,5.28298,ddv
+01.01.2025–01.01.2025,Skupaj z DDV,,,,29.29654,skupaj
+01.01.2025–01.01.2025,ZA PLAČILO,,,,29.29654,za_placilo
+01.01.2025–01.01.2025,"Paket 'DINAMIČNA Samooskrba' velja šele od 2026-01-01, obračunavaš pa 2025-01-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
