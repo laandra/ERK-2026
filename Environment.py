@@ -316,8 +316,7 @@ class HouseholdEnvironment(gym.Env):
             else naive_import_kwh
         )
         historical_peak_kw = float(np.max(naive_power_kw)) if naive_power_kw.size else 0.0
-        value = max(historical_peak_kw / 1.5, 1.5)
-        value = round(value * 2.0) / 2.0
+        value = historical_peak_kw / 1.5
         return {b: value for b in range(1, 6)}
 
     def _precompute_peak_seed_history(self):
@@ -378,14 +377,13 @@ class HouseholdEnvironment(gym.Env):
         return {b: float(self._peak_seed_history[b][ref_idx]) for b in range(1, 6)}
 
     def _state_dim(self):
-        if self.observation_mode == "compact":
-            return 6
-        return (
+        base_dim = 6 if self.observation_mode == "compact" else (
             1 + 2
             + self.window_past
             + self.window_past
             + (self.window_past + self.window_future)
         )
+        return base_dim + 2
 
     def _get_state_object(self, idx, baterija, placilo):
         baterija = float(np.clip(baterija, 0.0, self.bat_kapaciteta))
@@ -439,11 +437,21 @@ class HouseholdEnvironment(gym.Env):
             dtype=bool,
         )
 
+    def _current_block_features(self, idx):
+        if self._blok_arr is None or idx < 0 or idx >= self.data_length:
+            return 0.0, 0.0
+
+        blok = int(self._blok_arr[idx])
+        max_power_kw = float(self.dogovorjena_moc.get(blok, 0.0)) if self.dogovorjena_moc is not None else 0.0
+        block_ratio = float(blok) / 5.0
+        return max_power_kw, block_ratio
+
     def _build_observation(self, idx, baterija_norm):
         # Create cyclical time features
         hour_fraction = (self.arr_Hour[idx] + self.arr_Minute[idx]/60.0) / 24.0
         sin_time = np.sin(2 * np.pi * hour_fraction)
         cos_time = np.cos(2 * np.pi * hour_fraction)
+        block_peak_kw, block_ratio = self._current_block_features(idx)
 
         if self.observation_mode == "compact":
             return np.array(
@@ -453,7 +461,9 @@ class HouseholdEnvironment(gym.Env):
                     self.arr_Con_norm[idx],
                     self.arr_SMP_norm[idx],
                     sin_time,
-                    cos_time
+                    cos_time,
+                    block_peak_kw,
+                    block_ratio,
                 ],
                 dtype=np.float32,
             )
@@ -485,6 +495,7 @@ class HouseholdEnvironment(gym.Env):
                 con_window,
                 price_window,
                 np.array([sin_time, cos_time], dtype=np.float32),
+                np.array([block_peak_kw, block_ratio], dtype=np.float32),
             ]
         ).astype(np.float32)
 
