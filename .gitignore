@@ -4,3 +4,7 @@ Ausgrid_2010_2013_Orange_Combined.csv
 
 # Local Claude config
 .claude/
+
+# Python bytecode
+__pycache__/
+*.pyc

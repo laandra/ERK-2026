@@ -30,8 +30,8 @@ VIRI (preverjeno 22. 7. 2026):
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass, field
-from typing import Dict, Optional
+from dataclasses import dataclass
+from typing import Dict
 
 # ---------------------------------------------------------------------------
 # DAJATVE IN DAVKI
@@ -183,33 +183,5 @@ def omreznina_za_datum(d: dt.date) -> Omreznina:
         f"iz Akta o določitvi tarifnih postavk (agen-rs.si)."
     )
 
-
-# ---------------------------------------------------------------------------
-# CENIKI DOBAVITELJEV (energija). Ceniki veljajo "do preklica" — preveri datum!
-# ---------------------------------------------------------------------------
-@dataclass(frozen=True)
-class Cenik:
-    ime: str
-    vt: float = 0.0                 # EUR/kWh
-    mt: float = 0.0
-    et: float = 0.0
-    mesecno_nadomestilo: float = 0.0  # EUR/mesec (fiksno)
-    dinamicni_pribitek: float = 0.0   # EUR/kWh nad borzno ceno
-    cap_eur_kwh: Optional[float] = None  # navzgor zamejena borzna cena
-    vir: str = ""
-
-
-CENIKI = {
-    "GEN-I": Cenik("GEN-I redni", vt=0.11990, mt=0.09790, et=0.10890,
-                   mesecno_nadomestilo=1.99,
-                   vir="gen-i.si, redni cenik od 1. 3. 2025"),
-    "GEN-I-EKO": Cenik("GEN-I redni + EKO popust", vt=0.11990, mt=0.09790, et=0.10890,
-                       mesecno_nadomestilo=0.99,
-                       vir="gen-i.si, redni cenik od 1. 3. 2025"),
-    "PETROL": Cenik("Petrol redni", vt=0.12795, mt=0.10795, et=0.11795,
-                    mesecno_nadomestilo=1.98,
-                    vir="petrol.si, cenik marec 2025"),
-    "ECE-FLEKS": Cenik("ECE FLEKS (dinamični)", dinamicni_pribitek=0.01400,
-                       mesecno_nadomestilo=0.0,
-                       vir="ece.si, pribitek 14,00 EUR/MWh brez DDV"),
-}
+# Ceniki dobaviteljev (energija) niso tu — so v si_paketi.PAKETI, ki hkrati
+# nosi tudi pogoje samooskrbe, odkupa in souporabe.

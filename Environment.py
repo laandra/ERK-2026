@@ -1,15 +1,20 @@
+"""Gymnasium environments for household / energy-community battery dispatch.
+
+`HouseholdEnvironment` is continuous-first: an action is a signed battery
+setpoint in kWh for the interval (positive = charge, negative = discharge),
+the same quantity the MILP benchmark solves for. Discrete actions remain
+available via `action_mode="discrete"` so the legacy DQN keeps working; they
+are a five-entry lookup that produces a setpoint and then goes through exactly
+the same energy router.
+"""
+
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import gymnasium as gym
 import numpy as np
 
-from Basic_Functions import (
-    BatMaxPolTrenutno,
-    BatMaxPraTrenutno,
-    BaterijaSprememba,
-    PaneliOdvec,
-)
+from Basic_Functions import battery_delta, max_charge_now, max_discharge_now, pv_surplus
 
 from Pricing_Functions import (
     aggregate_household_invoices,
@@ -20,67 +25,22 @@ from Pricing_Functions import (
     resolve_reset_window_id,
 )
 
-_DEFAULT_INVOICE_OUTPUT_DIR = Path(__file__).resolve().parent / "Resoults" / "Invoices"
+_DEFAULT_INVOICE_OUTPUT_DIR = Path(__file__).resolve().parent / "Results" / "Invoices"
 
+N_BLOCKS = 5
+_BLOCKS = range(1, N_BLOCKS + 1)
 
-class _StateDQN:
-    """Internal state container mirroring notebook fields used by reward/step logic."""
-
-    __slots__ = [
-        "Korak",
-        "CenaEl",
-        "Baterija",
-        "Generiranje",
-        "Poraba",
-        "Mesec",
-        "DanVTednu",
-        "Ura",
-        "Minuta",
-        "CenaEl_norm",
-        "Generiranje_norm",
-        "Baterija_norm",
-        "Poraba_norm",
-        "Placilo",
-        "CenaElRel",
-    ]
-
-    def __init__(
-        self,
-        Korak=0,
-        CenaEl=0.0,
-        Baterija=0.0,
-        Generiranje=0.0,
-        Poraba=0.0,
-        Mesec=1,
-        DanVTednu=0,
-        Ura=0,
-        Minuta=0,
-        CenaEl_norm=0.0,
-        Generiranje_norm=0.0,
-        Baterija_norm=0.0,
-        Poraba_norm=0.0,
-        Placilo=0.0,
-        CenaElRel=0.0,
-    ):
-        self.Korak = int(Korak)
-        self.CenaEl = float(CenaEl)
-        self.Baterija = float(Baterija)
-        self.Generiranje = float(Generiranje)
-        self.Poraba = float(Poraba)
-        self.Mesec = int(Mesec)
-        self.DanVTednu = int(DanVTednu)
-        self.Ura = int(Ura)
-        self.Minuta = int(Minuta)
-        self.CenaEl_norm = float(CenaEl_norm)
-        self.Generiranje_norm = float(Generiranje_norm)
-        self.Baterija_norm = float(Baterija_norm)
-        self.Poraba_norm = float(Poraba_norm)
-        self.Placilo = float(Placilo)
-        self.CenaElRel = float(CenaElRel)
+# Legacy discrete action set, kept so the DQN pipeline keeps its action space.
+ACTION_CHARGE_ANY = 0     # charge from PV, top up from the grid
+ACTION_CHARGE_PV = 1      # charge from PV surplus only
+ACTION_DISCHARGE_HOME = 2  # discharge, serving household load only
+ACTION_DISCHARGE_ANY = 3  # discharge fully, exporting whatever the house can't use
+ACTION_IDLE = 4           # battery unused
+N_DISCRETE_ACTIONS = 5
 
 
 class HouseholdEnvironment(gym.Env):
-    """Custom Gymnasium environment based on the notebook DQN household model."""
+    """Single household with PV and a battery, priced under a Slovenian tariff."""
 
     metadata = {"render_modes": []}
 
@@ -93,18 +53,22 @@ class HouseholdEnvironment(gym.Env):
         consumption_column="Energy_Consumption",
         observation_mode="sliding_window",
         reset_mode="deterministic",
+        action_mode="continuous",
+        action_scale="physical",
+        n_discrete_actions=N_DISCRETE_ACTIONS,
+        clip_penalty=0.0,
         episode_length=None,
-        korakov_na_dan=96,
-        bat_kapaciteta=20.0,
-        bat_ucinkovitost=0.95,
-        bat_max_polnjenje=1.5,
-        bat_max_praznjenje=1.5,
-        faktor_n1=0.0,
-        faktor_n2=0.0,
-        faktor_n3=1.0,
+        steps_per_day=96,
+        battery_capacity_kwh=20.0,
+        charge_efficiency=0.95,
+        discharge_efficiency=0.95,
+        max_charge_kwh=1.5,
+        max_discharge_kwh=1.5,
+        reward_weight_soc=0.0,
+        reward_weight_arbitrage=0.0,
+        reward_weight_cost=1.0,
         median_window_days=30,
-        pricing_scheme="si_samooskrba", #"aus_base",
-        pricing_compare_all=False,
+        pricing_scheme="si_samooskrba",
         pricing_include_raw=False,
         pricing_reference_year=2026,
         pricing_options=None,
@@ -123,9 +87,8 @@ class HouseholdEnvironment(gym.Env):
         self.price_column = str(price_column)
         self.generation_column = str(generation_column)
         self.consumption_column = str(consumption_column)
-        required_cols = [self.price_column, self.generation_column, self.consumption_column]
 
-        for col in required_cols:
+        for col in (self.price_column, self.generation_column, self.consumption_column):
             if col not in self.dataset.columns:
                 raise ValueError(f"Missing required column in dataset: {col}")
             if col not in self.dataset_norm.columns:
@@ -139,40 +102,57 @@ class HouseholdEnvironment(gym.Env):
         if self.reset_mode not in {"deterministic", "random", "sequential"}:
             raise ValueError("reset_mode must be 'deterministic', 'random', or 'sequential'")
 
-        self.korakov_na_dan = int(korakov_na_dan)
-        if self.korakov_na_dan <= 0:
-            raise ValueError("korakov_na_dan must be > 0")
+        self.action_mode = str(action_mode)
+        if self.action_mode not in {"continuous", "discrete"}:
+            raise ValueError("action_mode must be 'continuous' or 'discrete'")
 
-        self.bat_kapaciteta = float(bat_kapaciteta)
-        self.bat_ucinkovitost = float(bat_ucinkovitost)
-        if self.bat_ucinkovitost <= 0.0 or self.bat_ucinkovitost > 1.0:
-            raise ValueError("bat_ucinkovitost must be in (0.0, 1.0]")
-        
-        self.bat_max_polnjenje = float(bat_max_polnjenje)
-        self.bat_max_praznjenje = float(bat_max_praznjenje)
-        self.faktor_n1 = float(faktor_n1)
-        self.faktor_n2 = float(faktor_n2)
-        self.faktor_n3 = float(faktor_n3)
+        self.action_scale = str(action_scale)
+        if self.action_scale not in {"physical", "normalized"}:
+            raise ValueError("action_scale must be 'physical' or 'normalized'")
+
+        self.n_discrete_actions = int(n_discrete_actions)
+        if not 1 <= self.n_discrete_actions <= N_DISCRETE_ACTIONS:
+            raise ValueError(f"n_discrete_actions must be in 1..{N_DISCRETE_ACTIONS}")
+
+        self.clip_penalty = float(clip_penalty)
+
+        self.steps_per_day = int(steps_per_day)
+        if self.steps_per_day <= 0:
+            raise ValueError("steps_per_day must be > 0")
+        self.interval_minutes = 1440.0 / self.steps_per_day
+
+        self.battery_capacity_kwh = float(battery_capacity_kwh)
+        self.charge_efficiency = float(charge_efficiency)
+        self.discharge_efficiency = float(discharge_efficiency)
+        for name, eff in (
+            ("charge_efficiency", self.charge_efficiency),
+            ("discharge_efficiency", self.discharge_efficiency),
+        ):
+            if not 0.0 < eff <= 1.0:
+                raise ValueError(f"{name} must be in (0.0, 1.0]")
+
+        self.max_charge_kwh = float(max_charge_kwh)
+        self.max_discharge_kwh = float(max_discharge_kwh)
+        self.reward_weight_soc = float(reward_weight_soc)
+        self.reward_weight_arbitrage = float(reward_weight_arbitrage)
+        self.reward_weight_cost = float(reward_weight_cost)
+
         self.pricing_scheme = str(pricing_scheme)
-        if self.pricing_scheme not in {"si_dobava", "si_samooskrba", "aus_base"}:
-            raise ValueError("pricing_scheme must be 'si_dobava', 'si_samooskrba', or 'aus_base'")
-        self.pricing_compare_all = bool(pricing_compare_all)
+        if self.pricing_scheme not in {"si_dobava", "si_samooskrba"}:
+            raise ValueError("pricing_scheme must be 'si_dobava' or 'si_samooskrba'")
         self.pricing_include_raw = bool(pricing_include_raw)
-        if pricing_options is None:
-            # Fresh dict per instance -- a mutable default argument here would be
-            # mutated in place below (pricing_reference_year) and shared/corrupted
-            # across every subsequent construction that also omits pricing_options.
-            self.pricing_options = {"pricing_mode": "dinamicni", "buyback_mode": "dinamicni"}
-        elif pricing_options in ({}, {"pricing_mode": "dinamicni", "buyback_mode": "dinamicni"}):
-            self.pricing_options = dict(pricing_options)
-        else:
-            raise ValueError("pricing_options must be None, empty dict, or {'pricing_mode': 'dinamicni', 'buyback_mode': 'dinamicni'}")
 
-        # Ausgrid timestamps (2010-2013) have no published SI tariff rates, so
-        # leaving this unset would make pricing fall back to the 2026 regime
-        # anyway (see Pricing_Functions._resolve_pravila); pin it explicitly so
-        # the RL environment, the MILP benchmark and the invoice builder all
-        # agree on the same year.
+        # Fresh dict per instance -- a mutable default argument here would be
+        # mutated in place below (pricing_reference_year) and shared/corrupted
+        # across every subsequent construction that also omits pricing_options.
+        self.pricing_options = {"pricing_mode": "dinamicni", "buyback_mode": "dinamicni"}
+        self.pricing_options.update(pricing_options or {})
+
+        # Dataset timestamps (Ausgrid 2010-2013, Fluvius) predate the published
+        # SI tariff acts, so leaving this unset would make pricing fall back to
+        # the 2026 regime anyway (see Pricing_Functions._resolve_pravila); pin
+        # it explicitly so the RL environment, the MILP benchmark and the
+        # invoice builder all agree on the same year.
         self.pricing_reference_year = (
             PRIVZETO_REFERENCNO_LETO if pricing_reference_year is None
             else int(pricing_reference_year)
@@ -183,19 +163,13 @@ class HouseholdEnvironment(gym.Env):
         self.generate_monthly_invoice = bool(generate_monthly_invoice)
         self.generate_period_invoice = bool(generate_period_invoice)
         self._invoicing_enabled = self.generate_monthly_invoice or self.generate_period_invoice
-        if self._invoicing_enabled:
-            if self.pricing_scheme not in ("si_dobava", "si_samooskrba"):
-                raise ValueError(
-                    "Invoice generation requires pricing_scheme 'si_dobava' or "
-                    "'si_samooskrba' (no SI regulatory invoice exists for 'aus_base')."
-                )
-            if self.reset_mode != "deterministic":
-                raise ValueError(
-                    "Invoice generation requires reset_mode='deterministic' — invoicing "
-                    "only makes sense over a single chronological pass; random/sequential "
-                    "resets would interleave or overwrite invoice state across unrelated "
-                    "episodes."
-                )
+        if self._invoicing_enabled and self.reset_mode != "deterministic":
+            raise ValueError(
+                "Invoice generation requires reset_mode='deterministic' -- invoicing "
+                "only makes sense over a single chronological pass; random/sequential "
+                "resets would interleave or overwrite invoice state across unrelated "
+                "episodes."
+            )
         self.invoice_eko_racun = bool(invoice_eko_racun)
         self.invoice_output_dir = (
             Path(invoice_output_dir) if invoice_output_dir is not None else _DEFAULT_INVOICE_OUTPUT_DIR
@@ -207,13 +181,13 @@ class HouseholdEnvironment(gym.Env):
         if self.data_length == 0:
             raise ValueError("Dataset is empty. Please provide a valid dataset.")
 
-        self.arr_SMP = self.dataset[self.price_column].to_numpy(dtype=np.float64)
-        self.arr_Gen = self.dataset[self.generation_column].to_numpy(dtype=np.float64)
-        self.arr_Con = self.dataset[self.consumption_column].to_numpy(dtype=np.float64)
+        self.arr_price = self.dataset[self.price_column].to_numpy(dtype=np.float64)
+        self.arr_generation = self.dataset[self.generation_column].to_numpy(dtype=np.float64)
+        self.arr_consumption = self.dataset[self.consumption_column].to_numpy(dtype=np.float64)
 
         # --- PV presence + pricing_scheme validation -------------------------------
         self.pricing_warnings = []
-        self._has_pv = bool(np.nanmax(self.arr_Gen) > 0.0) if self.data_length > 0 else False
+        self._has_pv = bool(np.nanmax(self.arr_generation) > 0.0)
 
         if self.pricing_scheme == "si_dobava" and self._has_pv:
             msg = (
@@ -236,219 +210,159 @@ class HouseholdEnvironment(gym.Env):
         # --- Contracted power (dogovorjena_moc) + peak-ratchet config --------------
         self.peak_reset_months = None if peak_reset_months is None else int(peak_reset_months)
         if contracted_power_kw is None:
-            self.dogovorjena_moc = self._default_contracted_power_kw()
+            self.contracted_power_kw = self._default_contracted_power_kw()
         elif isinstance(contracted_power_kw, (int, float)):
-            self.dogovorjena_moc = {b: float(contracted_power_kw) for b in range(1, 6)}
+            self.contracted_power_kw = {b: float(contracted_power_kw) for b in _BLOCKS}
         else:
-            self.dogovorjena_moc = {b: float(contracted_power_kw.get(b, 0.0)) for b in range(1, 6)}
+            self.contracted_power_kw = {b: float(contracted_power_kw.get(b, 0.0)) for b in _BLOCKS}
 
-        self._blok_arr = None
-        self._window_id_arr = None
-        self._peak_seed_history = None
-        if self.pricing_scheme in ("si_dobava", "si_samooskrba") and self.data_length > 0:
-            self._blok_arr, self._window_id_arr, self._peak_seed_history = (
-                self._precompute_peak_seed_history()
-            )
-        self._peak_kw = {b: 0.0 for b in range(1, 6)}
+        self._block_arr, self._window_id_arr, self._peak_seed_history = (
+            self._precompute_peak_seed_history()
+        )
+        self._peak_kw = {b: 0.0 for b in _BLOCKS}
         self._peak_window_id = 0
 
-        self.arr_SMP_norm = self.dataset_norm[self.price_column].to_numpy(dtype=np.float64)
-        self.arr_Gen_norm = self.dataset_norm[self.generation_column].to_numpy(dtype=np.float64)
-        self.arr_Con_norm = self.dataset_norm[self.consumption_column].to_numpy(dtype=np.float64)
+        self.arr_price_norm = self.dataset_norm[self.price_column].to_numpy(dtype=np.float64)
+        self.arr_generation_norm = self.dataset_norm[self.generation_column].to_numpy(dtype=np.float64)
+        self.arr_consumption_norm = self.dataset_norm[self.consumption_column].to_numpy(dtype=np.float64)
 
-        if hasattr(self.dataset.index, "month"):
-            self.arr_Month = self.dataset.index.month.to_numpy()
-            self.arr_DayOfWeek = self.dataset.index.dayofweek.to_numpy()
-            self.arr_Hour = self.dataset.index.hour.to_numpy()
-            self.arr_Minute = self.dataset.index.minute.to_numpy()
+        if hasattr(self.dataset.index, "hour"):
+            self.arr_hour = self.dataset.index.hour.to_numpy()
+            self.arr_minute = self.dataset.index.minute.to_numpy()
         else:
-            self.arr_Month = np.zeros(self.data_length, dtype=np.int32)
-            self.arr_DayOfWeek = np.zeros(self.data_length, dtype=np.int32)
-            self.arr_Hour = np.zeros(self.data_length, dtype=np.int32)
-            self.arr_Minute = np.zeros(self.data_length, dtype=np.int32)
+            self.arr_hour = np.zeros(self.data_length, dtype=np.int32)
+            self.arr_minute = np.zeros(self.data_length, dtype=np.int32)
 
-        window_size = max(1, int(median_window_days * self.korakov_na_dan))
-        self.arr_MedianPrice = (
-            self.dataset[self.price_column].rolling(window=window_size, min_periods=1).median().to_numpy(dtype=np.float64)
+        window_size = max(1, int(median_window_days * self.steps_per_day))
+        self.arr_median_price = (
+            self.dataset[self.price_column]
+            .rolling(window=window_size, min_periods=1)
+            .median()
+            .to_numpy(dtype=np.float64)
         )
-        epsilon = 1e-8
-        self.arr_RelativePrice = (
-            (self.arr_SMP - self.arr_MedianPrice) / (self.arr_MedianPrice + epsilon)
+        self.arr_relative_price = (self.arr_price - self.arr_median_price) / (
+            self.arr_median_price + 1e-8
         )
 
-        self.episode_length = (
-            int(episode_length)
-            if episode_length is not None
-            else int(self.data_length - 1)
+        self.episode_length = max(
+            1,
+            int(episode_length) if episode_length is not None else int(self.data_length - 1),
         )
-        self.episode_length = max(1, self.episode_length)
 
         self._sequential_counter = 0
         self._current_step = 0
         self._episode_steps = 0
         self._episode_start = 0
-        self._episode_end_exclusive = min(self.data_length, self._episode_start + self.episode_length)
-        self._battery = max(0.0, self.bat_kapaciteta / 2.0)
+        self._episode_end_exclusive = min(self.data_length, self.episode_length)
+        self._battery = max(0.0, self.battery_capacity_kwh / 2.0)
         self._cumulative_payment = 0.0
 
-        self.window_past = self.korakov_na_dan * 0
-        self.window_future = 11 * (self.korakov_na_dan // 24)
+        self.window_past = 0
+        self.window_future = 11 * (self.steps_per_day // 24)
 
-        self.action_space = gym.spaces.Discrete(5)
-        state_dim = self._state_dim()
+        if self.action_mode == "discrete":
+            self.action_space = gym.spaces.Discrete(self.n_discrete_actions)
+        elif self.action_scale == "normalized":
+            self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32)
+        else:
+            self.action_space = gym.spaces.Box(
+                low=np.float32(-self.max_discharge_kwh),
+                high=np.float32(self.max_charge_kwh / self.charge_efficiency),
+                shape=(1,),
+                dtype=np.float32,
+            )
+
         self.observation_space = gym.spaces.Box(
             low=-np.inf,
             high=np.inf,
-            shape=(state_dim,),
+            shape=(len(self._build_observation(0, 0.0)),),
             dtype=np.float32,
         )
 
+    # ------------------------------------------------------------------
+    # Peak-ratchet precomputes
+    # ------------------------------------------------------------------
+    @property
+    def tariff_blocks(self):
+        """Per-row tariff time-block (1-5). Read by the MILP benchmark."""
+        return self._block_arr
+
+    @property
+    def reset_window_ids(self):
+        """Per-row ratchet reset-window id. Read by the MILP benchmark."""
+        return self._window_id_arr
+
+    def _naive_import_power_kw(self):
+        """Grid draw in kW the household would have had with no battery."""
+        hours_per_interval = self.interval_minutes / 60.0
+        naive_import_kwh = np.maximum(self.arr_consumption - self.arr_generation, 0.0)
+        return naive_import_kwh / hours_per_interval
+
     def _default_contracted_power_kw(self):
-        """Default dogovorjena_moc: set meaningfully BELOW the historical
-        realized peak (no-battery grid-import power), so the agent has real
-        room to improve via peak-shaving rather than starting already
-        compliant with a contract sized to its worst historical moment."""
-        hours_per_interval = (1440.0 / self.korakov_na_dan) / 60.0
-        naive_import_kwh = np.maximum(self.arr_Con - self.arr_Gen, 0.0)
-        naive_power_kw = (
-            naive_import_kwh / hours_per_interval
-            if hours_per_interval > 0
-            else naive_import_kwh
-        )
+        """Default contracted power: set meaningfully BELOW the historical
+        realized peak, so the agent has real room to improve via peak-shaving
+        rather than starting already compliant with a contract sized to its
+        worst historical moment."""
+        naive_power_kw = self._naive_import_power_kw()
         historical_peak_kw = float(np.max(naive_power_kw)) if naive_power_kw.size else 0.0
-        value = historical_peak_kw / 1.5
-        return {b: value for b in range(1, 6)}
+        return {b: historical_peak_kw / 1.5 for b in _BLOCKS}
 
     def _precompute_peak_seed_history(self):
         """One-time O(n) precompute of per-row tariff block, reset-window id,
-        and a per-block running 'historical no-battery peak so far' array,
-        used to seed the ratchet peak tracker at arbitrary episode-start
-        indices (see compute_seed_peak_kw)."""
-        hours_per_interval = (1440.0 / self.korakov_na_dan) / 60.0
-        naive_import_kwh = np.maximum(self.arr_Con - self.arr_Gen, 0.0)
-        naive_power_kw = (
-            naive_import_kwh / hours_per_interval
-            if hours_per_interval > 0
-            else naive_import_kwh
-        )
+        and a per-block running 'historical no-battery peak so far' array, used
+        to seed the ratchet peak tracker at arbitrary episode-start indices
+        (see compute_seed_peak_kw)."""
+        naive_power_kw = self._naive_import_power_kw()
 
         block_cache = {}
-        blok_arr = np.empty(self.data_length, dtype=np.int32)
+        block_arr = np.empty(self.data_length, dtype=np.int32)
         window_id_arr = np.empty(self.data_length, dtype=np.int64)
         for i in range(self.data_length):
             ts = self.dataset.index[i]
             cache_key = (ts.year, ts.month, ts.day, ts.hour)
-            blok = block_cache.get(cache_key)
-            if blok is None:
-                blok = resolve_block_for_datetime(
+            block = block_cache.get(cache_key)
+            if block is None:
+                block = resolve_block_for_datetime(
                     ts, pricing_reference_year=self.pricing_reference_year
                 )
-                block_cache[cache_key] = blok
-            blok_arr[i] = blok
+                block_cache[cache_key] = block
+            block_arr[i] = block
             window_id_arr[i] = resolve_reset_window_id(ts, self.peak_reset_months)
 
+        # Running max per block, restarting at every reset-window boundary.
+        window_starts = np.flatnonzero(np.diff(window_id_arr, prepend=window_id_arr[0] - 1) != 0)
         peak_seed_history = {}
-        for b in range(1, 6):
-            seed = np.zeros(self.data_length, dtype=np.float64)
-            running = 0.0
-            running_window = window_id_arr[0]
-            for i in range(self.data_length):
-                if window_id_arr[i] != running_window:
-                    running = 0.0
-                    running_window = window_id_arr[i]
-                if blok_arr[i] == b:
-                    running = max(running, float(naive_power_kw[i]))
-                seed[i] = running
+        for b in _BLOCKS:
+            in_block = np.where(block_arr == b, naive_power_kw, 0.0)
+            seed = np.empty(self.data_length, dtype=np.float64)
+            for start, stop in zip(window_starts, [*window_starts[1:], self.data_length]):
+                seed[start:stop] = np.maximum.accumulate(in_block[start:stop])
             peak_seed_history[b] = seed
-        return blok_arr, window_id_arr, peak_seed_history
+        return block_arr, window_id_arr, peak_seed_history
 
     def compute_seed_peak_kw(self, start_idx):
         """Running peak state (per block) to seed an episode starting at
         `start_idx`, derived from historical no-battery grid draw up to (but
-        not including) start_idx. Returns all-zero if peak tracking is
-        disabled for this scheme, at the very start of the dataset, or right
-        after a reset-window boundary."""
-        if self._peak_seed_history is None or start_idx <= 0:
-            return {b: 0.0 for b in range(1, 6)}
+        not including) start_idx. Returns all-zero at the very start of the
+        dataset or right after a reset-window boundary."""
+        if start_idx <= 0:
+            return {b: 0.0 for b in _BLOCKS}
         ref_idx = start_idx - 1
         cur_idx = min(start_idx, self.data_length - 1)
         if self._window_id_arr[ref_idx] != self._window_id_arr[cur_idx]:
-            return {b: 0.0 for b in range(1, 6)}
-        return {b: float(self._peak_seed_history[b][ref_idx]) for b in range(1, 6)}
+            return {b: 0.0 for b in _BLOCKS}
+        return {b: float(self._peak_seed_history[b][ref_idx]) for b in _BLOCKS}
 
-    def _state_dim(self):
-        base_dim = 6 if self.observation_mode == "compact" else (
-            1 + 2
-            + self.window_past
-            + self.window_past
-            + (self.window_past + self.window_future)
-        )
-        return base_dim + 2
-
-    def _get_state_object(self, idx, baterija, placilo):
-        baterija = float(np.clip(baterija, 0.0, self.bat_kapaciteta))
-        return _StateDQN(
-            Korak=idx,
-            CenaEl=self.arr_SMP[idx],
-            Baterija=baterija,
-            Generiranje=self.arr_Gen[idx],
-            Poraba=self.arr_Con[idx],
-            Mesec=self.arr_Month[idx],
-            DanVTednu=self.arr_DayOfWeek[idx],
-            Ura=self.arr_Hour[idx],
-            Minuta=self.arr_Minute[idx],
-            CenaEl_norm=self.arr_SMP_norm[idx],
-            CenaElRel=self.arr_RelativePrice[idx],
-            Generiranje_norm=self.arr_Gen_norm[idx],
-            Poraba_norm=self.arr_Con_norm[idx],
-            Baterija_norm=(baterija / self.bat_kapaciteta) if self.bat_kapaciteta > 0 else 0.0,
-            Placilo=placilo,
-        )
-
-    def _action_to_int(self, action):
-        if hasattr(action, "value"):
-            action = action.value
-        a = int(action)
-        if a < 0 or a >= self.action_space.n:
-            raise ValueError(f"Unsupported action: {action}")
-        return a
-
-    def action_masks(self):
-        """Return a boolean action mask for MaskablePPO.
-
-        The original environment can technically execute every action, but some are
-        effectively degenerate when the battery is full/empty or when no excess solar
-        is available. Exposing these simple feasibility constraints gives
-        MaskablePPO a valid mask interface without changing the base transition logic.
-        """
-        s = self._get_state_object(self._current_step, self._battery, self._cumulative_payment)
-        excess_solar = PaneliOdvec(s.Generiranje, s.Poraba)
-        can_charge = s.Baterija < (self.bat_kapaciteta - 1e-8)
-        can_discharge = s.Baterija > 1e-8
-
-        return np.array(
-            [
-                can_charge,
-                can_charge and (excess_solar > 1e-8),
-                can_discharge,
-                can_discharge,
-                True,
-            ],
-            dtype=bool,
-        )
-
+    # ------------------------------------------------------------------
+    # Observations
+    # ------------------------------------------------------------------
     def _current_block_features(self, idx):
-        if self._blok_arr is None or idx < 0 or idx >= self.data_length:
-            return 0.0, 0.0
+        block = int(self._block_arr[idx])
+        return float(self.contracted_power_kw.get(block, 0.0)), float(block) / N_BLOCKS
 
-        blok = int(self._blok_arr[idx])
-        max_power_kw = float(self.dogovorjena_moc.get(blok, 0.0)) if self.dogovorjena_moc is not None else 0.0
-        block_ratio = float(blok) / 5.0
-        return max_power_kw, block_ratio
-
-    def _build_observation(self, idx, baterija_norm):
-        # Create cyclical time features
-        hour_fraction = (self.arr_Hour[idx] + self.arr_Minute[idx]/60.0) / 24.0
+    def _build_observation(self, idx, soc_norm):
+        # Cyclical time-of-day features.
+        hour_fraction = (self.arr_hour[idx] + self.arr_minute[idx] / 60.0) / 24.0
         sin_time = np.sin(2 * np.pi * hour_fraction)
         cos_time = np.cos(2 * np.pi * hour_fraction)
         block_peak_kw, block_ratio = self._current_block_features(idx)
@@ -456,10 +370,10 @@ class HouseholdEnvironment(gym.Env):
         if self.observation_mode == "compact":
             return np.array(
                 [
-                    baterija_norm,
-                    self.arr_Gen_norm[idx],
-                    self.arr_Con_norm[idx],
-                    self.arr_SMP_norm[idx],
+                    soc_norm,
+                    self.arr_generation_norm[idx],
+                    self.arr_consumption_norm[idx],
+                    self.arr_price_norm[idx],
                     sin_time,
                     cos_time,
                     block_peak_kw,
@@ -471,14 +385,14 @@ class HouseholdEnvironment(gym.Env):
         start_past = max(0, idx - self.window_past + 1)
         pad_left = self.window_past - (idx - start_past + 1)
 
-        gen_slice = self.arr_Gen_norm[start_past : idx + 1].astype(np.float32)
+        gen_slice = self.arr_generation_norm[start_past : idx + 1].astype(np.float32)
         gen_window = np.concatenate([np.zeros(pad_left, dtype=np.float32), gen_slice])
 
-        con_slice = self.arr_Con_norm[start_past : idx + 1].astype(np.float32)
+        con_slice = self.arr_consumption_norm[start_past : idx + 1].astype(np.float32)
         con_window = np.concatenate([np.zeros(pad_left, dtype=np.float32), con_slice])
 
         end_price = min(self.data_length, idx + self.window_future + 1)
-        price_slice = self.arr_SMP_norm[start_past:end_price].astype(np.float32)
+        price_slice = self.arr_price_norm[start_past:end_price].astype(np.float32)
         pad_right = (self.window_past + self.window_future) - pad_left - len(price_slice)
         price_window = np.concatenate(
             [
@@ -490,48 +404,104 @@ class HouseholdEnvironment(gym.Env):
 
         return np.concatenate(
             [
-                np.array([baterija_norm], dtype=np.float32),
+                np.array([soc_norm], dtype=np.float32),
                 gen_window,
                 con_window,
                 price_window,
-                np.array([sin_time, cos_time], dtype=np.float32),
-                np.array([block_peak_kw, block_ratio], dtype=np.float32),
+                np.array([sin_time, cos_time, block_peak_kw, block_ratio], dtype=np.float32),
             ]
         ).astype(np.float32)
 
-    def _nagrada_1(self, s):
-        alfa = 0.1
-        beta = 0.8
-        soc = s.Baterija_norm
-        if soc < alfa:
-            return -5.0 * (alfa - soc) * self.faktor_n1
-        if soc > beta:
-            return -5.0 * (soc - beta) * self.faktor_n1
+    # ------------------------------------------------------------------
+    # Reward
+    # ------------------------------------------------------------------
+    def _reward_soc(self, soc_norm):
+        """Penalize leaving the comfortable state-of-charge band."""
+        low, high = 0.1, 0.8
+        if soc_norm < low:
+            return -5.0 * (low - soc_norm) * self.reward_weight_soc
+        if soc_norm > high:
+            return -5.0 * (soc_norm - high) * self.reward_weight_soc
         return 0.0
 
-    def _nagrada_2(self, s, sprememba_baterije, _cena_el_med):
-        if self.bat_kapaciteta <= 0:
+    def _reward_arbitrage(self, relative_price, battery_delta_kwh):
+        """Reward charging when the price is below its rolling median and
+        discharging when it is above."""
+        if self.battery_capacity_kwh <= 0:
             return 0.0
-        gamma2 = 3.0
-        norm_change = sprememba_baterije / self.bat_kapaciteta
-        return -5.0 * gamma2 * norm_change * s.CenaElRel * self.faktor_n2
+        gamma = 3.0
+        norm_change = battery_delta_kwh / self.battery_capacity_kwh
+        return -5.0 * gamma * norm_change * relative_price * self.reward_weight_arbitrage
 
-    def _nagrada_3(self, placilo_zdaj):
-        delta = 5.0 / 8.0
-        return -delta * placilo_zdaj * self.faktor_n3
+    def _reward_cost(self, variable_cost_eur):
+        """Penalize the decision-dependent part of this interval's bill."""
+        return -(5.0 / 8.0) * variable_cost_eur * self.reward_weight_cost
 
-    def _nagrada_skupno(self, s, sprememba_baterije, placilo_zdaj, cena_el_med):
-        if self.bat_kapaciteta <= 0:
-            return self._nagrada_3(placilo_zdaj)
-        denominator = self.faktor_n1 + self.faktor_n2 + self.faktor_n3
+    def compute_reward(self, soc_norm, relative_price, battery_delta_kwh, variable_cost_eur):
+        """Weighted sum of the three reward components, normalized by the sum of
+        the weights. Public so the MILP benchmark can score its own trajectory
+        with exactly the environment's reward."""
+        if self.battery_capacity_kwh <= 0:
+            return self._reward_cost(variable_cost_eur)
+        denominator = (
+            self.reward_weight_soc + self.reward_weight_arbitrage + self.reward_weight_cost
+        )
         if denominator <= 0:
-            return self._nagrada_3(placilo_zdaj)
+            return self._reward_cost(variable_cost_eur)
         return (
-            self._nagrada_1(s)
-            + self._nagrada_2(s, sprememba_baterije, cena_el_med)
-            + self._nagrada_3(placilo_zdaj)
+            self._reward_soc(soc_norm)
+            + self._reward_arbitrage(relative_price, battery_delta_kwh)
+            + self._reward_cost(variable_cost_eur)
         ) / denominator
 
+    # ------------------------------------------------------------------
+    # Actions
+    # ------------------------------------------------------------------
+    def battery_limits(self, soc_kwh):
+        """(max charge, max discharge) setpoints feasible at this state of
+        charge, both non-negative kWh at the AC side."""
+        return (
+            max_charge_now(
+                soc_kwh, self.charge_efficiency, self.max_charge_kwh, self.battery_capacity_kwh
+            ),
+            max_discharge_now(soc_kwh, self.discharge_efficiency, self.max_discharge_kwh),
+        )
+
+    def discrete_action_to_setpoint(self, action_int, soc_kwh, generation_kwh, consumption_kwh):
+        """Legacy discrete action -> battery setpoint (kWh, + charge / - discharge)."""
+        limit_charge, limit_discharge = self.battery_limits(soc_kwh)
+        if action_int == ACTION_CHARGE_ANY:
+            return limit_charge
+        if action_int == ACTION_CHARGE_PV:
+            return min(pv_surplus(generation_kwh, consumption_kwh), limit_charge)
+        if action_int == ACTION_DISCHARGE_HOME:
+            return -min(max(consumption_kwh - generation_kwh, 0.0), limit_discharge)
+        if action_int == ACTION_DISCHARGE_ANY:
+            return -limit_discharge
+        if action_int == ACTION_IDLE:
+            return 0.0
+        raise ValueError(f"Unsupported discrete action: {action_int}")
+
+    def _resolve_action(self, action, soc_kwh, generation_kwh, consumption_kwh):
+        """Turn whatever the agent produced into (setpoint_kwh, action_int)."""
+        if self.action_mode == "discrete":
+            action_int = int(getattr(action, "value", action))
+            if not 0 <= action_int < self.n_discrete_actions:
+                raise ValueError(f"Unsupported action: {action}")
+            setpoint = self.discrete_action_to_setpoint(
+                action_int, soc_kwh, generation_kwh, consumption_kwh
+            )
+            return setpoint, action_int
+
+        value = float(np.asarray(action, dtype=np.float64).reshape(-1)[0])
+        if self.action_scale == "normalized":
+            limit_charge, limit_discharge = self.battery_limits(soc_kwh)
+            value = value * (limit_charge if value >= 0 else limit_discharge)
+        return value, None
+
+    # ------------------------------------------------------------------
+    # Episode plumbing
+    # ------------------------------------------------------------------
     def _resolve_start_index(self, options):
         mode = self.reset_mode
         if options is not None:
@@ -543,42 +513,33 @@ class HouseholdEnvironment(gym.Env):
         if mode == "random":
             return int(self.np_random.integers(0, max_valid_start + 1))
         if mode == "sequential":
-            n = int(options.get("sequential_n", 10)) if options else 10
-            n = max(1, n)
+            n = max(1, int(options.get("sequential_n", 10)) if options else 10)
             idx = self._sequential_counter % n
             self._sequential_counter += 1
             return int(max_valid_start * idx / n)
         raise ValueError("reset_mode must be 'deterministic', 'random', or 'sequential'")
 
-    def _build_info(self, s, action_int=None, energy_flows=None, reward_components=None):
+    def _build_info(self, idx, soc_kwh, cumulative_payment, **extra):
+        soc_norm = (
+            soc_kwh / self.battery_capacity_kwh if self.battery_capacity_kwh > 0 else 0.0
+        )
         info = {
-            "step_idx": int(s.Korak),
-            "battery": float(s.Baterija),
-            "battery_norm": float(s.Baterija_norm),
-            "cumulative_payment": float(s.Placilo),
-            "price": float(s.CenaEl),
-            "price_norm": float(s.CenaEl_norm),
-            "relative_price": float(s.CenaElRel),
-            "generation": float(s.Generiranje),
-            "consumption": float(s.Poraba),
+            "step_idx": int(idx),
+            "battery": float(soc_kwh),
+            "battery_norm": float(soc_norm),
+            "cumulative_payment": float(cumulative_payment),
+            "price": float(self.arr_price[idx]),
+            "price_norm": float(self.arr_price_norm[idx]),
+            "relative_price": float(self.arr_relative_price[idx]),
+            "generation": float(self.arr_generation[idx]),
+            "consumption": float(self.arr_consumption[idx]),
         }
-        if action_int is not None:
-            info["action"] = int(action_int)
-        if energy_flows is not None:
-            info["energy_flows"] = energy_flows
-        if reward_components is not None:
-            info["reward_components"] = reward_components
+        info.update({k: v for k, v in extra.items() if v is not None})
         return info
 
-    def _resolve_invoice_run_label(self):
-        if self.invoice_run_label:
-            return str(self.invoice_run_label)
-        return str(self.pricing_scheme)
-
     def _invoice_period_label(self, start_idx, end_idx):
-        end_idx = min(end_idx, self.data_length - 1)
         start_ts = self.dataset.index[start_idx]
-        end_ts = self.dataset.index[end_idx]
+        end_ts = self.dataset.index[min(end_idx, self.data_length - 1)]
         return f"{start_ts:%Y-%m-%d}_{end_ts:%Y-%m-%d}"
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
@@ -590,230 +551,235 @@ class HouseholdEnvironment(gym.Env):
                 # would otherwise silently drop the previous episode's invoice.
                 self._invoice_builder.finalize()
             self._invoice_builder = InvoiceBuilder(
-                dogovorjena_moc=self.dogovorjena_moc,
+                dogovorjena_moc=self.contracted_power_kw,
                 pricing_scheme=self.pricing_scheme,
                 eko_racun=self.invoice_eko_racun,
-                interval_minutes=1440.0 / self.korakov_na_dan,
+                interval_minutes=self.interval_minutes,
                 output_dir=self.invoice_output_dir,
-                run_label=self._resolve_invoice_run_label(),
+                run_label=str(self.invoice_run_label or self.pricing_scheme),
                 write_monthly=self.generate_monthly_invoice,
                 write_period=self.generate_period_invoice,
                 pricing_reference_year=self.pricing_reference_year,
             )
 
         self._episode_start = self._resolve_start_index(options)
-        self._episode_end_exclusive = min(
-            self.data_length,
-            self._episode_start + self.episode_length,
+        self._episode_end_exclusive = max(
+            self._episode_start + 1,
+            min(self.data_length, self._episode_start + self.episode_length),
         )
-        if self._episode_end_exclusive <= self._episode_start:
-            self._episode_end_exclusive = min(self.data_length, self._episode_start + 1)
 
         self._current_step = self._episode_start
         self._episode_steps = 0
-        self._battery = max(0.0, self.bat_kapaciteta / 2.0)
+        self._battery = max(0.0, self.battery_capacity_kwh / 2.0)
         self._cumulative_payment = 0.0
         self._peak_kw = self.compute_seed_peak_kw(self._episode_start)
-        self._peak_window_id = (
-            int(self._window_id_arr[self._episode_start])
-            if self._window_id_arr is not None
-            else 0
+        self._peak_window_id = int(self._window_id_arr[self._episode_start])
+
+        soc_norm = (
+            self._battery / self.battery_capacity_kwh if self.battery_capacity_kwh > 0 else 0.0
+        )
+        obs = self._build_observation(self._current_step, soc_norm)
+        return obs, self._build_info(self._current_step, self._battery, self._cumulative_payment)
+
+    # ------------------------------------------------------------------
+    # Transition
+    # ------------------------------------------------------------------
+    def step(self, action):
+        idx = self._current_step
+        soc_kwh = float(np.clip(self._battery, 0.0, self.battery_capacity_kwh))
+        soc_norm = soc_kwh / self.battery_capacity_kwh if self.battery_capacity_kwh > 0 else 0.0
+        generation_kwh = self.arr_generation[idx]
+        consumption_kwh = self.arr_consumption[idx]
+
+        setpoint_requested, action_int = self._resolve_action(
+            action, soc_kwh, generation_kwh, consumption_kwh
         )
 
-        s0 = self._get_state_object(self._current_step, self._battery, self._cumulative_payment)
-        obs = self._build_observation(s0.Korak, s0.Baterija_norm)
-        return obs, self._build_info(s0)
-
-    def step(self, action):
-        action_int = self._action_to_int(action)
-
-        s = self._get_state_object(self._current_step, self._battery, self._cumulative_payment)
-        next_idx = int(s.Korak + 1)
-
+        next_idx = idx + 1
         if next_idx >= self.data_length:
-            obs = self._build_observation(s.Korak, s.Baterija_norm)
+            obs = self._build_observation(idx, soc_norm)
             if self._invoicing_enabled:
                 self._invoice_builder.finalize(
-                    period_label=self._invoice_period_label(self._episode_start, s.Korak)
+                    period_label=self._invoice_period_label(self._episode_start, idx)
                 )
-            return obs, 0.0, True, False, self._build_info(s, action_int=action_int)
+            info = self._build_info(idx, soc_kwh, self._cumulative_payment, action=action_int)
+            return obs, 0.0, True, False, info
 
-        ostala_energija = PaneliOdvec(s.Generiranje, s.Poraba)
-        paneli_baterija = 0.0
-        omrezje_baterija = 0.0
-        baterija_dom = 0.0
-        baterija_omrezje = 0.0
+        # --- Energy router -------------------------------------------------
+        # One signed setpoint drives every flow; the discrete actions above are
+        # just five particular choices of setpoint.
+        limit_charge, limit_discharge = self.battery_limits(soc_kwh)
+        setpoint = float(np.clip(setpoint_requested, -limit_discharge, limit_charge))
 
-        bat_max_pol_trenutno = BatMaxPolTrenutno(
-            s,
-            self.bat_ucinkovitost,
-            self.bat_max_polnjenje,
-            self.bat_kapaciteta,
+        surplus_kwh = pv_surplus(generation_kwh, consumption_kwh)
+        deficit_kwh = max(consumption_kwh - generation_kwh, 0.0)
+
+        if setpoint >= 0.0:
+            pv_to_battery_kwh = min(setpoint, surplus_kwh)
+            grid_to_battery_kwh = setpoint - pv_to_battery_kwh
+            battery_to_home_kwh = battery_to_grid_kwh = 0.0
+        else:
+            battery_to_home_kwh = min(-setpoint, deficit_kwh)
+            battery_to_grid_kwh = -setpoint - battery_to_home_kwh
+            pv_to_battery_kwh = grid_to_battery_kwh = 0.0
+
+        grid_import_kwh = consumption_kwh - generation_kwh + setpoint
+
+        battery_delta_kwh = battery_delta(
+            pv_to_battery_kwh + grid_to_battery_kwh,
+            battery_to_home_kwh + battery_to_grid_kwh,
+            self.charge_efficiency,
+            self.discharge_efficiency,
         )
-        bat_max_pra_trenutno = BatMaxPraTrenutno(
-            s,
-            self.bat_ucinkovitost,
-            self.bat_max_praznjenje,
+
+        balance_error = (
+            (pv_to_battery_kwh + grid_to_battery_kwh)
+            + consumption_kwh
+            - generation_kwh
+            - grid_import_kwh
+            - (battery_to_home_kwh + battery_to_grid_kwh)
         )
-
-        if action_int == 0:
-            if ostala_energija >= bat_max_pol_trenutno:
-                paneli_baterija = bat_max_pol_trenutno
-            else:
-                paneli_baterija = ostala_energija
-                omrezje_baterija = bat_max_pol_trenutno - ostala_energija
-            kupljena_elektrika = s.Poraba + bat_max_pol_trenutno - s.Generiranje
-
-        elif action_int == 1:
-            if ostala_energija > bat_max_pol_trenutno:
-                paneli_baterija = bat_max_pol_trenutno
-                kupljena_elektrika = s.Poraba + bat_max_pol_trenutno - s.Generiranje
-            else:
-                paneli_baterija = ostala_energija
-                kupljena_elektrika = s.Poraba + ostala_energija - s.Generiranje
-
-        elif action_int == 2:
-            if (s.Poraba > s.Generiranje) and (bat_max_pra_trenutno > (s.Poraba - s.Generiranje)):
-                baterija_dom = s.Poraba - s.Generiranje
-                kupljena_elektrika = 0.0
-            elif s.Poraba <= s.Generiranje:
-                kupljena_elektrika = -ostala_energija
-            else:
-                baterija_dom = bat_max_pra_trenutno
-                kupljena_elektrika = (s.Poraba - s.Generiranje) - bat_max_pra_trenutno
-
-        elif action_int == 3:
-            if (s.Poraba > s.Generiranje) and (bat_max_pra_trenutno > (s.Poraba - s.Generiranje)):
-                baterija_dom = s.Poraba - s.Generiranje
-                baterija_omrezje = bat_max_pra_trenutno - (s.Poraba - s.Generiranje)
-                kupljena_elektrika = -baterija_omrezje
-            elif s.Poraba <= s.Generiranje:
-                baterija_omrezje = bat_max_pra_trenutno
-                kupljena_elektrika = -ostala_energija - baterija_omrezje
-            else:
-                baterija_dom = bat_max_pra_trenutno
-                kupljena_elektrika = (s.Poraba - s.Generiranje) - bat_max_pra_trenutno
-
-        elif action_int == 4:
-            kupljena_elektrika = s.Poraba - s.Generiranje
-
-        sprememba_baterije = BaterijaSprememba(
-            paneli_baterija,
-            omrezje_baterija,
-            baterija_dom,
-            baterija_omrezje,
-            self.bat_ucinkovitost,
-        )
-        
-        if abs((paneli_baterija + omrezje_baterija ) + s.Poraba - s.Generiranje - kupljena_elektrika - (baterija_dom + baterija_omrezje)) > 1e-8:
+        if abs(balance_error) > 1e-8:
             raise ValueError(
-                f"Energy balance error: "
-                f"(paneli_baterija + omrezje_baterija)={paneli_baterija + omrezje_baterija}, "
-                f"Poraba={s.Poraba}, Generiranje={s.Generiranje}, "
-                f"kupljena_elektrika={kupljena_elektrika}, "
-                f"(baterija_dom + baterija_omrezje)={baterija_dom + baterija_omrezje}"
+                f"Energy balance error {balance_error}: "
+                f"charge={pv_to_battery_kwh + grid_to_battery_kwh}, "
+                f"discharge={battery_to_home_kwh + battery_to_grid_kwh}, "
+                f"consumption={consumption_kwh}, generation={generation_kwh}, "
+                f"grid_import={grid_import_kwh}"
             )
-        
-        #if kupljena_elektrika > 0:
-        #    placilo_zdaj = s.CenaEl * kupljena_elektrika
-        #else:
-        #    placilo_zdaj = s.CenaEl * kupljena_elektrika * self.faktor_cenitve
-            
-        if self._window_id_arr is not None:
-            current_window_id = int(self._window_id_arr[s.Korak])
-            if current_window_id != self._peak_window_id:
-                self._peak_kw = {b: 0.0 for b in range(1, 6)}
-                self._peak_window_id = current_window_id
 
-        _price_result = calculate_interval_price(
-            s.CenaEl,
-            kupljena_elektrika,
-            utc_date = self.dataset.index[s.Korak],
-            interval_minutes = 1440.0 / self.korakov_na_dan,
+        # --- Pricing -------------------------------------------------------
+        current_window_id = int(self._window_id_arr[idx])
+        if current_window_id != self._peak_window_id:
+            self._peak_kw = {b: 0.0 for b in _BLOCKS}
+            self._peak_window_id = current_window_id
+
+        price_result = calculate_interval_price(
+            self.arr_price[idx],
+            grid_import_kwh,
+            utc_date=self.dataset.index[idx],
+            interval_minutes=self.interval_minutes,
             scheme=self.pricing_scheme,
-            compare_all=self.pricing_compare_all,
             include_raw=(self.pricing_include_raw or self._invoicing_enabled),
-            dogovorjena_moc=self.dogovorjena_moc,
+            dogovorjena_moc=self.contracted_power_kw,
             prev_peak_kw=self._peak_kw,
             **self.pricing_options,
         )
-        konstantno_placilo = float(_price_result["constant_price_aud"])
-        placilo_zdaj = float(_price_result["variable_price_aud"])
-        self._peak_kw = dict(_price_result["new_peak_kw"])
+        fixed_cost_eur = float(price_result["constant_price_aud"])
+        variable_cost_eur = float(price_result["variable_price_aud"])
+        self._peak_kw = dict(price_result["new_peak_kw"])
         if self._invoicing_enabled:
-            self._invoice_builder.add_interval(_price_result)
+            self._invoice_builder.add_interval(price_result)
 
-        new_battery = float(np.clip(s.Baterija + sprememba_baterije, 0.0, self.bat_kapaciteta))
-        if s.Baterija + sprememba_baterije < -1e-8 or s.Baterija + sprememba_baterije > self.bat_kapaciteta + 1e-8:
+        # --- State update --------------------------------------------------
+        new_soc_kwh = soc_kwh + battery_delta_kwh
+        if not -1e-8 <= new_soc_kwh <= self.battery_capacity_kwh + 1e-8:
             raise ValueError(
-                f"Battery state out of bounds: "
-                f"current={s.Baterija}, change={sprememba_baterije}, "
-                f"new={new_battery}, capacity={self.bat_kapaciteta}"
+                f"Battery state out of bounds: current={soc_kwh}, "
+                f"change={battery_delta_kwh}, new={new_soc_kwh}, "
+                f"capacity={self.battery_capacity_kwh}"
             )
-        if abs(new_battery - s.Baterija - sprememba_baterije) > 1e-8:
-            raise ValueError(
-                f"Battery state mismatch: "
-                f"current={s.Baterija}, change={sprememba_baterije}, "
-                f"new={new_battery}"
+        new_soc_kwh = float(np.clip(new_soc_kwh, 0.0, self.battery_capacity_kwh))
+        new_payment = self._cumulative_payment + variable_cost_eur + fixed_cost_eur
+
+        # --- Reward --------------------------------------------------------
+        relative_price = self.arr_relative_price[idx]
+        r_soc = self._reward_soc(soc_norm)
+        r_arbitrage = (
+            self._reward_arbitrage(relative_price, battery_delta_kwh)
+            if self.battery_capacity_kwh > 0
+            else 0.0
+        )
+        r_cost = self._reward_cost(variable_cost_eur)
+
+        penalty = self._infeasible_request_penalty(
+            action_int, soc_kwh, surplus_kwh, setpoint_requested, setpoint
+        )
+        reward = float(
+            np.clip(
+                self.compute_reward(
+                    soc_norm, relative_price, battery_delta_kwh, variable_cost_eur
+                )
+                + penalty,
+                -10.0,
+                5.0,
             )
-        new_payment = s.Placilo + placilo_zdaj + konstantno_placilo
-        next_s = self._get_state_object(next_idx, new_battery, new_payment)
+        )
 
-        cena_el_med = self.arr_MedianPrice[s.Korak]
-        
-        # Calculate illegal action penalty
-        penalty = 0.0
-        if action_int in [2, 3] and s.Baterija <= 1e-8:
-            penalty = -0.5 # Tried to discharge an empty battery
-        elif action_int in [0, 1] and s.Baterija >= (self.bat_kapaciteta - 1e-8) and ostala_energija > 0:
-            penalty = -0.5 # Tried to charge a full battery
-                    
-        reward = self._nagrada_skupno(s, sprememba_baterije, placilo_zdaj, cena_el_med) + penalty
-        reward = float(np.clip(reward, -10.0, 5.0))
-        
-        r_kapaciteta = self._nagrada_1(s)
-        r_sprememba = self._nagrada_2(s, sprememba_baterije, cena_el_med) if self.bat_kapaciteta > 0 else 0.0
-        r_placilo = self._nagrada_3(placilo_zdaj)
-
-        self._current_step = next_s.Korak
-        self._battery = next_s.Baterija
-        self._cumulative_payment = next_s.Placilo
+        self._current_step = next_idx
+        self._battery = new_soc_kwh
+        self._cumulative_payment = new_payment
         self._episode_steps += 1
 
         terminated = self._current_step >= (self.data_length - 1)
         truncated = self._current_step >= (self._episode_end_exclusive - 1)
-        obs = self._build_observation(next_s.Korak, next_s.Baterija_norm)
+
+        new_soc_norm = (
+            new_soc_kwh / self.battery_capacity_kwh if self.battery_capacity_kwh > 0 else 0.0
+        )
+        obs = self._build_observation(next_idx, new_soc_norm)
 
         info = self._build_info(
-            next_s,
-            action_int=action_int,
+            next_idx,
+            new_soc_kwh,
+            new_payment,
+            action=action_int,
+            battery_setpoint_kwh={
+                "requested": float(setpoint_requested),
+                "applied": float(setpoint),
+            },
             energy_flows={
-                "paneli_baterija": float(paneli_baterija),
-                "omrezje_baterija": float(omrezje_baterija),
-                "baterija_dom": float(baterija_dom),
-                "baterija_omrezje": float(baterija_omrezje),
-                "kupljena_elektrika": float(kupljena_elektrika),
-                "sprememba_baterije": float(sprememba_baterije),
+                "pv_to_battery_kwh": float(pv_to_battery_kwh),
+                "grid_to_battery_kwh": float(grid_to_battery_kwh),
+                "battery_to_home_kwh": float(battery_to_home_kwh),
+                "battery_to_grid_kwh": float(battery_to_grid_kwh),
+                "grid_import_kwh": float(grid_import_kwh),
+                "battery_delta_kwh": float(battery_delta_kwh),
             },
             reward_components={
                 "total": float(reward),
-                "r_kapaciteta": float(r_kapaciteta),
-                "r_sprememba": float(r_sprememba),
-                "r_placilo": float(r_placilo),
-                "placilo_zdaj": float(placilo_zdaj),
-                "energy_component_eur": float(_price_result["energy_component_eur"]),
-                "power_component_eur": float(_price_result["power_component_eur"]),
-                "fixed_monthly_charge_eur": float(_price_result["fixed_monthly_charge_eur"]),
+                "r_soc": float(r_soc),
+                "r_arbitrage": float(r_arbitrage),
+                "r_cost": float(r_cost),
+                "variable_cost_eur": float(variable_cost_eur),
+                "energy_component_eur": float(price_result["energy_component_eur"]),
+                "power_component_eur": float(price_result["power_component_eur"]),
+                "fixed_monthly_charge_eur": float(price_result["fixed_monthly_charge_eur"]),
             },
+            peak_kw=dict(self._peak_kw),
         )
-        info["peak_kw"] = dict(self._peak_kw)
 
         if self._invoicing_enabled and (terminated or truncated):
             self._invoice_builder.finalize(
-                period_label=self._invoice_period_label(self._episode_start, next_s.Korak)
+                period_label=self._invoice_period_label(self._episode_start, next_idx)
             )
 
-        return obs, float(reward), bool(terminated), bool(truncated), info
+        return obs, reward, bool(terminated), bool(truncated), info
+
+    def _infeasible_request_penalty(
+        self, action_int, soc_kwh, surplus_kwh, setpoint_requested, setpoint_applied
+    ):
+        """Discourage asking for something the battery cannot do.
+
+        Discrete mode keeps the original flat penalty so legacy DQN runs stay
+        comparable. Continuous mode scales `clip_penalty` (0 by default) by how
+        much of the request had to be clipped away -- clipping alone already
+        removes any benefit from an infeasible setpoint.
+        """
+        if self.action_mode == "discrete":
+            if action_int in (ACTION_DISCHARGE_HOME, ACTION_DISCHARGE_ANY) and soc_kwh <= 1e-8:
+                return -0.5  # tried to discharge an empty battery
+            if (
+                action_int in (ACTION_CHARGE_ANY, ACTION_CHARGE_PV)
+                and soc_kwh >= (self.battery_capacity_kwh - 1e-8)
+                and surplus_kwh > 0
+            ):
+                return -0.5  # tried to charge a full battery
+            return 0.0
+
+        if self.clip_penalty == 0.0:
+            return 0.0
+        return -self.clip_penalty * abs(setpoint_requested - setpoint_applied)
 
     def render(self):
         return None
@@ -857,10 +823,12 @@ class CommunityEnvironment(gym.Env):
         self._flow_history: Dict[str, list] = {hid: [] for hid in self.household_ids}
         self._last_info: Dict[str, Dict[str, Any]] = {hid: {} for hid in self.household_ids}
 
-    def _default_action(self, household_id: str) -> int:
-        """Action 4 keeps the battery idle and is the safest fallback default."""
+    def _default_action(self, household_id: str):
+        """Leave the battery idle -- the safest fallback for a missing action."""
         env = self.household_envs[household_id]
-        return min(4, int(env.action_space.n) - 1)
+        if env.action_mode == "discrete":
+            return min(ACTION_IDLE, env.action_space.n - 1)
+        return np.zeros(1, dtype=np.float32)
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
         observations: Dict[str, Any] = {}
@@ -876,7 +844,7 @@ class CommunityEnvironment(gym.Env):
 
         return observations, infos
 
-    def step(self, actions: Dict[str, int]):
+    def step(self, actions: Dict[str, Any]):
         observations: Dict[str, Any] = {}
         rewards: Dict[str, float] = {}
         terminated: Dict[str, bool] = {}
@@ -895,12 +863,13 @@ class CommunityEnvironment(gym.Env):
 
             flow = info.get("energy_flows")
             if flow is not None:
-                flow_row = {
-                    "step_idx": int(info.get("step_idx", -1)),
-                    "household_id": hid,
-                    **{k: float(v) for k, v in flow.items()},
-                }
-                self._flow_history[hid].append(flow_row)
+                self._flow_history[hid].append(
+                    {
+                        "step_idx": int(info.get("step_idx", -1)),
+                        "household_id": hid,
+                        **{k: float(v) for k, v in flow.items()},
+                    }
+                )
 
         return observations, rewards, terminated, truncated, infos
 
@@ -910,25 +879,19 @@ class CommunityEnvironment(gym.Env):
 
     def get_cumulative_payment(self) -> Dict[str, float]:
         """Returns current cumulative payment per household."""
-        out: Dict[str, float] = {}
-        for hid in self.household_ids:
-            last_info = self._last_info.get(hid, {})
-            out[hid] = float(last_info.get("cumulative_payment", 0.0))
-        return out
+        return {
+            hid: float(self._last_info.get(hid, {}).get("cumulative_payment", 0.0))
+            for hid in self.household_ids
+        }
 
     def get_invoice_views(self, period_label: Optional[str] = None) -> Dict[str, Any]:
         """Returns separate household invoices and one group aggregate invoice."""
         household_rows: Dict[str, list] = {}
-
         for hid in self.household_ids:
-            builder = getattr(self.household_envs[hid], "_invoice_builder", None)
-            if builder is None:
-                household_rows[hid] = []
-                continue
-            household_rows[hid] = builder.get_monthly_line_items()
+            builder = self.household_envs[hid]._invoice_builder
+            household_rows[hid] = [] if builder is None else builder.get_monthly_line_items()
 
-        label = period_label or "Skupno_obdobje"
-        return aggregate_household_invoices(household_rows, label)
+        return aggregate_household_invoices(household_rows, period_label or "Skupno_obdobje")
 
     def render(self):
         return None

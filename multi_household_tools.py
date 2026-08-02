@@ -47,6 +47,8 @@ def run_interval_scenario(
     pv_scale_map: Optional[Dict[str, float]] = None,
     pricing_reference_year: int = 2026,
     contracted_power_kw: float = 5.0,
+    generation_column: str = "Energy_Generation",
+    consumption_column: str = "Energy_Consumption",
 ) -> Dict[str, Any]:
     """Run a no-optimization baseline over multiple households.
 
@@ -73,7 +75,7 @@ def run_interval_scenario(
             dogovorjena_moc=dogovorjena,
             pricing_scheme=scheme,
             interval_minutes=interval_minutes,
-            output_dir=Path("Resoults") / "Invoices",
+            output_dir=Path("Results") / "Invoices",
             run_label=f"{scenario_name}_{hid}",
             write_monthly=False,
             write_period=False,
@@ -87,8 +89,8 @@ def run_interval_scenario(
         total_consumption_kwh = 0.0
 
         for ts, row in df.iterrows():
-            generation_kwh = float(row["Energy_Generation"]) * pv_scale
-            consumption_kwh = float(row["Energy_Consumption"])
+            generation_kwh = float(row[generation_column]) * pv_scale
+            consumption_kwh = float(row[consumption_column])
             net_consumed_kwh = consumption_kwh - generation_kwh
 
             price_result = calculate_interval_price(
@@ -188,6 +190,8 @@ def run_souporaba_monthly_scenario(
     oddajnik_paket_id: str = "GENI_SAMO_DINAMICNI",
     prejemnik_paket_id: str = "GENI_DINAMICNI",
     contracted_power_kw: float = 5.0,
+    generation_column: str = "Energy_Generation",
+    consumption_column: str = "Energy_Consumption",
 ) -> pd.DataFrame:
     """Compute one-month souporaba settlement summary for a household group."""
     if oddajnik_id not in household_data:
@@ -244,10 +248,10 @@ def run_souporaba_monthly_scenario(
 
         for hid in all_ids:
             row = household_data[hid].loc[ts]
-            poraba[hid] = float(row["Energy_Consumption"])
+            poraba[hid] = float(row[consumption_column])
 
             pv_scale = float(pv_scale_map.get(hid, 0.0))
-            prod = float(row["Energy_Generation"]) * pv_scale
+            prod = float(row[generation_column]) * pv_scale
             if prod > 0:
                 proizvodnja[hid] = prod
 

@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable, List, Optional
 
-import os
 import pandas as pd
 
 
@@ -19,7 +18,6 @@ def _find_workspace_root(start: Optional[Path] = None) -> Path:
 
 
 WORKSPACE_ROOT = _find_workspace_root()
-IN_COLAB = os.path.exists("/content")
 INPUT_DATA_DIR = WORKSPACE_ROOT / "Input data"
 
 
@@ -136,25 +134,4 @@ def load_household_data(
 
 def load_multiple_households(household_ids: Iterable[int], *, dataset: str = "Ausgrid") -> dict:
     """Load multiple household datasets keyed by household id."""
-    result = {}
-    for hid in household_ids:
-        result[int(hid)] = load_household_data(int(hid), dataset=dataset)
-    return result
-
-
-def available_households(dataset: str = "Ausgrid", limit: Optional[int] = None) -> List[int]:
-    """List discovered household ids from filenames in a household dataset folder."""
-    dataset_source = _resolve_dataset_source(dataset)
-    if not dataset_source.is_dir() or dataset_source.name.lower() == "smp":
-        return []
-
-    ids = []
-    for csv_path in dataset_source.glob("*.csv"):
-        suffix = csv_path.stem.rsplit(" ", 1)[-1]
-        if suffix.isdigit():
-            ids.append(int(suffix))
-
-    ids.sort()
-    if limit is not None:
-        return ids[: int(limit)]
-    return ids
+    return {int(hid): load_household_data(int(hid), dataset=dataset) for hid in household_ids}

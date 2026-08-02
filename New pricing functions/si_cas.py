@@ -209,8 +209,3 @@ def aktivna_tarifa(lokalni_cas: dt.datetime) -> str:
     if 18 <= h < 21:
         return "konicna"
     return "osnovna"
-
-
-def izpisi_praznike(leto: int) -> None:
-    for d, ime in sorted(holidays.country_holidays("SI", years=leto).items()):
-        print(f"{d} {d.strftime('%a')} | {ime}")

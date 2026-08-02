@@ -36,7 +36,6 @@ VIRI (preverjeno 22. 7. 2026):
 """
 from __future__ import annotations
 
-import dataclasses
 import datetime as dt
 from dataclasses import dataclass, field
 from enum import Enum
@@ -390,7 +389,6 @@ _reg(Paket(
 # Elektro energija NE ponuja samooskrbnega cenika in ne odkupuje presežkov [E2],
 # zato noben paket ne dovoljuje PV in noben ne omogoča vloge oddajnika.
 ELEN_E_POPUST = 0.81          # EUR/merilno mesto/mesec, brez DDV [E1]
-ELEN_DODATEK_VIR = 0.82       # 100 % SONCE ali 100 % VODA, EUR/mm/mesec [E1]
 
 _reg(Paket(
     id="ELEN_ZANESLJIVA", dobavitelj="Elektro energija",
@@ -426,29 +424,6 @@ _reg(Paket(
     opombe="Zamejitev 220 EUR/MWh velja na URNI indeks SIPX (povprečje "
            "15-min poslov znotraj ure). Navzdol neomejeno. Brez vezave.",
 ))
-
-
-def z_izbiro_vira(paket: Paket, vir: str = "jedrska") -> Paket:
-    """Vrne kopijo paketa z dodatkom za izbiro vira energije [E1].
-
-    Privzeti vir je brezogljična jedrska energija (0,00 EUR/mesec) — to je
-    tudi dejanski privzetek Elektro energije od 1. 1. 2021 in najcenejša
-    izbira, zato `z_izbiro_vira(p)` vrne paket nespremenjen. '100 % SONCE'
-    ali '100 % VODA' se lahko doda h kateremu koli ceniku za 0,82 EUR/merilno
-    mesto/mesec brez DDV. Na merilnem mestu je mogoče izbrati le en vir.
-    """
-    vir = vir.lower()
-    if vir in ("jedrska", "jedrski", "privzeto"):
-        return paket
-    if vir not in ("sonce", "soncni", "voda", "vodni"):
-        raise ValueError("vir mora biti 'sonce', 'voda' ali 'jedrska'")
-    oznaka = "100 % SONCE" if vir.startswith("son") else "100 % VODA"
-    return dataclasses.replace(
-        paket,
-        id=f"{paket.id}_{'SONCE' if vir.startswith('son') else 'VODA'}",
-        ime=f"{paket.ime} + {oznaka}",
-        dodatna_storitev=paket.dodatna_storitev + ELEN_DODATEK_VIR,
-    )
 
 
 # ===========================================================================

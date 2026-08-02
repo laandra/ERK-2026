@@ -1,22 +1,16 @@
 """Pricing_Functions.py — unified single-user interval pricing dispatcher for RL/MILP.
 
-Two pricing families are supported:
+Two schemes are supported, both modelling real Slovenian household electricity
+billing on top of the `si_tarife`/`si_cas`/`si_paketi`/`si_obracun` modules:
 
-  SCHEME_AUS_BASE:
-    Legacy Australian benchmark pricing (`Aus_Base`), kept unchanged as the
-    original default behavior for existing RL pipelines.
+  - `si_dobava`      — plain grid supply, no on-site production (PV).
+  - `si_samooskrba`  — PV self-supply with intra-interval netting.
 
-  SCHEME_SI_DOBAVA / SCHEME_SI_SAMOOSKRBA:
-    Real Slovenian household electricity billing, built on top of the
-    `si_tarife`/`si_cas`/`si_paketi`/`si_obracun` modules:
-      - `si_dobava`      — plain grid supply, no on-site production (PV).
-      - `si_samooskrba`  — PV self-supply with intra-interval netting.
-    Both return a full per-interval breakdown: a decision-independent fixed
-    monthly charge (network power-block fee, OVE+SPTE levy, supplier monthly
-    fee — prorated per interval) plus a decision-dependent variable charge
-    split into its linear energy component (per-kWh, time-of-use/block
-    priced) and its power/peak component (a ratchet excess-power charge —
-    see `si_konica.py`).
+Both return a full per-interval breakdown: a decision-independent fixed
+monthly charge (network power-block fee, OVE+SPTE levy, supplier monthly fee —
+prorated per interval) plus a decision-dependent variable charge split into its
+linear energy component (per-kWh, time-of-use/block priced) and its power/peak
+component (a ratchet excess-power charge — see `si_konica.py`).
 
 Multi-user schemes (`si_skupnost`, community/peer-sharing "souporaba") are
 explicitly NOT supported here — single user only. They will get their own
@@ -46,12 +40,10 @@ from si_konica import marginal_excess_charge_eur, reset_window_id, update_runnin
 # -----------------------------------------------------------------------------
 # Public scheme names
 # -----------------------------------------------------------------------------
-SCHEME_AUS_BASE = "aus_base"
 SCHEME_SI_DOBAVA = "si_dobava"
 SCHEME_SI_SAMOOSKRBA = "si_samooskrba"
 
 SUPPORTED_SCHEMES: Tuple[str, ...] = (
-    SCHEME_AUS_BASE,
     SCHEME_SI_DOBAVA,
     SCHEME_SI_SAMOOSKRBA,
 )
@@ -62,70 +54,6 @@ SKIPPED_MULTI_USER_SCHEMES: Tuple[str, ...] = (
     "si_obracun_skupnosti",
     "si_obracun_souporabe",
 )
-
-
-def list_pricing_schemes(include_skipped: bool = False) -> Tuple[str, ...]:
-    if include_skipped:
-        return SUPPORTED_SCHEMES + SKIPPED_MULTI_USER_SCHEMES
-    return SUPPORTED_SCHEMES
-
-
-# -----------------------------------------------------------------------------
-# Legacy Australian pricing (unchanged behavior)
-# -----------------------------------------------------------------------------
-def Aus_Base(
-    smp_market_price_kwh: float,
-    total_consumed_kwh: float,
-    utc_date: datetime.datetime,
-    interval_minutes: float = 30,
-) -> dict:
-    """Legacy Australian interval pricing function kept as default behavior."""
-
-    GST_RATE = 0.10
-    DAYS_IN_MONTH = 30
-
-    monthly_subscription_ex_gst = 20.00
-    daily_supply_ex_gst = 1.09
-
-    intervals_per_day = (24 * 60) / float(interval_minutes)
-    intervals_per_month = intervals_per_day * DAYS_IN_MONTH
-
-    constant_cost_ex_gst = (daily_supply_ex_gst / intervals_per_day) + (
-        monthly_subscription_ex_gst / intervals_per_month
-    )
-    constant_cost_inc_gst = constant_cost_ex_gst * (1 + GST_RATE)
-
-    #Converted from EUR to AUD using 0.615 conversion rate
-    spot_price_kwh = smp_market_price_kwh / 0.615
-
-    MLF = 0.995
-    DLF = 1.045
-    adjusted_spot_kwh = spot_price_kwh * MLF * DLF
-
-    nem_time = utc_date + datetime.timedelta(hours=10)
-    hour = nem_time.hour
-
-    if 15 <= hour < 21:
-        network_rate_kwh = 0.2360
-    elif 10 <= hour < 15:
-        network_rate_kwh = 0.0270
-    else:
-        network_rate_kwh = 0.0720
-
-    env_market_rate_kwh = 0.0250
-
-    if total_consumed_kwh >= 0:
-        total_rate_kwh_ex_gst = adjusted_spot_kwh + network_rate_kwh + env_market_rate_kwh
-        variable_cost_ex_gst = total_consumed_kwh * total_rate_kwh_ex_gst
-        variable_cost_inc_gst = variable_cost_ex_gst * (1 + GST_RATE)
-    else:
-        variable_cost_ex_gst = total_consumed_kwh * adjusted_spot_kwh
-        variable_cost_inc_gst = variable_cost_ex_gst
-
-    return {
-        "constant_price": round(constant_cost_inc_gst, 10),
-        "variable_price": round(variable_cost_inc_gst, 10),
-    }
 
 
 # -----------------------------------------------------------------------------
@@ -391,27 +319,6 @@ def _normalize_si_result(
     }
 
 
-def _normalize_aus_result(
-    raw: Dict[str, Any], scheme: str, *, prev_peak_kw: Optional[Dict[int, float]] = None
-) -> Dict[str, Any]:
-    constant_price = float(raw.get("constant_price", 0.0))
-    variable_price = float(raw.get("variable_price", 0.0))
-    return {
-        "scheme": scheme,
-        "currency": "AUD",
-        "constant_price_aud": round(constant_price, 10),
-        "variable_price_aud": round(variable_price, 10),
-        "energy_component_eur": round(variable_price, 10),
-        "power_component_eur": 0.0,
-        "fixed_monthly_charge_eur": round(constant_price, 10),
-        "taxable_interval_eur": 0.0,
-        "dobropis_odkup_eur": 0.0,
-        "ddv_included": True,
-        "new_peak_kw": dict(prev_peak_kw or {}),
-        "peak_blok": None,
-    }
-
-
 # -----------------------------------------------------------------------------
 # Per-scheme resolvers
 # -----------------------------------------------------------------------------
@@ -490,9 +397,6 @@ def _resolve_single_scheme(
     paket_id, pricing_mode, buyback_mode, provider, pravila, meritve_15min,
     apply_ddv, total_produced_kwh, dogovorjena_moc, prev_peak_kw, eko_racun, warnings,
 ):
-    if scheme == SCHEME_AUS_BASE:
-        raw = Aus_Base(smp_market_price_mwh, total_consumed_kwh, utc_date, interval_minutes)
-        return _normalize_aus_result(raw, scheme, prev_peak_kw=prev_peak_kw), raw
     if scheme == SCHEME_SI_DOBAVA:
         return _resolve_si_dobava(
             smp_market_price_mwh, total_consumed_kwh, utc_date, interval_minutes,
@@ -529,7 +433,7 @@ def calculate_interval_price(
     utc_date: datetime.datetime,
     interval_minutes: float = 30,
     *,
-    scheme: str = SCHEME_AUS_BASE,
+    scheme: str = SCHEME_SI_SAMOOSKRBA,
     paket_id: Optional[str] = None,
     pricing_mode: Optional[Any] = None,
     buyback_mode: Optional[Any] = None,
@@ -542,7 +446,6 @@ def calculate_interval_price(
     dogovorjena_moc: Optional[Union[float, Dict[int, float]]] = None,
     prev_peak_kw: Optional[Dict[int, float]] = None,
     eko_racun: bool = True,
-    compare_all: bool = False,
     include_raw: bool = False,
 ) -> Dict[str, Any]:
     """Unified single-user interval pricing dispatcher for RL/MILP.
@@ -584,30 +487,9 @@ def calculate_interval_price(
     )
 
     result: Dict[str, Any] = dict(normalized)
-    result["comparison_enabled"] = bool(compare_all)
     result.setdefault("warnings", list(warnings))
     if include_raw:
         result["raw_result"] = raw
-
-    if compare_all:
-        comparisons: Dict[str, Any] = {}
-        for other_scheme in SUPPORTED_SCHEMES:
-            if other_scheme == scheme:
-                continue
-            try:
-                other_pravila = _resolve_pravila(utc_date, pravila, pricing_reference_year, [])
-                other_norm, _ = _resolve_single_scheme(
-                    other_scheme, smp_market_price_mwh, total_consumed_kwh, utc_date,
-                    interval_minutes, paket_id=None, pricing_mode=pricing_mode,
-                    buyback_mode=buyback_mode, provider=provider, pravila=other_pravila,
-                    meritve_15min=resolved_meritve, apply_ddv=bool(apply_ddv),
-                    total_produced_kwh=total_produced_kwh, dogovorjena_moc=dogovorjena_moc,
-                    prev_peak_kw=prev_peak_kw, eko_racun=bool(eko_racun), warnings=[],
-                )
-                comparisons[other_scheme] = other_norm
-            except Exception as exc:  # noqa: BLE001 - comparison is best-effort/informational
-                comparisons[other_scheme] = {"error": str(exc)}
-        result["comparisons"] = comparisons
 
     return result
 
@@ -659,10 +541,9 @@ def compute_prorated_fixed_charge_eur(
     SI package exactly like `calculate_interval_price` does, but returns
     ONLY the prorated fixed component (no per-kWh energy, no peak/ratchet
     term), so the MILP can add a clean per-interval constant to its
-    objective without a dummy `total_consumed_kwh` call. Returns 0.0 for
-    `scheme == aus_base` (no fixed-monthly concept there)."""
-    if scheme not in (SCHEME_SI_DOBAVA, SCHEME_SI_SAMOOSKRBA):
-        return 0.0
+    objective without a dummy `total_consumed_kwh` call."""
+    if scheme not in SUPPORTED_SCHEMES:
+        raise ValueError(f"Unknown scheme={scheme!r}. Supported: {SUPPORTED_SCHEMES}")
     warnings: List[str] = []
     resolved_pravila = _resolve_pravila(utc_date, pravila, pricing_reference_year, warnings)
     resolved_paket_id = _select_si_package(
@@ -684,6 +565,7 @@ def compute_prorated_fixed_charge_eur(
 # the same invoice symbols as the root shim.
 from si_invoice import (  # noqa: E402
     InvoiceBuilder,
+    aggregate_household_invoices,
     aggregate_line_items,
     build_invoice_household,
     racun_to_line_items,
