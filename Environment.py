@@ -6,6 +6,18 @@ the same quantity the MILP benchmark solves for. Discrete actions remain
 available via `action_mode="discrete"` so the legacy DQN keeps working; they
 are a five-entry lookup that produces a setpoint and then goes through exactly
 the same energy router.
+
+With `allow_curtailment=True` the agent also controls how much local production
+to shut off, matching the MILP's `P_spill`, which makes the MILP optimum
+reachable on profiles where exporting is loss-making:
+
+  - continuous: the action gains a second component, the curtailed kWh
+    (clipped to the interval's generation)
+  - discrete: the action index encodes both choices,
+    `battery_action + n_discrete_actions * curtailment_mode`
+
+Curtailment is applied to generation first; everything downstream then sees
+only what is left.
 """
 
 from pathlib import Path
@@ -38,6 +50,19 @@ ACTION_DISCHARGE_ANY = 3  # discharge fully, exporting whatever the house can't 
 ACTION_IDLE = 4           # battery unused
 N_DISCRETE_ACTIONS = 5
 
+# Curtailment modes available in discrete mode when allow_curtailment=True.
+# For a fixed battery setpoint the interval energy cost is piecewise-linear in
+# the curtailed amount with breakpoints at exactly these three values, so an
+# energy-only optimum never needs anything in between. The peak/excess-power
+# ratchet adds one further kink (where grid draw crosses the running peak), so
+# on rare intervals an intermediate level can edge these out -- use
+# action_mode="continuous", which sets the curtailed kWh directly and matches
+# the MILP's P_spill exactly.
+CURTAIL_NONE = 0     # export everything the house and battery don't take
+CURTAIL_NO_EXPORT = 1  # curtail exactly the surplus that would be exported
+CURTAIL_ALL = 2      # shut local production off completely
+N_CURTAILMENT_MODES = 3
+
 
 class HouseholdEnvironment(gym.Env):
     """Single household with PV and a battery, priced under a Slovenian tariff."""
@@ -56,6 +81,7 @@ class HouseholdEnvironment(gym.Env):
         action_mode="continuous",
         action_scale="physical",
         n_discrete_actions=N_DISCRETE_ACTIONS,
+        allow_curtailment=False,
         clip_penalty=0.0,
         episode_length=None,
         steps_per_day=96,
@@ -113,6 +139,11 @@ class HouseholdEnvironment(gym.Env):
         self.n_discrete_actions = int(n_discrete_actions)
         if not 1 <= self.n_discrete_actions <= N_DISCRETE_ACTIONS:
             raise ValueError(f"n_discrete_actions must be in 1..{N_DISCRETE_ACTIONS}")
+
+        # Curtailment ("shut local production off"), matching the MILP's P_spill.
+        # Off by default so the legacy battery-only action spaces are unchanged.
+        self.allow_curtailment = bool(allow_curtailment)
+        self.n_curtailment_modes = N_CURTAILMENT_MODES if self.allow_curtailment else 1
 
         self.clip_penalty = float(clip_penalty)
 
@@ -260,15 +291,31 @@ class HouseholdEnvironment(gym.Env):
         self.window_past = 0
         self.window_future = 11 * (self.steps_per_day // 24)
 
+        # Continuous actions carry a second component (curtailed kWh) when
+        # curtailment is enabled; discrete actions flatten the (battery,
+        # curtailment) pair into one index -- see _resolve_action.
         if self.action_mode == "discrete":
-            self.action_space = gym.spaces.Discrete(self.n_discrete_actions)
+            self.action_space = gym.spaces.Discrete(
+                self.n_discrete_actions * self.n_curtailment_modes
+            )
         elif self.action_scale == "normalized":
-            self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32)
-        else:
             self.action_space = gym.spaces.Box(
-                low=np.float32(-self.max_discharge_kwh),
-                high=np.float32(self.max_charge_kwh / self.charge_efficiency),
-                shape=(1,),
+                low=np.float32(-1.0),
+                high=np.float32(1.0),
+                shape=(1 + self.allow_curtailment,),
+                dtype=np.float32,
+            )
+        else:
+            max_curtail = float(np.max(self.arr_generation)) if self.allow_curtailment else 0.0
+            self.action_space = gym.spaces.Box(
+                low=np.array(
+                    [-self.max_discharge_kwh] + [0.0] * self.allow_curtailment, dtype=np.float32
+                ),
+                high=np.array(
+                    [self.max_charge_kwh / self.charge_efficiency]
+                    + [max_curtail] * self.allow_curtailment,
+                    dtype=np.float32,
+                ),
                 dtype=np.float32,
             )
 
@@ -482,22 +529,60 @@ class HouseholdEnvironment(gym.Env):
             return 0.0
         raise ValueError(f"Unsupported discrete action: {action_int}")
 
+    def curtailment_for_mode(self, mode, setpoint_kwh, generation_kwh, consumption_kwh):
+        """Curtailed kWh for a discrete curtailment mode, clipped to [0, generation]."""
+        if mode == CURTAIL_NONE:
+            return 0.0
+        if mode == CURTAIL_ALL:
+            return float(generation_kwh)
+        if mode == CURTAIL_NO_EXPORT:
+            # grid_import = consumption - generation + setpoint; curtail exactly
+            # the amount that would otherwise be exported (i.e. drive it to 0).
+            exported = generation_kwh - consumption_kwh - setpoint_kwh
+            return float(np.clip(exported, 0.0, generation_kwh))
+        raise ValueError(f"Unsupported curtailment mode: {mode}")
+
     def _resolve_action(self, action, soc_kwh, generation_kwh, consumption_kwh):
-        """Turn whatever the agent produced into (setpoint_kwh, action_int)."""
+        """Turn whatever the agent produced into (setpoint_kwh, curtailed_kwh, action_int).
+
+        Curtailment is resolved first, then the battery setpoint is derived from
+        the *remaining* generation -- so "charge from PV only" charges from what
+        is left after curtailing, exactly as the MILP's balance treats P_spill.
+        """
         if self.action_mode == "discrete":
             action_int = int(getattr(action, "value", action))
-            if not 0 <= action_int < self.n_discrete_actions:
+            if not 0 <= action_int < self.action_space.n:
                 raise ValueError(f"Unsupported action: {action}")
-            setpoint = self.discrete_action_to_setpoint(
-                action_int, soc_kwh, generation_kwh, consumption_kwh
-            )
-            return setpoint, action_int
+            battery_action = action_int % self.n_discrete_actions
+            curtail_mode = action_int // self.n_discrete_actions
 
-        value = float(np.asarray(action, dtype=np.float64).reshape(-1)[0])
+            # CURTAIL_NO_EXPORT is defined against the setpoint the uncurtailed
+            # generation would produce; for every charging action that is a fixed
+            # point, so the setpoint below is unchanged by the substitution.
+            curtailed = self.curtailment_for_mode(
+                curtail_mode,
+                self.discrete_action_to_setpoint(
+                    battery_action, soc_kwh, generation_kwh, consumption_kwh
+                ),
+                generation_kwh,
+                consumption_kwh,
+            )
+            setpoint = self.discrete_action_to_setpoint(
+                battery_action, soc_kwh, generation_kwh - curtailed, consumption_kwh
+            )
+            return setpoint, curtailed, action_int
+
+        values = np.asarray(action, dtype=np.float64).reshape(-1)
+        curtailed = (
+            float(np.clip(values[1], 0.0, generation_kwh)) if self.allow_curtailment else 0.0
+        )
+        setpoint = float(values[0])
         if self.action_scale == "normalized":
             limit_charge, limit_discharge = self.battery_limits(soc_kwh)
-            value = value * (limit_charge if value >= 0 else limit_discharge)
-        return value, None
+            setpoint = setpoint * (limit_charge if setpoint >= 0 else limit_discharge)
+            if self.allow_curtailment:
+                curtailed = float(np.clip(values[1], 0.0, 1.0)) * generation_kwh
+        return setpoint, curtailed, None
 
     # ------------------------------------------------------------------
     # Episode plumbing
@@ -588,12 +673,15 @@ class HouseholdEnvironment(gym.Env):
         idx = self._current_step
         soc_kwh = float(np.clip(self._battery, 0.0, self.battery_capacity_kwh))
         soc_norm = soc_kwh / self.battery_capacity_kwh if self.battery_capacity_kwh > 0 else 0.0
-        generation_kwh = self.arr_generation[idx]
+        generation_available_kwh = self.arr_generation[idx]
         consumption_kwh = self.arr_consumption[idx]
 
-        setpoint_requested, action_int = self._resolve_action(
-            action, soc_kwh, generation_kwh, consumption_kwh
+        setpoint_requested, curtailed_kwh, action_int = self._resolve_action(
+            action, soc_kwh, generation_available_kwh, consumption_kwh
         )
+        # Curtailment simply removes production before anything else sees it,
+        # mirroring how P_spill enters the MILP energy balance.
+        generation_kwh = generation_available_kwh - curtailed_kwh
 
         next_idx = idx + 1
         if next_idx >= self.data_length:
@@ -635,7 +723,7 @@ class HouseholdEnvironment(gym.Env):
         balance_error = (
             (pv_to_battery_kwh + grid_to_battery_kwh)
             + consumption_kwh
-            - generation_kwh
+            - (generation_available_kwh - curtailed_kwh)
             - grid_import_kwh
             - (battery_to_home_kwh + battery_to_grid_kwh)
         )
@@ -644,7 +732,8 @@ class HouseholdEnvironment(gym.Env):
                 f"Energy balance error {balance_error}: "
                 f"charge={pv_to_battery_kwh + grid_to_battery_kwh}, "
                 f"discharge={battery_to_home_kwh + battery_to_grid_kwh}, "
-                f"consumption={consumption_kwh}, generation={generation_kwh}, "
+                f"consumption={consumption_kwh}, "
+                f"generation={generation_available_kwh}, curtailed={curtailed_kwh}, "
                 f"grid_import={grid_import_kwh}"
             )
 
@@ -735,6 +824,7 @@ class HouseholdEnvironment(gym.Env):
                 "battery_to_grid_kwh": float(battery_to_grid_kwh),
                 "grid_import_kwh": float(grid_import_kwh),
                 "battery_delta_kwh": float(battery_delta_kwh),
+                "curtailed_kwh": float(curtailed_kwh),
             },
             reward_components={
                 "total": float(reward),
@@ -767,10 +857,11 @@ class HouseholdEnvironment(gym.Env):
         removes any benefit from an infeasible setpoint.
         """
         if self.action_mode == "discrete":
-            if action_int in (ACTION_DISCHARGE_HOME, ACTION_DISCHARGE_ANY) and soc_kwh <= 1e-8:
+            battery_action = action_int % self.n_discrete_actions
+            if battery_action in (ACTION_DISCHARGE_HOME, ACTION_DISCHARGE_ANY) and soc_kwh <= 1e-8:
                 return -0.5  # tried to discharge an empty battery
             if (
-                action_int in (ACTION_CHARGE_ANY, ACTION_CHARGE_PV)
+                battery_action in (ACTION_CHARGE_ANY, ACTION_CHARGE_PV)
                 and soc_kwh >= (self.battery_capacity_kwh - 1e-8)
                 and surplus_kwh > 0
             ):
@@ -824,11 +915,11 @@ class CommunityEnvironment(gym.Env):
         self._last_info: Dict[str, Dict[str, Any]] = {hid: {} for hid in self.household_ids}
 
     def _default_action(self, household_id: str):
-        """Leave the battery idle -- the safest fallback for a missing action."""
+        """Leave the battery idle and curtail nothing -- the safest fallback."""
         env = self.household_envs[household_id]
         if env.action_mode == "discrete":
-            return min(ACTION_IDLE, env.action_space.n - 1)
-        return np.zeros(1, dtype=np.float32)
+            return min(ACTION_IDLE, env.n_discrete_actions - 1)
+        return np.zeros(env.action_space.shape, dtype=np.float32)
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
         observations: Dict[str, Any] = {}

@@ -47,6 +47,9 @@ def run_milp_benchmark(
         the environment's native continuous action.
         True  -> choose one of env.action_space.n discrete actions with binary
         vars, matching the legacy discrete action set.
+        Both share the same energy balance, battery dynamics and curtailment
+        variable; discrete only adds binaries that gate P_ch / P_dis. Continuous
+        is therefore a true relaxation of discrete and can never cost more.
     start_idx : int
         First dataset row of the horizon.
     n_steps : int or None
@@ -77,12 +80,12 @@ def run_milp_benchmark(
 
     Notes
     -----
-    P_ch / P_dis are bounded at the AC side by env.max_charge_kwh /
-    env.max_discharge_kwh. The environment instead caps the setpoint at the
-    SOC side (see Basic_Functions.max_charge_now), so the two differ by an
-    efficiency factor. This is deliberate: charge and discharge efficiency are
-    independent parameters and the two models are allowed to bound the battery
-    differently.
+    The solved trajectory is reachable in the environment: feed
+    `Charge_kW - Discharge_kW` as the battery setpoint and `Spill_kW` as the
+    curtailment to a `HouseholdEnvironment(action_mode="continuous",
+    allow_curtailment=True)` and it reproduces `Cum_Cost` exactly. That requires
+    curtailment to be enabled -- without it the agent must export its surplus
+    even when export is loss-making, and cannot match this cost.
     """
     import pulp
 
@@ -185,12 +188,27 @@ def run_milp_benchmark(
         pulp.LpVariable(f"E_{t}", lowBound=0, upBound=env.battery_capacity_kwh)
         for t in range(N_STEPS + 1)
     ]
+    # env.max_charge_kwh / max_discharge_kwh cap the change in STORED energy, so
+    # the AC-side bounds here carry the efficiency factor -- exactly what
+    # Basic_Functions.max_charge_now / max_discharge_now enforce in the
+    # environment. Charge and discharge efficiency stay independent.
+    max_charge_ac = env.max_charge_kwh / env.charge_efficiency
+    max_discharge_ac = env.max_discharge_kwh * env.discharge_efficiency
     P_ch = [
-        pulp.LpVariable(f"P_ch_{t}", lowBound=0, upBound=env.max_charge_kwh)
+        pulp.LpVariable(f"P_ch_{t}", lowBound=0, upBound=max_charge_ac)
         for t in range(N_STEPS)
     ]
     P_dis = [
-        pulp.LpVariable(f"P_dis_{t}", lowBound=0, upBound=env.max_discharge_kwh)
+        pulp.LpVariable(f"P_dis_{t}", lowBound=0, upBound=max_discharge_ac)
+        for t in range(N_STEPS)
+    ]
+    # Curtailment of local production. Bounded by that interval's own generation
+    # -- it can only switch PV off, never absorb imported energy. Without this
+    # upper bound the solver buys unlimited energy at negative prices and dumps
+    # it here, which is not a dispatch any real system (or the environment) can
+    # perform. Identical in both formulations.
+    P_spill = [
+        pulp.LpVariable(f"P_spill_{t}", lowBound=0, upBound=float(gen[t]))
         for t in range(N_STEPS)
     ]
 
@@ -198,19 +216,33 @@ def run_milp_benchmark(
     prob += (E[0] == max(0.0, env.battery_capacity_kwh / 2.0))
 
     for t in range(N_STEPS):
+        # Battery dynamics
         prob += (
             E[t + 1]
             == E[t]
             + P_ch[t] * env.charge_efficiency
             - P_dis[t] / env.discharge_efficiency
         )
+        # Energy balance with curtailment
+        prob += (
+            gen[t] + P_buy[t] + P_dis[t]
+            == con[t] + P_sell[t] + P_ch[t] + P_spill[t]
+        )
 
     if not use_discrete_actions:
         # ---------------------------------------------------------------------
         # CONTINUOUS MODE -- P_ch[t] - P_dis[t] is the environment's setpoint
         # ---------------------------------------------------------------------
+        # Forbid charging and discharging in the same interval. A battery
+        # physically cannot, and the environment cannot express it either (one
+        # signed setpoint per step). Left unconstrained the LP exploits the
+        # round-trip loss as an energy sink whenever the import rate goes
+        # negative, producing a trajectory no agent can reproduce. The discrete
+        # branch below gets this for free from its one-action-per-step binaries.
+        B_charging = [pulp.LpVariable(f"B_charging_{t}", cat="Binary") for t in range(N_STEPS)]
         for t in range(N_STEPS):
-            prob += (gen[t] + P_buy[t] + P_dis[t] == con[t] + P_sell[t] + P_ch[t])
+            prob += P_ch[t] <= max_charge_ac * B_charging[t]
+            prob += P_dis[t] <= max_discharge_ac * (1 - B_charging[t])
 
     else:
         # ---------------------------------------------------------------------
@@ -221,14 +253,6 @@ def run_milp_benchmark(
             [pulp.LpVariable(f"A_{t}_{a}", cat="Binary") for a in range(n_actions)]
             for t in range(N_STEPS)
         ]
-        P_spill = [pulp.LpVariable(f"P_spill_{t}", lowBound=0) for t in range(N_STEPS)]
-
-        BIG_M = max(
-            float(np.max(gen + con)),
-            float(env.max_charge_kwh),
-            float(env.max_discharge_kwh),
-            10.0,
-        ) * 10.0
 
         for t in range(N_STEPS):
             # one action per step
@@ -242,19 +266,10 @@ def run_milp_benchmark(
             # 4: idle / no battery use
 
             # charging only allowed in actions 0 and 1
-            prob += P_ch[t] <= env.max_charge_kwh * (A[t][0] + A[t][1])
+            prob += P_ch[t] <= max_charge_ac * (A[t][0] + A[t][1])
 
             # discharging only allowed in actions 2 and 3
-            prob += P_dis[t] <= env.max_discharge_kwh * (A[t][2] + A[t][3])
-
-            # spilling/curtailment only allowed in actions 1 and 4
-            prob += P_spill[t] <= BIG_M * (A[t][1] + A[t][4])
-
-            # Energy balance with curtailment
-            prob += (
-                gen[t] + P_buy[t] + P_dis[t]
-                == con[t] + P_sell[t] + P_ch[t] + P_spill[t]
-            )
+            prob += P_dis[t] <= max_discharge_ac * (A[t][2] + A[t][3])
 
     # -------------------------------------------------------------------------
     # 2b) PEAK / EXCESS-POWER (ratchet) VARIABLES AND CONSTRAINTS
@@ -354,13 +369,13 @@ def run_milp_benchmark(
         e_val = E[t].varValue or 0.0
         ch_val = P_ch[t].varValue or 0.0
         dis_val = P_dis[t].varValue or 0.0
+        spill_val = P_spill[t].varValue or 0.0
 
-        if use_discrete_actions:
-            spill_val = P_spill[t].varValue or 0.0
-            action_val = int(np.argmax([(A[t][a].varValue or 0.0) for a in range(n_actions)]))
-        else:
-            spill_val = 0.0
-            action_val = None
+        action_val = (
+            int(np.argmax([(A[t][a].varValue or 0.0) for a in range(n_actions)]))
+            if use_discrete_actions
+            else None
+        )
 
         interval_cost_data = calculate_interval_price(
             smp_market_price_kwh=smp_prices[t],
@@ -401,6 +416,7 @@ def run_milp_benchmark(
             "Discharge_kW": dis_val,
             "SOC_kWh": e_val,
             "SOC_%": soc_norm * 100,
+            "Spill_kW": spill_val,
             "Import_Rate_kWh": import_rates[t],
             "Export_Rate_kWh": export_rates[t],
             "Step_Cost": fixed_cost + variable_cost,
@@ -413,7 +429,6 @@ def run_milp_benchmark(
 
         if use_discrete_actions:
             row["Action"] = action_val
-            row["Spill_kW"] = spill_val
 
         results.append(row)
 
