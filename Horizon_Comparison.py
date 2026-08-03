@@ -1,26 +1,33 @@
 """Optimization-horizon comparison for the perfect-foresight MILP.
 
-Six ways of using the same MILP formulation are compared on the same household,
-the same battery and the same tariff:
+The same MILP formulation is driven in several ways over the same household, the
+same battery and the same tariff, and the executed trajectories are compared:
 
-    day_block      solve one day,   execute the whole day,   repeat
-    day_receding   solve one day,   execute the first step,  repeat  (MPC)
-    week_block     solve one week,  execute the whole week,  repeat
-    week_receding  solve one week,  execute the first step,  repeat  (MPC)
-    month_block    solve one month, execute the whole month, repeat
-    full_period    solve the whole horizon in one go (0.1 % MIP gap)
+    horizon   how much of the future each solve sees (day / week / month / all)
+    execution "block"    -- execute everything that was planned, then re-plan
+              "receding" -- execute the first interval only, then re-plan (MPC)
+    soc_mode  "fixed50"  -- every solve starts AND ends at 50 % of capacity
+              "carry"    -- only the first period starts at 50 %; a period ends
+                            wherever it likes and the next one starts from
+                            exactly that state of charge
 
-Only `full_period` sees the entire year at once, so it is the theoretical
-optimum; the others show what a controller gives up by looking less far ahead,
-and what it gains by re-planning every interval instead of committing to a whole
-block.
+`full_period` is the perfect-foresight optimum: it is a relaxation of every other
+strategy (no interior constraints at all), so its cost is a lower bound and every
+gap in the comparison is non-negative.
+
+The two `soc_mode` families answer different questions. `fixed50` asks what a
+controller gives up when it must hand the battery over in a defined state at
+every period boundary. `carry` removes that constraint -- but note what it
+implies: stored energy has no value in a MILP objective that stops at the horizon
+end, so a *block* strategy under `carry` empties the battery at every boundary.
+Both are real operating rules; neither is a bug.
 
 Design notes
 ------------
 *The MILP only produces a dispatch.* Every strategy's executed trajectory is
 priced afterwards by one shared evaluator (`price_interval`), interval by
-interval, carrying a single running peak state. That is the only way the six are
-comparable: the excess-power ("konica") charge is a running maximum over the
+interval, carrying a single running peak state. That is the only way the variants
+are comparable: the excess-power ("konica") charge is a running maximum over the
 whole horizon, so a strategy cannot be allowed to price its own peaks.
 
 *The controller is told the truth about its peak state.* `run_milp_benchmark`
@@ -30,11 +37,14 @@ trajectory that has been shaving peaks all year. `_PeakSeedView` wraps the
 environment and feeds back the peak the executed trajectory has actually set, so
 every sub-solve starts from the state the evaluator is in.
 
-*State of charge.* Every solve starts at the SOC the executed trajectory has
-reached and is required to end the horizon at `soc_target` (50 % of capacity).
-Feasibility near the end of the dataset is inductive: the horizon shrinks in
-lockstep with the remaining steps, so a plan that could return to `soc_target`
-at t can still do so at t+1.
+*The year is always closed.* Under both SOC modes the run starts at 50 % and the
+final period is required to end at 50 %. Without that last constraint a
+free-terminal strategy would sell off its opening charge and book it as a saving.
+Only the *interior* boundaries differ between the two families.
+
+*Feasibility near the end of the dataset* is inductive: the horizon shrinks in
+lockstep with the remaining steps, so a plan that could reach the terminal SOC at
+t can still do so at t+1.
 """
 
 from __future__ import annotations
@@ -52,12 +62,28 @@ from MILP_Benchmark import run_milp_benchmark
 from Pricing_Functions import calculate_interval_price
 
 # --- Study configuration ---------------------------------------------------
-DATASET_NAME = "Fluvius_PV"
+DATASET_GROUPS = [
+    "Fluvius",
+    "Fluvius_EV",
+    "Fluvius_HP",
+    "Fluvius_HP_EV",
+    "Fluvius_PV",
+    "Fluvius_PV_EV",
+    "Fluvius_PV_HP",
+    "Fluvius_PV_HP_EV",
+]
+HOUSEHOLDS_PER_GROUP = 5
+
 SMP_COUNTRY_ID = "Slovenia"
 PRICE_COLUMN = "SMP"
 GENERATION_COLUMN = "Feed_In_Volume_kWh"
 CONSUMPTION_COLUMN = "Consumption_Volume_kWh"
 
+# One tariff for every group, so the horizon effect is not confounded by the
+# price list. The samooskrba dynamic list credits exports at SIPX - 0.01199
+# whether or not the household owns a PV device; the non-self-supply list
+# (si_dobava) credits them at the full retail rate including network charges and
+# VAT, which makes grid arbitrage unbounded and the comparison meaningless.
 PRICING_SCHEME = "si_samooskrba"
 PAKET_ID = "GENI_SAMO_DINAMICNI"
 PRICING_REFERENCE_YEAR = 2026
@@ -74,25 +100,42 @@ STEPS_PER_DAY = 96
 FULL_PERIOD_GAP_REL = 0.001
 FULL_PERIOD_TIME_LIMIT_S = 900
 
-RESULTS_DIR = Path(__file__).resolve().parent / "Results" / "Horizon_Comparison"
+RESULTS_DIR = Path(__file__).resolve().parent / "Results" / "Horizon_Comparison_Groups"
 
-# name -> (horizon in steps or None for "the whole remaining period", steps executed per solve)
+# name -> (horizon, execution, soc_mode)
 STRATEGIES = {
-    "day_block": ("day", "block"),
-    "day_receding": ("day", "receding"),
-    "week_block": ("week", "block"),
-    "week_receding": ("week", "receding"),
-    "month_block": ("month", "block"),
-    "full_period": ("period", "block"),
+    # --- every solve starts and ends at 50 % of capacity ---
+    "day_block": ("day", "block", "fixed50"),
+    "day_receding": ("day", "receding", "fixed50"),
+    "week_block": ("week", "block", "fixed50"),
+    #"week_receding": ("week", "receding", "fixed50"),      # ~3 h per household
+    "month_block": ("month", "block", "fixed50"),
+    "full_period": ("period", "block", "fixed50"),
+    # --- SOC carried across period boundaries (50 % only at the very start) ---
+   # "day_block_carry": ("day", "block", "carry"),
+    #"day_receding_carry": ("day", "receding", "carry"),
+    #"week_block_carry": ("week", "block", "carry"),
+    #"week_receding_carry": ("week", "receding", "carry"),  # ~3 h per household
+    #"month_block_carry": ("month", "block", "carry"),
+    #"full_period_carry": ("period", "block", "carry"),
 }
 
+REFERENCE_STRATEGY = "full_period"
+KEY_COLUMNS = ["Dataset", "Household"]
+
 _BLOCKS = (1, 2, 3, 4, 5)
+
+
+def study_units(groups=None, per_group=HOUSEHOLDS_PER_GROUP):
+    """The (dataset, household id) pairs the study runs over."""
+    groups = groups or DATASET_GROUPS
+    return [(g, i) for g in groups for i in range(1, per_group + 1)]
 
 
 # ---------------------------------------------------------------------------
 # Data + environment
 # ---------------------------------------------------------------------------
-def load_user(household_id, dataset=DATASET_NAME, country=SMP_COUNTRY_ID):
+def load_user(household_id, dataset, country=SMP_COUNTRY_ID):
     """Household profile with the country SMP series patched in (EUR/kWh)."""
     data = dl.load_household_data(int(household_id), dataset=dataset)
     smp = dl.load_smp_data(country).reindex(data.index, method="ffill")
@@ -194,12 +237,16 @@ def _horizon_steps(kind, n_steps):
     return n_steps
 
 
-def run_strategy(env, horizon_kind, execution, n_steps=None, solver=None, verbose=False):
+def run_strategy(env, horizon_kind, execution, soc_mode="fixed50", n_steps=None,
+                 solver=None, verbose=False):
     """Roll one strategy over the horizon and return its executed trajectory.
 
     horizon_kind : "day" | "week" | "month" | "period"
     execution    : "block" (execute everything that was planned) or
                    "receding" (execute the first interval, then re-plan)
+    soc_mode     : "fixed50" (every solve must end at 50 % of capacity) or
+                   "carry" (only the final period is pinned; interior periods end
+                   where they like and the next one starts from that SOC)
     """
     n_steps = int(env.episode_length if n_steps is None else n_steps)
     soc_target = SOC_FRACTION * env.battery_capacity_kwh
@@ -238,13 +285,19 @@ def run_strategy(env, horizon_kind, execution, n_steps=None, solver=None, verbos
         else:
             span = min(horizon, n_steps - t)
 
+        # The year is always closed at 50 %; under "carry" that is the only
+        # boundary that is pinned, and stored energy is otherwise handed to the
+        # next period exactly as the solver left it.
+        reaches_end = (t + span) >= n_steps
+        final_soc = soc_target if (soc_mode == "fixed50" or reaches_end) else None
+
         plan = run_milp_benchmark(
             view,
             use_discrete_actions=False,
             start_idx=t,
             n_steps=span,
             initial_soc_kwh=soc,
-            final_soc_kwh=soc_target,
+            final_soc_kwh=final_soc,
             solver=solver,
             verbose=False,
         )
@@ -307,8 +360,8 @@ def run_strategy(env, horizon_kind, execution, n_steps=None, solver=None, verbos
     }
 
 
-def run_user(household_id, n_steps=None, strategies=None, keep_traces=False, verbose=True,
-             checkpoint_path=None):
+def run_user(household_id, dataset, n_steps=None, strategies=None, keep_traces=False,
+             verbose=True, checkpoint_path=None):
     """All strategies for one household. Returns a tidy DataFrame (one row each).
 
     With `checkpoint_path` the CSV is rewritten after every finished strategy and
@@ -316,7 +369,7 @@ def run_user(household_id, n_steps=None, strategies=None, keep_traces=False, ver
     where it stopped instead of redoing hours of solves.
     """
     strategies = strategies or list(STRATEGIES)
-    data = load_user(household_id)
+    data = load_user(household_id, dataset)
     env = build_env(data)
     n_steps = int(env.episode_length if n_steps is None else n_steps)
 
@@ -330,33 +383,36 @@ def run_user(household_id, n_steps=None, strategies=None, keep_traces=False, ver
         baseline = no_battery_cost(env, n_steps)
 
     for name in strategies:
-        horizon_kind, execution = STRATEGIES[name]
+        horizon_kind, execution, soc_mode = STRATEGIES[name]
         solver = (
             pulp.PULP_CBC_CMD(msg=False, gapRel=FULL_PERIOD_GAP_REL,
                               timeLimit=FULL_PERIOD_TIME_LIMIT_S)
-            if name == "full_period" else pulp.PULP_CBC_CMD(msg=False)
+            if horizon_kind == "period" else pulp.PULP_CBC_CMD(msg=False)
         )
-        out = run_strategy(env, horizon_kind, execution, n_steps=n_steps, solver=solver)
+        out = run_strategy(env, horizon_kind, execution, soc_mode=soc_mode,
+                           n_steps=n_steps, solver=solver)
         traces[name] = (out.pop("_soc_trace"), out.pop("_cost_trace"))
         out.update(
+            Dataset=str(dataset),
             Household=int(household_id),
             Strategy=name,
             Horizon=horizon_kind,
             Execution=execution,
+            SOC_Mode=soc_mode,
             No_Battery_EUR=baseline,
             Savings_EUR=baseline - out["Cost_EUR"],
         )
         rows.append(out)
         if verbose:
-            print(f"  [{household_id}] {name:14s} {out['Cost_EUR']:9.2f} EUR  "
+            print(f"  [{dataset} {household_id}] {name:20s} {out['Cost_EUR']:9.2f} EUR  "
                   f"({out['N_Solves']:6d} solves, {out['Runtime_s']:7.1f} s)", flush=True)
         if checkpoint_path is not None:
             Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
             pd.DataFrame(rows).to_csv(checkpoint_path, index=False)
 
     df = pd.DataFrame(rows)
-    lead = ["Household", "Strategy", "Horizon", "Execution", "Cost_EUR", "Savings_EUR",
-            "No_Battery_EUR", "Energy_EUR", "Power_EUR"]
+    lead = ["Dataset", "Household", "Strategy", "Horizon", "Execution", "SOC_Mode",
+            "Cost_EUR", "Savings_EUR", "No_Battery_EUR", "Energy_EUR", "Power_EUR"]
     df = df[lead + [c for c in df.columns if c not in lead]]
     return (df, traces) if keep_traces else df
 
@@ -365,91 +421,115 @@ def run_user(household_id, n_steps=None, strategies=None, keep_traces=False, ver
 # Batch driver (multiprocessing over households, one CSV per household)
 # ---------------------------------------------------------------------------
 def _worker(args):
-    household_id, n_steps, output_dir = args
-    out_path = Path(output_dir) / f"user_{household_id:03d}.csv"
-    df = run_user(household_id, n_steps=n_steps, verbose=True, checkpoint_path=out_path)
+    dataset, household_id, n_steps, output_dir = args
+    out_path = Path(output_dir) / f"{dataset}_user_{household_id:03d}.csv"
+    df = run_user(household_id, dataset, n_steps=n_steps, verbose=True,
+                  checkpoint_path=out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_path, index=False)
-    return f"{out_path} ({len(df)} strategies)"
+    return f"{out_path.name} ({len(df)} strategies)"
 
 
-def run_batch(household_ids, n_steps=None, output_dir=RESULTS_DIR, n_workers=10):
-    """Run every household in parallel. Finished households are skipped on re-run."""
+def run_batch(units=None, n_steps=None, output_dir=RESULTS_DIR, n_workers=10):
+    """Run every (dataset, household) unit in parallel. Finished work is skipped."""
     import multiprocessing as mp
 
+    units = units or study_units()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    jobs = [(int(h), n_steps, str(output_dir)) for h in household_ids]
+    jobs = [(str(g), int(h), n_steps, str(output_dir)) for g, h in units]
 
     if n_workers <= 1:
         for job in jobs:
             _worker(job)
     else:
         with mp.get_context("spawn").Pool(n_workers) as pool:
-            for path in pool.imap_unordered(_worker, jobs):
-                print(f"done -> {path}", flush=True)
+            for done in pool.imap_unordered(_worker, jobs):
+                print(f"done -> {done}", flush=True)
 
     return collect_results(output_dir)
 
 
 def collect_results(output_dir=RESULTS_DIR):
     """Concatenate every per-household CSV written so far."""
-    files = sorted(Path(output_dir).glob("user_*.csv"))
+    files = sorted(Path(output_dir).glob("*user_*.csv"))
     if not files:
         return pd.DataFrame()
     return pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
 
 
-def summarize(df_all):
-    """Strategy-level comparison table, averaged over households."""
+def score(df_all, reference=REFERENCE_STRATEGY):
+    """Add per-unit gap columns measured against the perfect-foresight optimum."""
+    optimum = (
+        df_all[df_all["Strategy"] == reference]
+        .set_index(KEY_COLUMNS)["Cost_EUR"]
+        .rename("Optimum_EUR")
+    )
+    df = df_all.join(optimum, on=KEY_COLUMNS)
+    df["Gap_to_Optimum_EUR"] = df["Cost_EUR"] - df["Optimum_EUR"]
+
+    achievable = (df["No_Battery_EUR"] - df["Optimum_EUR"]).where(lambda s: s.abs() > 1e-9)
+    df["Saving_Captured_pct"] = 100.0 * df["Savings_EUR"] / achievable
+    # The headline number: the share of the achievable saving a strategy throws
+    # away by not seeing the whole year. 0 % is the optimum.
+    df["Gap_pct"] = 100.0 - df["Saving_Captured_pct"]
+    return df
+
+
+def summarize(df_all, reference=REFERENCE_STRATEGY):
+    """Strategy-level comparison table, averaged over household-units."""
     if df_all.empty:
         return pd.DataFrame(), df_all
 
-    optimum = (
-        df_all[df_all["Strategy"] == "full_period"]
-        .set_index("Household")["Cost_EUR"]
-        .rename("Optimum_EUR")
-    )
-    df = df_all.join(optimum, on="Household")
-    df["Gap_to_Optimum_EUR"] = df["Cost_EUR"] - df["Optimum_EUR"]
-    achievable = df["No_Battery_EUR"] - df["Optimum_EUR"]
-    df["Saving_Captured_pct"] = 100.0 * df["Savings_EUR"] / achievable.where(achievable != 0)
-
-    order = list(STRATEGIES)
+    df = score(df_all, reference)
+    order = [s for s in STRATEGIES if s in set(df["Strategy"])]
     summary = (
         df.groupby("Strategy")
         .agg(
-            Households=("Household", "nunique"),
+            Units=("Cost_EUR", "size"),
+            SOC_Mode=("SOC_Mode", "first"),
+            Gap_pct=("Gap_pct", "mean"),
+            Worst_Gap_pct=("Gap_pct", "max"),
+            Best_Gap_pct=("Gap_pct", "min"),
+            Gap_EUR=("Gap_to_Optimum_EUR", "mean"),
             Cost_EUR=("Cost_EUR", "mean"),
             Savings_EUR=("Savings_EUR", "mean"),
-            Saving_Captured_pct=("Saving_Captured_pct", "mean"),
-            Gap_to_Optimum_EUR=("Gap_to_Optimum_EUR", "mean"),
-            Worst_Gap_EUR=("Gap_to_Optimum_EUR", "max"),
-            Energy_EUR=("Energy_EUR", "mean"),
-            Power_EUR=("Power_EUR", "mean"),
             Cycles=("Equivalent_Full_Cycles", "mean"),
             Peak_kW=("Peak_Import_kW", "mean"),
             Solves=("N_Solves", "mean"),
             Runtime_s=("Runtime_s", "mean"),
         )
-        .reindex([s for s in order if s in df["Strategy"].unique()])
+        .reindex(order)
     )
     return summary, df
+
+
+def summarize_by_group(df_scored):
+    """Mean gap [%] per dataset group, one column per strategy."""
+    order = [s for s in STRATEGIES if s in set(df_scored["Strategy"])]
+    return (
+        df_scored.pivot_table(index="Dataset", columns="Strategy", values="Gap_pct",
+                              aggfunc="mean")
+        .reindex(columns=order)
+        .reindex([g for g in DATASET_GROUPS if g in set(df_scored["Dataset"])])
+    )
 
 
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="MILP optimization-horizon comparison")
-    parser.add_argument("--users", type=int, default=30)
-    parser.add_argument("--first-user", type=int, default=1)
-    parser.add_argument("--steps", type=int, default=None, help="horizon length (default: whole dataset)")
+    parser.add_argument("--per-group", type=int, default=HOUSEHOLDS_PER_GROUP)
+    parser.add_argument("--groups", type=str, default=",".join(DATASET_GROUPS))
+    parser.add_argument("--steps", type=int, default=None,
+                        help="horizon length in intervals (default: whole dataset)")
     parser.add_argument("--workers", type=int, default=10)
     parser.add_argument("--output", type=str, default=str(RESULTS_DIR))
     args = parser.parse_args()
 
-    ids = list(range(args.first_user, args.first_user + args.users))
-    print(f"Running {len(ids)} households, {args.workers} workers -> {args.output}", flush=True)
+    units = study_units(args.groups.split(","), args.per_group)
+    print(f"Running {len(units)} household-units x {len(STRATEGIES)} strategies, "
+          f"{args.workers} workers -> {args.output}", flush=True)
     started = time.time()
-    run_batch(ids, n_steps=args.steps, output_dir=args.output, n_workers=args.workers)
+    run_batch(units, n_steps=args.steps, output_dir=args.output, n_workers=args.workers)
     print(f"Batch finished in {(time.time() - started) / 3600:.2f} h", flush=True)
