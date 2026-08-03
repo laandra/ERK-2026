@@ -23,6 +23,8 @@ def run_milp_benchmark(
     use_discrete_actions=False,
     start_idx=0,
     n_steps=None,
+    initial_soc_kwh=None,
+    final_soc_kwh=None,
     verbose=True,
     problem_name="Household_Microgrid_Optimization",
     solver=None,
@@ -54,6 +56,21 @@ def run_milp_benchmark(
         First dataset row of the horizon.
     n_steps : int or None
         Horizon length; defaults to env.episode_length.
+    initial_soc_kwh : float or None
+        Stored energy at the first interval. Defaults to the environment's own
+        reset SOC (half the capacity), so existing calls are unchanged. Set it
+        explicitly when the starting charge must not scale with the capacity --
+        a battery-size sweep, for instance, otherwise hands every larger
+        battery a bigger block of free energy at t=0 and reads that gift as a
+        saving. It also lets a long horizon be solved in consecutive chunks:
+        pass the previous chunk's final SOC and the trajectory stays continuous.
+    final_soc_kwh : float or None
+        Lower bound on the stored energy left at the end of the horizon. None
+        (the default) leaves the terminal SOC free, so the solver empties the
+        battery into the last few intervals. Set it equal to `initial_soc_kwh`
+        to forbid that: the trajectory then has to give back whatever it
+        started with, and the reported cost contains no revenue from simply
+        selling off the opening charge.
     verbose : bool
         Print progress / summary lines (turn off for per-user loops).
     problem_name : str
@@ -213,7 +230,14 @@ def run_milp_benchmark(
     ]
 
     # Initial SOC
-    prob += (E[0] == max(0.0, env.battery_capacity_kwh / 2.0))
+    if initial_soc_kwh is None:
+        initial_soc_kwh = env.battery_capacity_kwh / 2.0
+    prob += (E[0] == min(max(0.0, float(initial_soc_kwh)), env.battery_capacity_kwh))
+
+    # Terminal SOC floor. Without it the last intervals of the horizon are a
+    # free source of energy, and any starting charge shows up as a saving.
+    if final_soc_kwh is not None:
+        prob += (E[N_STEPS] >= min(max(0.0, float(final_soc_kwh)), env.battery_capacity_kwh))
 
     for t in range(N_STEPS):
         # Battery dynamics
