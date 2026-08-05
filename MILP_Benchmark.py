@@ -28,6 +28,7 @@ def run_milp_benchmark(
     verbose=True,
     problem_name="Household_Microgrid_Optimization",
     solver=None,
+    annual_netting_rate_eur_per_kwh=None,
     generate_invoice=False,
     invoice_output_dir=None,
     invoice_run_label="milp_eval",
@@ -77,6 +78,30 @@ def run_milp_benchmark(
         Name handed to pulp.LpProblem (cosmetic; useful when solving many users).
     solver : pulp solver or None
         Defaults to pulp.PULP_CBC_CMD(msg=False).
+    annual_netting_rate_eur_per_kwh : float or None
+        NET-metering settlement rate (VAT-inclusive supplier energy price,
+        EUR/kWh). None (the default) leaves the bill purely interval-by-interval,
+        which is what every non-NET-metering price list does.
+
+        The NET-metering lists (`GENI_NETMETERING`, consents granted before
+        2024) credit nothing per interval -- `si_obracun._cena_oddaje` returns
+        0.0 for `TipOdkupa.NET_METERING` -- and instead net exported against
+        imported energy once a year, on the *supplier energy* component only:
+        network charges and levies stay on the gross metered offtake under the
+        2024 network act. Setting this rate adds that annual settlement to the
+        objective as
+
+            credit = rate * min(sum P_buy, sum P_sell)
+
+        (one free variable bounded by both sums; minimizing drives it to the
+        min), so the solver optimizes against the bill the household actually
+        receives instead of one where every exported kWh is worthless. The same
+        credit is applied to the last row of the returned trajectory -- see the
+        `Netting_Credit_EUR` column -- so `Cum_Cost.iloc[-1]` stays the annual
+        bill. Exports beyond the annual import volume earn nothing here, which
+        is what makes the sizing curve finite under this list. `generate_invoice`
+        does not see the settlement -- InvoiceBuilder is fed interval by
+        interval, so an emitted invoice is short by exactly this credit.
     generate_invoice : bool
         Emit monthly + whole-period line-item invoices for the solved
         trajectory. The bill is built during the extraction pass below, off the
@@ -359,13 +384,32 @@ def run_milp_benchmark(
         prev_window_by_block[b] = w
 
     # -------------------------------------------------------------------------
+    # 2b') ANNUAL NET-METERING SETTLEMENT (only for NET-metering price lists)
+    # -------------------------------------------------------------------------
+    # Bounded by both sums, so minimizing pins it to min(imported, exported) --
+    # exactly the volume a NET-metering contract nets off at year end.
+    netting_objective_terms = []
+    if annual_netting_rate_eur_per_kwh:
+        rate_net = float(annual_netting_rate_eur_per_kwh)
+        E_netted = pulp.LpVariable("E_netted", lowBound=0)
+        prob += E_netted <= pulp.lpSum(P_buy)
+        prob += E_netted <= pulp.lpSum(P_sell)
+        netting_objective_terms.append(-rate_net * E_netted)
+
+    # -------------------------------------------------------------------------
     # 2c) OBJECTIVE (applies identically to both continuous and discrete modes)
     # -------------------------------------------------------------------------
+    # `constant_costs` is deliberately NOT in here. It is the same prorated fixed
+    # monthly charge `fixed_monthly_costs` carries -- calculate_interval_price
+    # returns it as `constant_price_aud` whether or not dogovorjena_moc was
+    # passed -- so adding both double-counts the supplier's monthly fee. It is a
+    # decision-independent constant either way, so no solution ever changed; it
+    # only made the objective value disagree with the reported Cum_Cost.
     prob += pulp.lpSum(
         P_buy[t] * import_rates[t] - P_sell[t] * export_rates[t]
-        + constant_costs[t] + fixed_monthly_costs[t]
+        + fixed_monthly_costs[t]
         for t in range(N_STEPS)
-    ) + pulp.lpSum(peak_objective_terms)
+    ) + pulp.lpSum(peak_objective_terms) + pulp.lpSum(netting_objective_terms)
 
     # -------------------------------------------------------------------------
     # 3) SOLVE
@@ -385,6 +429,8 @@ def run_milp_benchmark(
     results = []
     cumulative_payment = 0.0
     cumulative_rl_reward = 0.0
+    total_bought_kwh = 0.0
+    total_sold_kwh = 0.0
     reporting_peak_kw = env.compute_seed_peak_kw(start_idx)
 
     for t in range(N_STEPS):
@@ -394,6 +440,8 @@ def run_milp_benchmark(
         ch_val = P_ch[t].varValue or 0.0
         dis_val = P_dis[t].varValue or 0.0
         spill_val = P_spill[t].varValue or 0.0
+        total_bought_kwh += buy_val
+        total_sold_kwh += sell_val
 
         action_val = (
             int(np.argmax([(A[t][a].varValue or 0.0) for a in range(n_actions)]))
@@ -457,6 +505,20 @@ def run_milp_benchmark(
         results.append(row)
 
     df_results = pd.DataFrame(results)
+
+    # Annual NET-metering settlement, booked once on the closing interval so
+    # Cum_Cost.iloc[-1] is the bill for the whole horizon. Zero (and the column
+    # all-zero) for every price list that credits exports per interval.
+    df_results["Netting_Credit_EUR"] = 0.0
+    if annual_netting_rate_eur_per_kwh and N_STEPS > 0:
+        credit = float(annual_netting_rate_eur_per_kwh) * min(
+            total_bought_kwh, total_sold_kwh
+        )
+        last = df_results.index[-1]
+        df_results.loc[last, "Netting_Credit_EUR"] = credit
+        df_results.loc[last, "Step_Cost"] -= credit
+        df_results.loc[last, "Cum_Cost"] -= credit
+        cumulative_payment -= credit
 
     if invoice_builder is not None and N_STEPS > 0:
         invoice_builder.finalize(period_label=f"{dates[0]:%Y-%m-%d}_{dates[-1]:%Y-%m-%d}")

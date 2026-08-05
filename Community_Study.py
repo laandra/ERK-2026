@@ -133,6 +133,31 @@ SOUPORABA_SERVICE_ID = "GENI_SOUPORABA"
 # reaching into "New pricing functions" itself.
 STORITVE_SOUPORABE = mht.STORITVE_SOUPORABE
 
+# --- Cost categories -------------------------------------------------------
+# Both settlement paths return one VAT-inclusive figure per billing item; this
+# groups the items by WHO is paid. The network share is what a community can
+# argue about with the regulator, the supply share is what it can shop around
+# for, and the levies are neither -- a split the "energy + network / fixed"
+# one cannot show, because the network power charge sits inside "fixed".
+COST_CATEGORIES = {
+    # `energija_souporaba` is energy bought from a neighbour rather than from
+    # the supplier, but it is still energy, not network.
+    "Supply_EUR": ("energija", "energija_skupnost", "energija_souporaba"),
+    "Network_EUR": (
+        "omreznina_energija",
+        "omreznina_energija_skupnost",
+        "omreznina_moc",
+        "omreznina_presezna_moc",
+    ),
+    "Levies_EUR": (
+        "trosarina",
+        "prispevek_ure",
+        "prispevek_operater_trga",
+        "prispevek_ove_spte",
+    ),
+    "Supplier_Fee_EUR": ("mesecno_nadomestilo", "nadomestilo_souporaba"),
+}
+
 RESULTS_DIR = Path(__file__).resolve().parent / "Results" / "Community_Study"
 DISPATCH_DIR = RESULTS_DIR / "dispatch"
 
@@ -603,6 +628,28 @@ def run_all_scenarios(members, data, scenarios=None, verbose=True):
 # ---------------------------------------------------------------------------
 # Community-level read-outs
 # ---------------------------------------------------------------------------
+def cost_categories(out) -> Dict[str, float]:
+    """The community's gross bill grouped by who is paid, VAT included.
+
+    The per-item figures come out of the settlement engines themselves, so an
+    item nobody has mapped yet raises rather than quietly vanishing from the
+    total -- the sum of the categories has to reproduce the gross bill.
+    """
+    components = out.get("components")
+    if components is None or not len(components):
+        return {name: np.nan for name in COST_CATEGORIES}
+
+    by_item = components.groupby("component")["eur"].sum()
+    known = {item for items in COST_CATEGORIES.values() for item in items}
+    unknown = sorted(set(by_item.index) - known)
+    if unknown:
+        raise ValueError(f"unmapped billing items {unknown}; extend COST_CATEGORIES.")
+    return {
+        name: float(by_item.reindex(items).fillna(0.0).sum())
+        for name, items in COST_CATEGORIES.items()
+    }
+
+
 def community_totals(results) -> pd.DataFrame:
     """One row per scenario: what the community pays, and its peak."""
     rows = []
@@ -644,6 +691,7 @@ def community_totals(results) -> pd.DataFrame:
             fixed = float(group["fiksni_del_eur"].iloc[0]) * ddv
             credit = float(group["dobropis_eur"].iloc[0])
 
+        categories = cost_categories(out)
         rows.append(
             {
                 "Scenario": SCENARIOS[scenario]["label"],
@@ -658,6 +706,8 @@ def community_totals(results) -> pd.DataFrame:
                 "Credit_EUR": credit,
                 "Gross_EUR": variable + fixed,
                 "Split_Residual_EUR": variable + fixed - credit - total,
+                **categories,
+                "Category_Residual_EUR": sum(categories.values()) - credit - total,
                 "Community_Peak_kW": peak_kw,
                 "Peak_At": out["community_peak_at"],
                 "Sum_Individual_Peaks_kW": sum_peaks,

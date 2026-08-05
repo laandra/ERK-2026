@@ -222,7 +222,7 @@ def _infer_consumed_produced(
 # -----------------------------------------------------------------------------
 # Fixed (decision-independent) monthly charge, prorated per interval
 # -----------------------------------------------------------------------------
-def _prorated_fixed_charge_eur(
+def _prorated_fixed_breakdown_eur(
     utc_date: datetime.datetime,
     interval_minutes: float,
     *,
@@ -231,7 +231,13 @@ def _prorated_fixed_charge_eur(
     dogovorjena_moc: Dict[int, float],
     apply_ddv: bool,
     eko_racun: bool,
-) -> float:
+) -> Dict[str, float]:
+    """The fixed monthly charge, prorated per interval and split by recipient.
+
+    The three keys are the names `si_obracun.FIKSNE_POSTAVKE` uses, so a bill
+    settled interval by interval here and one settled by `si_obracun` can be
+    broken down into the same categories (network / levy / supplier).
+    """
     lok = _localized(utc_date, pravila)
     leto, mesec = lok.year, lok.month
 
@@ -244,12 +250,33 @@ def _prorated_fixed_charge_eur(
     ove_spte = dogovorjena_moc.get(ref_blok, 0.0) * ove_spte_eur_kw(pravila.dajatve_datum)
     nadomestilo = paket.nadomestilo(eko_racun)
 
-    fixed_ex_ddv = moc + ove_spte + nadomestilo
-    fixed = fixed_ex_ddv * (1.0 + DDV) if apply_ddv else fixed_ex_ddv
-
     days = _days_in_month(leto, mesec)
     intervals_in_month = max(1.0, (days * 24.0 * 60.0) / float(interval_minutes))
-    return fixed / intervals_in_month
+    scale = (1.0 + DDV if apply_ddv else 1.0) / intervals_in_month
+    return {
+        "omreznina_moc": moc * scale,
+        "prispevek_ove_spte": ove_spte * scale,
+        "mesecno_nadomestilo": nadomestilo * scale,
+    }
+
+
+def _prorated_fixed_charge_eur(
+    utc_date: datetime.datetime,
+    interval_minutes: float,
+    *,
+    pravila: Pravila,
+    paket,
+    dogovorjena_moc: Dict[int, float],
+    apply_ddv: bool,
+    eko_racun: bool,
+) -> float:
+    return sum(
+        _prorated_fixed_breakdown_eur(
+            utc_date, interval_minutes, pravila=pravila, paket=paket,
+            dogovorjena_moc=dogovorjena_moc, apply_ddv=apply_ddv,
+            eko_racun=eko_racun,
+        ).values()
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -289,6 +316,7 @@ def _normalize_si_result(
     apply_ddv: bool,
     fixed_component_eur: float = 0.0,
     power_component_eur: float = 0.0,
+    fixed_breakdown_eur: Optional[Dict[str, float]] = None,
     new_peak_kw: Optional[Dict[int, float]] = None,
     peak_blok: Optional[int] = None,
 ) -> Dict[str, Any]:
@@ -303,7 +331,21 @@ def _normalize_si_result(
 
     variable_total = energy_component_eur + float(power_component_eur)
 
+    # One VAT-inclusive line per billing item, so a caller can add up a bill by
+    # who is paid rather than by decision-dependence. The credit stays out of
+    # it -- it is not a charge -- so the items sum to
+    # `energy_component + power_component + fixed_component + dobropis`.
+    ddv_factor = 1.0 + float(DDV) if apply_ddv else 1.0
+    items = {k: float(v) * ddv_factor for k, v in postavke.items()}
+    for k, v in (fixed_breakdown_eur or {}).items():
+        items[k] = items.get(k, 0.0) + float(v)
+    if power_component_eur:
+        items["omreznina_presezna_moc"] = (
+            items.get("omreznina_presezna_moc", 0.0) + float(power_component_eur)
+        )
+
     return {
+        "postavke_eur": items,
         "scheme": scheme,
         "currency": "EUR",
         "constant_price_aud": round(float(fixed_component_eur), 10),
@@ -337,11 +379,12 @@ def _resolve_si_dobava(
         paket=paket, pravila=pravila, meritve_15min=meritve_15min,
     )
 
-    fixed_component_eur = _prorated_fixed_charge_eur(
+    fixed_breakdown_eur = _prorated_fixed_breakdown_eur(
         utc_date, interval_minutes, pravila=pravila, paket=paket,
         dogovorjena_moc=_resolve_dogovorjena_moc(dogovorjena_moc),
         apply_ddv=apply_ddv, eko_racun=eko_racun,
     )
+    fixed_component_eur = sum(fixed_breakdown_eur.values())
     power_component_eur, new_peak_kw, peak_blok = _apply_peak_ratchet(
         raw, pravila, dogovorjena_moc, prev_peak_kw,
     )
@@ -350,6 +393,7 @@ def _resolve_si_dobava(
         raw, SCHEME_SI_DOBAVA, apply_ddv=apply_ddv,
         fixed_component_eur=fixed_component_eur,
         power_component_eur=power_component_eur,
+        fixed_breakdown_eur=fixed_breakdown_eur,
         new_peak_kw=new_peak_kw, peak_blok=peak_blok,
     )
     normalized["paket_id"] = resolved_paket_id
@@ -373,11 +417,12 @@ def _resolve_si_samooskrba(
         meritve_15min=meritve_15min,
     )
 
-    fixed_component_eur = _prorated_fixed_charge_eur(
+    fixed_breakdown_eur = _prorated_fixed_breakdown_eur(
         utc_date, interval_minutes, pravila=pravila, paket=paket,
         dogovorjena_moc=_resolve_dogovorjena_moc(dogovorjena_moc),
         apply_ddv=apply_ddv, eko_racun=eko_racun,
     )
+    fixed_component_eur = sum(fixed_breakdown_eur.values())
     power_component_eur, new_peak_kw, peak_blok = _apply_peak_ratchet(
         raw, pravila, dogovorjena_moc, prev_peak_kw,
     )
@@ -386,6 +431,7 @@ def _resolve_si_samooskrba(
         raw, SCHEME_SI_SAMOOSKRBA, apply_ddv=apply_ddv,
         fixed_component_eur=fixed_component_eur,
         power_component_eur=power_component_eur,
+        fixed_breakdown_eur=fixed_breakdown_eur,
         new_peak_kw=new_peak_kw, peak_blok=peak_blok,
     )
     normalized["paket_id"] = resolved_paket_id

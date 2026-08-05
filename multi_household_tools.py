@@ -82,6 +82,7 @@ def run_interval_scenario(
     contracted_power_map = contracted_power_map or {}
     flow_rows = []
     summary_rows = []
+    component_rows = []
     household_line_items: Dict[str, list] = {}
 
     # Community net position per interval, accumulated across households.
@@ -121,6 +122,10 @@ def run_interval_scenario(
         power_eur = 0.0
         fixed_eur = 0.0
         credit_eur = 0.0
+        # VAT-inclusive charge per billing item (energija, omreznina_*, dajatve,
+        # ...), so the bill can also be read by who is paid rather than only by
+        # decision-dependence. Items sum to energy + power + fixed + credit.
+        components: Dict[str, float] = {}
         peak_import_kw = 0.0
         hours_per_interval = interval_minutes / 60.0
 
@@ -177,6 +182,8 @@ def run_interval_scenario(
             power_eur += float(price_result["power_component_eur"])
             fixed_eur += float(price_result["constant_price_aud"])
             credit_eur += float(price_result.get("dobropis_odkup_eur", 0.0))
+            for item, value in price_result.get("postavke_eur", {}).items():
+                components[item] = components.get(item, 0.0) + float(value)
             peak_import_kw = max(peak_import_kw, imported / hours_per_interval)
 
             if collect_flows:
@@ -197,6 +204,16 @@ def run_interval_scenario(
         period_label = f"{df.index.min():%Y-%m-%d}_{df.index.max():%Y-%m-%d}"
         builder.finalize(period_label=period_label)
         household_line_items[hid] = builder.get_monthly_line_items()
+
+        component_rows.extend(
+            {
+                "scenario": scenario_name,
+                "household_id": hid,
+                "component": item,
+                "eur": value,
+            }
+            for item, value in sorted(components.items())
+        )
 
         summary_rows.append(
             {
@@ -267,6 +284,7 @@ def run_interval_scenario(
 
     return {
         "summary": summary_df,
+        "components": pd.DataFrame(component_rows),
         "flows": flow_df,
         "invoice_views": invoice_views,
         "community_profile": community_profile,
@@ -544,6 +562,8 @@ def run_souporaba_period_scenario(
         positions[(int(ts.year), int(ts.month))].append(pos)
 
     totals: Dict[str, Dict[str, float]] = {}
+    # VAT-inclusive charge per billing item, same shape as the interval path.
+    component_totals: Dict[str, Dict[str, float]] = {}
     monthly_rows = []
 
     for year, month in months:
@@ -609,6 +629,11 @@ def run_souporaba_period_scenario(
             acc["neizrabljeno_kwh"] += float(diag.get("neizrabljena_souporaba_kwh", 0.0))
             acc["lastna_raba_kwh"] += float(diag.get("lastna_raba_kwh", 0.0))
 
+            ddv_factor = 1.0 + float(racun.ddv_stopnja)
+            comp = component_totals.setdefault(hid, {})
+            for item, value in racun.postavke.items():
+                comp[item] = comp.get(item, 0.0) + float(value) * ddv_factor
+
             monthly_rows.append(
                 {
                     "scenario": scenario_name,
@@ -656,7 +681,21 @@ def run_souporaba_period_scenario(
     }
     summary_df = pd.concat([summary_df, pd.DataFrame([group_row])], ignore_index=True)
 
+    components_df = pd.DataFrame(
+        [
+            {
+                "scenario": scenario_name,
+                "household_id": hid,
+                "component": item,
+                "eur": value,
+            }
+            for hid, comp in sorted(component_totals.items())
+            for item, value in sorted(comp.items())
+        ]
+    )
+
     return {
         "summary": summary_df,
+        "components": components_df,
         "monthly": pd.DataFrame(monthly_rows),
     }

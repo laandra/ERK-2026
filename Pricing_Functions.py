@@ -34,6 +34,14 @@ SUPPORTED_SCHEMES = _PRICING.SUPPORTED_SCHEMES
 SCHEME_SI_DOBAVA = _PRICING.SCHEME_SI_DOBAVA
 SCHEME_SI_SAMOOSKRBA = _PRICING.SCHEME_SI_SAMOOSKRBA
 
+# The price-list catalogue and the VAT rate, so a caller can read a package's
+# own rates (e.g. the NET-metering supplier energy price a MILP has to settle
+# annually) without reaching past this shim into the spaced folder.
+PAKETI = _PRICING.PAKETI
+DDV = _PRICING.DDV
+TipCene = _PRICING.TipCene
+TipOdkupa = _PRICING.TipOdkupa
+
 # --- Invoice generation (monthly / whole-period line-item bills) -----------
 InvoiceBuilder = _INVOICE.InvoiceBuilder
 aggregate_household_invoices = _INVOICE.aggregate_household_invoices
