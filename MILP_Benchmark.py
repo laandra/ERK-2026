@@ -218,6 +218,29 @@ def run_milp_benchmark(
             )
         )
 
+    # P_buy and P_sell are independent nonnegative variables with no
+    # complementarity constraint between them, which is exact only while an
+    # exported kWh is worth no more than an imported one costs. Raising both by
+    # the same delta always satisfies the energy balance and moves the objective
+    # by (import_rate - export_rate), so where that is negative the model is
+    # UNBOUNDED -- it buys and sells the same kWh forever.
+    #
+    # Real contracts do not offer that, but a real COMBINATION does: a price list
+    # with no buyback (`tip_odkupa=NI` -> export rate 0.0) in an interval whose
+    # delivered import rate is negative, which SIPX-linked lists reach whenever
+    # the market price goes below about -0.04 EUR/kWh. GEN-I's plain dynamic list
+    # caps SIPX above at 0.22 EUR/kWh and leaves it unbounded below, so 2024 has
+    # such intervals and the solve returns "Unbounded" with meaningless values.
+    #
+    # Flooring the export rate at the import rate removes the loop without adding
+    # a binary per interval (which would double the model). The round trip becomes
+    # exactly neutral rather than profitable, and because curtailment is free
+    # (P_spill, bounded by generation) the optimum never exports in those
+    # intervals anyway -- so the trajectory and the cost are the true ones.
+    n_export_floored = sum(1 for t in range(N_STEPS) if export_rates[t] > import_rates[t])
+    if n_export_floored:
+        export_rates = [min(e, i) for e, i in zip(export_rates, import_rates)]
+
     # -------------------------------------------------------------------------
     # 2) DEFINE MILP
     # -------------------------------------------------------------------------
@@ -505,6 +528,11 @@ def run_milp_benchmark(
         results.append(row)
 
     df_results = pd.DataFrame(results)
+    # Provenance for the caller: a non-Optimal status means the numbers below are
+    # not a solution, and the floored count says how many intervals needed the
+    # export-rate correction above.
+    df_results.attrs["solver_status"] = pulp.LpStatus[prob.status]
+    df_results.attrs["export_rate_floored_intervals"] = int(n_export_floored)
 
     # Annual NET-metering settlement, booked once on the closing interval so
     # Cum_Cost.iloc[-1] is the bill for the whole horizon. Zero (and the column
