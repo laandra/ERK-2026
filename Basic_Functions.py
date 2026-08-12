@@ -77,7 +77,7 @@ def cumulative_interval_price_series(consumption, generation, pricing_env, datas
             utc_date=timestamp,
             interval_minutes=interval_minutes,
             scheme=pricing_env.pricing_scheme,
-            dogovorjena_moc=pricing_env.contracted_power_kw,
+            dogovorjena_moc=pricing_env.agreed_power_for_timestamp(timestamp),
             prev_peak_kw=peak_kw,
             **pricing_env.pricing_options,
         )

@@ -23,6 +23,7 @@ def _load(module_name: str, file_name: str):
 
 _PRICING = _load("_household_pricing_impl", "Pricing_Functions.py")
 _INVOICE = _load("_household_invoice_impl", "si_invoice.py")
+_MOC = _load("_household_moc_impl", "si_moc.py")
 
 calculate_interval_price = _PRICING.calculate_interval_price
 compute_prorated_fixed_charge_eur = _PRICING.compute_prorated_fixed_charge_eur
@@ -41,6 +42,21 @@ PAKETI = _PRICING.PAKETI
 DDV = _PRICING.DDV
 TipCene = _PRICING.TipCene
 TipOdkupa = _PRICING.TipOdkupa
+
+# --- Agreed billing power (dogovorjena obracunska moc) ---------------------
+# The per-block kW vector both the network power charge and the excess-power
+# charge are measured against; `si_moc` owns the regulatory bounds on it.
+PRIKLJUCNA_MOC_3X16A_KW = _MOC.PRIKLJUCNA_MOC_3X16A_KW
+minimalna_dogovorjena_moc = _MOC.minimalna_dogovorjena_moc
+uskladi_bloke = _MOC.uskladi_bloke
+dogovorjena_moc_iz_konic = _MOC.dogovorjena_moc_iz_konic
+mesecni_razpored_moci = _MOC.mesecni_razpored
+oznaka_razporeda_moci = _MOC.oznaka_razporeda
+# Accepts either shape -- one flat {block: kW} vector or a {month: {block: kW}}
+# schedule -- so every settlement path can take a household that re-sets its
+# agreed power monthly and one that pinned it, without branching.
+je_mesecni_razpored = _MOC.je_mesecni_razpored
+moc_za_mesec = _MOC.moc_za_mesec
 
 # --- Invoice generation (monthly / whole-period line-item bills) -----------
 InvoiceBuilder = _INVOICE.InvoiceBuilder

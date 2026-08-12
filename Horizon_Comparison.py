@@ -46,6 +46,37 @@ trajectory that has been shaving peaks all year. `_PeakSeedView` wraps the
 environment and feeds back the peak the executed trajectory has actually set, so
 every sub-solve starts from the state the evaluator is in.
 
+*The excess-power peak resets every calendar month* (`PEAK_RESET_MONTHS = 1`),
+on both sides: the evaluator drops its running peak at each month boundary and
+the MILP gives every month its own peak variable starting at zero. The network
+bill is monthly, so the excess over the agreed power is a charge a household
+pays twelve times a year, and a battery that shaves it earns twelve times. Under
+the old never-resetting setting the running maximum was charged once for the
+whole year, which made peak shaving worth a rounding error after January and was
+the single biggest reason a flat price list showed no battery value at all.
+
+*The agreed power resets every month too* (`AGREED_POWER_TAG`). The dogovorjena
+obracunska moc every household is billed on is re-set on the 1st to the peak
+power the previous month realized, per tariff block -- a change the Akt allows
+free of charge, requested by the 8th and effective the following month. It is
+unbounded: the regulatory floor and the connection-power ceiling both need a
+connection agreement the profiles do not carry, and only the Akt's monotonicity
+rule (a higher block never below a lower one) is applied. It is derived from the
+NO-BATTERY profile so it stays exogenous to the dispatch being optimized; see
+`Environment._build_agreed_power_schedule`.
+
+*The first month is the one month with no predecessor*, and
+`AGREED_POWER_BOOTSTRAP = "cyclic"` gives it the last complete month of the same
+dataset -- December standing in for the December before January. The alternative
+of letting it read its own peaks is not just non-causal, it is biased: the
+agreed power would land exactly on that month's peak, so it could never pay an
+excess charge and would contribute no peak-shaving signal. See
+`Environment._bootstrap_peak_kw`.
+
+Note the trade all of this models: a household that never touches its assigned
+agreed power is permanently exempt from the excess-power charge, so managing the
+figure is what makes the charge payable in the first place.
+
 *The year is always closed.* Under both SOC modes the run starts at 50 % and the
 final period is required to end at 50 %. Without that last constraint a
 free-terminal strategy would sell off its opening charge and book it as a saving.
@@ -68,7 +99,7 @@ import pulp
 import Data_Loader as dl
 from Environment import HouseholdEnvironment
 from MILP_Benchmark import run_milp_benchmark
-from Pricing_Functions import calculate_interval_price
+from Pricing_Functions import calculate_interval_price, oznaka_razporeda_moci
 
 # --- Study configuration ---------------------------------------------------
 DATASET_GROUPS = [
@@ -111,25 +142,80 @@ CONSUMPTION_COLUMN = "Consumption_Volume_kWh"
 # once a year, so it is not a list a household can choose into and it is not a
 # baseline. See Multuser_Battery_Size_Optimization for the legacy reference line.
 #
+# `scope` says which households may sign the list, and it is enforced in
+# `study_jobs`. GEN-I publishes no two-tariff *samooskrba* list -- GENI_SAMO_REDNI
+# carries a single ET rate and no VT/MT at all -- so "Redni 2T" is GENI_REDNI, a
+# plain supply list with `tip_odkupa=NI`. That is a contract for a household that
+# never sells anything, and running it against a PV roof would price every
+# exported kWh at zero and read as a tariff result when it is really a
+# product-eligibility result. It is therefore restricted to the groups with no
+# PV; the three samooskrba lists carry the PV groups (and, as the existing study
+# defines them, the no-PV groups too, where they reduce to their import side).
+# The standalone no-PV comparison across every list a consumer can actually sign
+# is `no_pv_tariff_comparison` at the bottom of this module.
+#
 # `slug` is the results-file suffix. The default list carries no suffix, so the
 # CSVs written before this study grew a tariff axis are still read as its rows.
 PRICING_SCHEME = "si_samooskrba"
 TARIFFS = {
     "Dinamični": {"paket_id": "GENI_SAMO_DINAMICNI", "scheme": PRICING_SCHEME, "slug": None,
-                  "structure": "dynamic (SIPX)", "buyback": True},
+                  "structure": "dynamic (SIPX)", "buyback": True, "scope": "all"},
     "Aktivni":   {"paket_id": "GENI_SAMO_AKTIVNI",   "scheme": PRICING_SCHEME, "slug": "aktivni",
-                  "structure": "4 time blocks", "buyback": True},
+                  "structure": "4 time blocks", "buyback": True, "scope": "all"},
     "Redni 1T":  {"paket_id": "GENI_SAMO_REDNI",     "scheme": PRICING_SCHEME, "slug": "redni1t",
-                  "structure": "flat (ET)", "buyback": True},
+                  "structure": "flat (ET)", "buyback": True, "scope": "all"},
     "Redni 2T":  {"paket_id": "GENI_REDNI",          "scheme": PRICING_SCHEME, "slug": "redni2t",
-                  "structure": "two-tariff (VT/MT)", "buyback": False},
+                  "structure": "two-tariff (VT/MT)", "buyback": False, "scope": "no_pv"},
 }
 TARIFF_ORDER = list(TARIFFS)
 DEFAULT_TARIFF = "Dinamični"
 PAKET_ID = TARIFFS[DEFAULT_TARIFF]["paket_id"]   # kept for callers that want one id
 
 PRICING_REFERENCE_YEAR = 2026
-PEAK_RESET_MONTHS = None
+# The excess-power ("presezna moc") charge is settled per calendar month, so the
+# running peak it is measured on resets on the 1st. See the module docstring.
+PEAK_RESET_MONTHS = 1
+# Stamped on every result row. A CSV written under a different ratchet rule is
+# not comparable with one written under this one -- the excess-power charge is a
+# different quantity -- so the tag travels with the numbers.
+PEAK_RESET_TAG = "never" if not PEAK_RESET_MONTHS else f"{PEAK_RESET_MONTHS}m"
+
+# --- Dogovorjena obracunska moc (agreed billing power) ----------------------
+# Both the network power charge and the excess-power charge are measured against
+# a per-block kW vector the household agrees with its operator. It is re-set
+# every month to the peak power the previous month realized in each block --
+# free of charge under the Akt if requested by the 8th, effective the 1st.
+# `Environment._build_agreed_power_schedule` builds the schedule (from the
+# no-battery profile, so it stays exogenous to the dispatch being optimized).
+#
+# NO FLOOR AND NO CEILING. The regulatory minimum and the connection-power
+# ceiling are both functions of the connection agreement, which no Fluvius
+# profile carries; assuming one only manufactures excess charges that measure
+# the assumption rather than the household. The one rule kept is the Akt's
+# monotonicity requirement (a higher block is never below a lower one), which
+# needs nothing from outside the data and costs nothing to obey.
+CONNECTION_POWER_KW = None        # no ceiling
+MIN_AGREED_POWER_KW = 0.0         # no floor
+AGREED_POWER_LAG_MONTHS = 1       # month M is set from month M-1's peaks
+# How the FIRST month gets a contract, given it has no predecessor in the data.
+# "cyclic" reads the last complete month of the same dataset -- on a full year
+# that is the calendar month right before the first one, so the leading month is
+# priced against a real, same-season predecessor instead of against its own
+# outcome. See `Environment._bootstrap_peak_kw` for the alternatives.
+AGREED_POWER_BOOTSTRAP = "cyclic"
+# Stamped on every result row, exactly like PEAK_RESET_TAG: a bill settled
+# against a different agreed power is a different number, not an older one.
+# Derived from the constants above by the same function the environment uses, so
+# the tag on a row cannot drift from the rule that priced it.
+AGREED_POWER_TAG = oznaka_razporeda_moci(
+    minimalna_moc_kw=MIN_AGREED_POWER_KW,
+    prikljucna_moc_kw=CONNECTION_POWER_KW,
+    zamik_mesecev=AGREED_POWER_LAG_MONTHS,
+    zacetek=AGREED_POWER_BOOTSTRAP,
+)
+# What rows without the column were priced under: a flat historical peak / 1.5
+# in every block, the pre-schedule default.
+LEGACY_AGREED_POWER_TAG = "flat_peak_over_1.5"
 
 BATTERY_CAPACITY_KWH = 30.0
 SOC_FRACTION = 0.5
@@ -163,6 +249,9 @@ STRATEGIES = {
 }
 
 REFERENCE_STRATEGY = "full_period"
+# Below this the whole-year optimum is not an "achievable saving" any percentage
+# should be taken of -- see `score`.
+MIN_ACHIEVABLE_EUR = 5.0
 # A household-unit is one (dataset, household) profile; a run key adds the price
 # list, because the whole-year optimum a strategy is scored against is the
 # optimum *for that same household on that same list*.
@@ -172,6 +261,21 @@ KEY_COLUMNS = UNIT_COLUMNS + ["Tariff"]
 _BLOCKS = (1, 2, 3, 4, 5)
 
 
+def has_pv(dataset):
+    """Whether a Fluvius group carries a PV roof, i.e. can ever export."""
+    return "PV" in str(dataset).split("_")
+
+
+def tariff_allowed(tariff, dataset):
+    """Whether `dataset`'s households may sign `tariff` (see TARIFFS["scope"])."""
+    scope = TARIFFS[tariff].get("scope", "all")
+    if scope == "no_pv":
+        return not has_pv(dataset)
+    if scope == "pv":
+        return has_pv(dataset)
+    return True
+
+
 def study_units(groups=None, per_group=HOUSEHOLDS_PER_GROUP):
     """The (dataset, household id) pairs the study runs over."""
     groups = groups or DATASET_GROUPS
@@ -179,10 +283,15 @@ def study_units(groups=None, per_group=HOUSEHOLDS_PER_GROUP):
 
 
 def study_jobs(units=None, tariffs=None):
-    """The (dataset, household id, tariff) triples the batch solves."""
+    """The (dataset, household id, tariff) triples the batch solves.
+
+    Combinations the household could not contract are dropped rather than
+    solved: a price list with no buyback is not a tariff a PV household can be
+    scored on.
+    """
     units = units or study_units()
     tariffs = tariffs or TARIFF_ORDER
-    return [(g, i, t) for g, i in units for t in tariffs]
+    return [(g, i, t) for g, i in units for t in tariffs if tariff_allowed(t, g)]
 
 
 def unit_csv_path(output_dir, dataset, household_id, tariff=DEFAULT_TARIFF):
@@ -231,6 +340,10 @@ def build_env(data, capacity_kwh=BATTERY_CAPACITY_KWH, tariff=DEFAULT_TARIFF):
         pricing_reference_year=PRICING_REFERENCE_YEAR,
         pricing_options={"paket_id": spec["paket_id"]},
         peak_reset_months=PEAK_RESET_MONTHS,
+        connection_power_kw=CONNECTION_POWER_KW,
+        min_agreed_power_kw=MIN_AGREED_POWER_KW,
+        agreed_power_lag_months=AGREED_POWER_LAG_MONTHS,
+        agreed_power_bootstrap=AGREED_POWER_BOOTSTRAP,
     )
 
 
@@ -240,6 +353,10 @@ class _PeakSeedView:
     Everything except `compute_seed_peak_kw` is forwarded untouched, so
     `run_milp_benchmark` reads the real environment's arrays, tariff and battery
     parameters.
+
+    The caller must push the evaluator's running peak in with `set_peak_state`
+    before every solve; the seed is not derived from anything the environment
+    knows, because only the caller has executed the trajectory.
     """
 
     def __init__(self, env):
@@ -248,6 +365,9 @@ class _PeakSeedView:
 
     def __getattr__(self, name):
         return getattr(object.__getattribute__(self, "_env"), name)
+
+    def set_peak_state(self, peak_state):
+        object.__setattr__(self, "peak_state", dict(peak_state))
 
     def compute_seed_peak_kw(self, start_idx):
         return dict(object.__getattribute__(self, "peak_state"))
@@ -264,7 +384,7 @@ def price_interval(env, idx, net_kwh, peak_state):
         utc_date=env.dataset.index[idx],
         interval_minutes=env.interval_minutes,
         scheme=env.pricing_scheme,
-        dogovorjena_moc=env.contracted_power_kw,
+        dogovorjena_moc=env.agreed_power_at(idx),
         prev_peak_kw=peak_state,
         **env.pricing_options,
     )
@@ -277,11 +397,31 @@ def price_interval(env, idx, net_kwh, peak_state):
     )
 
 
+def reset_windows(env, n_steps):
+    """Per-interval ratchet reset-window id (see `PEAK_RESET_MONTHS`).
+
+    The evaluator has to drop its running peak wherever the tariff does. The
+    environment already precomputes the boundaries for the MILP, so both sides
+    read the same array and cannot disagree about where a month starts.
+    """
+    return np.asarray(env.reset_window_ids[:n_steps])
+
+
+def _drop_peak_on_window_start(peak_state, windows, idx):
+    """Zero the running peak when `idx` opens a new ratchet window. Idempotent,
+    so it is safe to apply both before a solve and inside the execution loop."""
+    if idx and windows[idx] != windows[idx - 1]:
+        return {b: 0.0 for b in _BLOCKS}
+    return peak_state
+
+
 def no_battery_cost(env, n_steps):
     """Reference cost of the same household with no battery and no curtailment."""
+    windows = reset_windows(env, n_steps)
     peak_state = {b: 0.0 for b in _BLOCKS}
     total = 0.0
     for idx in range(n_steps):
+        peak_state = _drop_peak_on_window_start(peak_state, windows, idx)
         net = float(env.arr_consumption[idx] - env.arr_generation[idx])
         cost, _, _, peak_state = price_interval(env, idx, net, peak_state)
         total += cost
@@ -327,6 +467,7 @@ def run_strategy(env, horizon_kind, execution, soc_mode="fixed50", n_steps=None,
         solver = pulp.PULP_CBC_CMD(msg=False)
 
     view = _PeakSeedView(env)
+    windows = reset_windows(env, n_steps)
     peak_state = {b: 0.0 for b in _BLOCKS}
     soc = soc_target
 
@@ -355,6 +496,13 @@ def run_strategy(env, horizon_kind, execution, soc_mode="fixed50", n_steps=None,
         reaches_end = (t + span) >= n_steps
         final_soc = soc_target if (soc_mode == "fixed50" or reaches_end) else None
 
+        # Hand the solver the peak the executed trajectory is actually carrying.
+        # Without this every sub-solve believes the month's peak is still zero
+        # and pays round-trip losses to shave a peak the evaluator has already
+        # been charged for. A solve that opens a new month must see the reset.
+        peak_state = _drop_peak_on_window_start(peak_state, windows, t)
+        view.set_peak_state(peak_state)
+
         plan = run_milp_benchmark(
             view,
             use_discrete_actions=False,
@@ -375,6 +523,7 @@ def run_strategy(env, horizon_kind, execution, soc_mode="fixed50", n_steps=None,
             gen, con = float(row["Generation"]), float(row["Consumption"])
             net = con + ch + spill - gen - dis
 
+            peak_state = _drop_peak_on_window_start(peak_state, windows, idx)
             step_cost, e_part, p_part, peak_state = price_interval(env, idx, net, peak_state)
             cost += step_cost
             energy_cost += e_part
@@ -438,11 +587,24 @@ def run_user(household_id, dataset, tariff=DEFAULT_TARIFF, n_steps=None, strateg
     n_steps = int(env.episode_length if n_steps is None else n_steps)
 
     rows, traces = [], {}
+    resumable = None
     if checkpoint_path is not None and Path(checkpoint_path).exists():
         done = pd.read_csv(checkpoint_path)
-        rows = done.to_dict("records")
-        baseline = float(done["No_Battery_EUR"].iloc[0])
-        strategies = [s for s in strategies if s not in set(done["Strategy"])]
+        # Rows priced under a different ratchet rule are not this study's rows.
+        # Resuming into them would produce a CSV whose strategies disagree about
+        # what the excess-power charge even is, and the gaps would be nonsense.
+        if (peak_reset_tag(done) == {PEAK_RESET_TAG}
+                and agreed_power_tag(done) == {AGREED_POWER_TAG}):
+            resumable = done
+        else:
+            print(f"  [{dataset} {household_id} | {tariff}] checkpoint written under "
+                  f"peak reset {sorted(peak_reset_tag(done))} / agreed power "
+                  f"{sorted(agreed_power_tag(done))} != {PEAK_RESET_TAG} / "
+                  f"{AGREED_POWER_TAG}; recomputing from scratch", flush=True)
+    if resumable is not None:
+        rows = resumable.to_dict("records")
+        baseline = float(resumable["No_Battery_EUR"].iloc[0])
+        strategies = [s for s in strategies if s not in set(resumable["Strategy"])]
     else:
         baseline = no_battery_cost(env, n_steps)
 
@@ -467,6 +629,8 @@ def run_user(household_id, dataset, tariff=DEFAULT_TARIFF, n_steps=None, strateg
             SOC_Mode=soc_mode,
             No_Battery_EUR=baseline,
             Savings_EUR=baseline - out["Cost_EUR"],
+            Peak_Reset=PEAK_RESET_TAG,
+            Agreed_Power=AGREED_POWER_TAG,
         )
         rows.append(out)
         if verbose:
@@ -527,11 +691,40 @@ def run_batch(units=None, tariffs=None, n_steps=None, output_dir=RESULTS_DIR, n_
     return collect_results(output_dir)
 
 
-def collect_results(output_dir=RESULTS_DIR):
+def peak_reset_tag(df):
+    """The ratchet rule(s) a result frame was priced under, as a set of tags.
+
+    Rows written before the charge grew a monthly reset carry no column; they
+    are the never-resetting variant by construction.
+    """
+    if "Peak_Reset" not in df.columns:
+        return {"never"}
+    return set(df["Peak_Reset"].fillna("never").astype(str))
+
+
+def agreed_power_tag(df):
+    """The agreed-power rule(s) a result frame was priced under, as a set of tags.
+
+    Rows written before the agreed power grew a monthly schedule carry no
+    column; they were settled against a flat historical peak / 1.5 in every
+    block, which is neither the same power charge nor the same excess charge.
+    """
+    if "Agreed_Power" not in df.columns:
+        return {LEGACY_AGREED_POWER_TAG}
+    return set(df["Agreed_Power"].fillna(LEGACY_AGREED_POWER_TAG).astype(str))
+
+
+def collect_results(output_dir=RESULTS_DIR, require_current_peak_reset=True):
     """Concatenate every per-(household, price list) CSV written so far.
 
     Files written before this study grew a tariff axis carry no Tariff column;
     they are the default price list, and are labelled as such on the way in.
+
+    Rows priced under a superseded network-charge rule -- a different ratchet
+    reset, or a different agreed billing power -- are dropped by default. They
+    are not merely older: the charge they contain is a different quantity, so
+    mixing them into a mean would compare two studies. Pass
+    `require_current_peak_reset=False` to read them anyway.
     """
     files = sorted(Path(output_dir).glob("*user_*.csv"))
     if not files:
@@ -542,8 +735,26 @@ def collect_results(output_dir=RESULTS_DIR):
         if "Tariff" not in df.columns:
             df["Tariff"] = DEFAULT_TARIFF
         df["Tariff"] = df["Tariff"].fillna(DEFAULT_TARIFF)
+        if "Peak_Reset" not in df.columns:
+            df["Peak_Reset"] = "never"
+        df["Peak_Reset"] = df["Peak_Reset"].fillna("never").astype(str)
+        if "Agreed_Power" not in df.columns:
+            df["Agreed_Power"] = LEGACY_AGREED_POWER_TAG
+        df["Agreed_Power"] = df["Agreed_Power"].fillna(LEGACY_AGREED_POWER_TAG).astype(str)
         frames.append(df)
-    return pd.concat(frames, ignore_index=True)
+    out = pd.concat(frames, ignore_index=True)
+
+    if require_current_peak_reset:
+        for column, current in (("Peak_Reset", PEAK_RESET_TAG),
+                                ("Agreed_Power", AGREED_POWER_TAG)):
+            stale = out[column] != current
+            if stale.any():
+                print(f"collect_results: dropped {int(stale.sum())} of {len(out)} rows priced "
+                      f"under {column} {sorted(set(out.loc[stale, column]))} "
+                      f"(current: {current!r}). Re-run the batch to replace them.",
+                      flush=True)
+                out = out[~stale].reset_index(drop=True)
+    return out
 
 
 def score(df_all, reference=REFERENCE_STRATEGY):
@@ -561,12 +772,30 @@ def score(df_all, reference=REFERENCE_STRATEGY):
     df = df_all.join(optimum, on=KEY_COLUMNS)
     df["Gap_to_Optimum_EUR"] = df["Cost_EUR"] - df["Optimum_EUR"]
 
-    achievable = (df["No_Battery_EUR"] - df["Optimum_EUR"]).where(lambda s: s.abs() > 1e-9)
+    # A percentage of the achievable saving is only meaningful while there IS an
+    # achievable saving. On a flat list a household with no PV and no headroom on
+    # its agreed power can end the year with an optimum worth two cents, and
+    # dividing a real 8 EUR shortfall by it prints 36 000 %. Those units are
+    # dropped from the percentage (never from Gap_to_Optimum_EUR) so one
+    # degenerate denominator cannot own a column mean.
+    df["Achievable_EUR"] = df["No_Battery_EUR"] - df["Optimum_EUR"]
+    achievable = df["Achievable_EUR"].where(lambda s: s > MIN_ACHIEVABLE_EUR)
     df["Saving_Captured_pct"] = 100.0 * df["Savings_EUR"] / achievable
     # The headline number: the share of the achievable saving a strategy throws
     # away by not seeing the whole year. 0 % is the optimum.
     df["Gap_pct"] = 100.0 - df["Saving_Captured_pct"]
     return df
+
+
+def _pooled_gap_pct(group):
+    """Gap as a share of the achievable saving, pooled over the units.
+
+    Sum of gaps over sum of achievable, rather than the mean of per-unit
+    percentages: it weights every unit by the euros actually at stake, so it
+    stays finite and interpretable however small an individual denominator gets.
+    """
+    denom = group["Achievable_EUR"].sum()
+    return 100.0 * group["Gap_to_Optimum_EUR"].sum() / denom if abs(denom) > 1e-9 else np.nan
 
 
 def summarize(df_all, reference=REFERENCE_STRATEGY):
@@ -577,6 +806,9 @@ def summarize(df_all, reference=REFERENCE_STRATEGY):
     df = score(df_all, reference)
     order = [(t, s) for t in TARIFF_ORDER for s in STRATEGIES
              if (t, s) in set(zip(df["Tariff"], df["Strategy"]))]
+    pooled = df.groupby(["Tariff", "Strategy"])[
+        ["Gap_to_Optimum_EUR", "Achievable_EUR"]
+    ].apply(_pooled_gap_pct).rename("Gap_pct_pooled")
     summary = (
         df.groupby(["Tariff", "Strategy"])
         .agg(
@@ -597,6 +829,7 @@ def summarize(df_all, reference=REFERENCE_STRATEGY):
             Solves=("N_Solves", "mean"),
             Runtime_s=("Runtime_s", "mean"),
         )
+        .join(pooled)
         .reindex(pd.MultiIndex.from_tuples(order, names=["Tariff", "Strategy"]))
     )
     return summary, df
@@ -625,6 +858,218 @@ def summarize_by_group(df_scored, tariff=None):
         .reindex(columns=reindex_to)
         .reindex([g for g in DATASET_GROUPS if g in set(df_scored["Dataset"])])
     )
+
+
+# ---------------------------------------------------------------------------
+# Which price list should a household with NO PV sign?
+# ---------------------------------------------------------------------------
+# A separate question from the horizon study, and one the horizon study cannot
+# answer: it runs the three GEN-I *samooskrba* lists, and all three carry
+# `zahteva_pv=True` -- they are only sold with a self-consumption device. A
+# household with no PV chooses from the plain supply lists instead, billed under
+# `si_dobava` (no export ever occurs, so the netting in `si_samooskrba` would be
+# a no-op anyway, but the scheme should still name the contract that exists).
+#
+# With no PV and no battery the dispatch is fixed: the household imports exactly
+# what it consumes, in the interval it consumes it. So the comparison is a pure
+# price-list question with no optimisation in it, and the answer is the cheapest
+# annual bill. That also makes it cheap to compute: the per-interval unit rate
+# depends only on the calendar and the market price, never on the household, so
+# one pass per list prices every household.
+CONSUMER_SCHEME = "si_dobava"
+NO_PV_GROUPS = [g for g in DATASET_GROUPS if not has_pv(g)]
+
+
+def consumer_price_lists(provider=None):
+    """Every catalogued list a household without a self-consumption device can
+    sign, newest supplier offer first within each supplier."""
+    from Pricing_Functions import PAKETI
+
+    lists = [pid for pid, p in PAKETI.items() if not p.zahteva_pv]
+    if provider is not None:
+        lists = [pid for pid in lists if PAKETI[pid].dobavitelj == provider]
+    return sorted(lists, key=lambda pid: (PAKETI[pid].dobavitelj, pid))
+
+
+_RATE_CACHE = {}
+
+
+def _unit_import_rates(env, paket_id, n_steps):
+    """Per-interval delivered price of one imported kWh [EUR], VAT included.
+
+    Supplier energy + network energy + levies. Excludes both fixed charges and
+    the excess-power charge, which are not per-kWh and are added separately.
+
+    The rate is a function of the calendar and the market price only, so it is
+    cached across households: every household in the study is indexed on the
+    same year and carries the same SMP series, and the cache key says so.
+    """
+    key = (paket_id, n_steps, env.dataset.index[0], env.dataset.index[n_steps - 1],
+           float(np.round(env.arr_price[:n_steps].sum(), 9)))
+    hit = _RATE_CACHE.get(key)
+    if hit is not None:
+        return hit
+
+    rates = np.empty(n_steps, dtype=float)
+    for idx in range(n_steps):
+        result = calculate_interval_price(
+            smp_market_price_kwh=env.arr_price[idx],
+            total_consumed_kwh=1.0,
+            utc_date=env.dataset.index[idx],
+            interval_minutes=env.interval_minutes,
+            scheme=CONSUMER_SCHEME,
+            paket_id=paket_id,
+            pricing_reference_year=PRICING_REFERENCE_YEAR,
+        )
+        rates[idx] = result["variable_price_aud"]
+    _RATE_CACHE[key] = rates
+    return rates
+
+
+def _consumer_fixed_and_excess(env, paket_id, n_steps, import_kwh):
+    """(fixed charge, excess-power charge) for the whole horizon [EUR].
+
+    Both are per-month quantities. The fixed part is constant inside a month, so
+    it is priced once per month and multiplied out; the excess part is the
+    monthly peak per block over the agreed power, weighted by the block's power
+    rate -- the same monthly-resetting ratchet `PEAK_RESET_MONTHS` puts on the
+    MILP and the evaluator.
+    """
+    hours = env.interval_minutes / 60.0
+    blocks = np.asarray(env.tariff_blocks[:n_steps])
+    windows = reset_windows(env, n_steps)
+    power_kw = import_kwh / hours
+
+    # Keyed on the calendar month, not on the ratchet window: the fixed charge
+    # is a monthly quantity and the agreed power it is computed from changes on
+    # the 1st, so a window wider than a month would price every month in it off
+    # the first month's contract.
+    fixed = 0.0
+    months = np.asarray(env.month_ids[:n_steps])
+    for month in np.unique(months):
+        mask = months == month
+        first = int(np.flatnonzero(mask)[0])
+        per_interval = calculate_interval_price(
+            smp_market_price_kwh=env.arr_price[first],
+            total_consumed_kwh=0.0,
+            utc_date=env.dataset.index[first],
+            interval_minutes=env.interval_minutes,
+            scheme=CONSUMER_SCHEME,
+            paket_id=paket_id,
+            pricing_reference_year=PRICING_REFERENCE_YEAR,
+            dogovorjena_moc=env.agreed_power_at(first),
+        )["constant_price_aud"]
+        fixed += per_interval * int(mask.sum())
+
+    # The excess charge is identical on every list -- it is network, not supply --
+    # but it is returned per list so a caller can total one bill in one place.
+    excess = 0.0
+    peak_state = {b: 0.0 for b in _BLOCKS}
+    for idx in range(n_steps):
+        peak_state = _drop_peak_on_window_start(peak_state, windows, idx)
+        block = int(blocks[idx])
+        prev = peak_state.get(block, 0.0)
+        if power_kw[idx] > prev:
+            result = calculate_interval_price(
+                smp_market_price_kwh=env.arr_price[idx],
+                total_consumed_kwh=float(import_kwh[idx]),
+                utc_date=env.dataset.index[idx],
+                interval_minutes=env.interval_minutes,
+                scheme=CONSUMER_SCHEME,
+                paket_id=paket_id,
+                pricing_reference_year=PRICING_REFERENCE_YEAR,
+                dogovorjena_moc=env.agreed_power_at(idx),
+                prev_peak_kw=peak_state,
+            )
+            excess += float(result["power_component_eur"])
+            peak_state = dict(result["new_peak_kw"])
+    return fixed, excess
+
+
+def no_pv_tariff_comparison(groups=None, per_group=HOUSEHOLDS_PER_GROUP,
+                            paket_ids=None, n_steps=None, verbose=False):
+    """Annual bill of every no-PV household on every list it could sign.
+
+    One row per (dataset, household, price list) with no battery. Returns the
+    long frame; `summarize_no_pv_tariffs` turns it into the ranking table.
+    """
+    groups = groups or NO_PV_GROUPS
+    with_pv = [g for g in groups if has_pv(g)]
+    if with_pv:
+        raise ValueError(
+            f"{with_pv} carry PV. This comparison is defined for households that "
+            f"never export; a PV roof makes the buyback terms decide the answer."
+        )
+    paket_ids = paket_ids or consumer_price_lists()
+
+    rows = []
+    for dataset, household_id in study_units(groups, per_group):
+        data = load_user(household_id, dataset)
+        # The battery parameters are irrelevant here (no dispatch), but the env
+        # is what owns the tariff-block, reset-window and agreed-power arrays.
+        env = build_env(data)
+        steps = int(env.episode_length if n_steps is None else n_steps)
+        import_kwh = np.maximum(
+            env.arr_consumption[:steps] - env.arr_generation[:steps], 0.0
+        )
+        if verbose:
+            print(f"  {dataset} {household_id}: {import_kwh.sum():.0f} kWh", flush=True)
+
+        for paket_id in paket_ids:
+            energy = float(np.dot(import_kwh, _unit_import_rates(env, paket_id, steps)))
+            fixed, excess = _consumer_fixed_and_excess(env, paket_id, steps, import_kwh)
+            rows.append({
+                "Dataset": dataset,
+                "Household": household_id,
+                "Paket_ID": paket_id,
+                "Cost_EUR": energy + fixed + excess,
+                "Energy_EUR": energy,
+                "Fixed_EUR": fixed,
+                "Excess_Power_EUR": excess,
+                "Import_kWh": float(import_kwh.sum()),
+                "Agreed_Power": AGREED_POWER_TAG,
+            })
+    return pd.DataFrame(rows)
+
+
+def summarize_no_pv_tariffs(df_no_pv):
+    """Rank the lists by mean annual bill, with the gap to the cheapest.
+
+    `Delta_EUR` / `Delta_pct` are against the cheapest list *per household*, then
+    averaged, so a list is not flattered by a household mix that happens to suit
+    it. `Cheapest_For` counts the households it actually wins.
+    """
+    from Pricing_Functions import PAKETI
+
+    per_household = df_no_pv.set_index(["Dataset", "Household", "Paket_ID"])["Cost_EUR"]
+    best = per_household.groupby(level=["Dataset", "Household"]).min()
+    winner = per_household.groupby(level=["Dataset", "Household"]).idxmin()
+
+    df = df_no_pv.copy()
+    keys = list(zip(df["Dataset"], df["Household"]))
+    df["Best_EUR"] = [best[k] for k in keys]
+    df["Delta_EUR"] = df["Cost_EUR"] - df["Best_EUR"]
+    df["Delta_pct"] = 100.0 * df["Delta_EUR"] / df["Best_EUR"]
+
+    wins = pd.Series([w[2] for w in winner], index=winner.index).value_counts()
+    summary = (
+        df.groupby("Paket_ID")
+        .agg(
+            Households=("Cost_EUR", "size"),
+            Cost_EUR=("Cost_EUR", "mean"),
+            Delta_EUR=("Delta_EUR", "mean"),
+            Delta_pct=("Delta_pct", "mean"),
+            Worst_Delta_pct=("Delta_pct", "max"),
+            Energy_EUR=("Energy_EUR", "mean"),
+            Fixed_EUR=("Fixed_EUR", "mean"),
+            Excess_Power_EUR=("Excess_Power_EUR", "mean"),
+        )
+        .sort_values("Cost_EUR")
+    )
+    summary.insert(0, "Supplier", [PAKETI[p].dobavitelj for p in summary.index])
+    summary.insert(1, "Structure", [PAKETI[p].tip_cene.name.lower() for p in summary.index])
+    summary["Cheapest_For"] = [int(wins.get(p, 0)) for p in summary.index]
+    return summary
 
 
 if __name__ == "__main__":

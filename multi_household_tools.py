@@ -10,6 +10,9 @@ from Pricing_Functions import (
     InvoiceBuilder,
     aggregate_household_invoices,
     calculate_interval_price,
+    je_mesecni_razpored,
+    moc_za_mesec,
+    resolve_reset_window_id,
 )
 
 # Souporaba/community helpers live in "New pricing functions".
@@ -37,6 +40,48 @@ def _step_minutes(df: pd.DataFrame) -> float:
 def _dogovorjena_moc(default_kw: float) -> Dict[int, float]:
     kw = float(default_kw)
     return {1: kw, 2: kw, 3: kw, 4: kw, 5: kw}
+
+
+def _mesec_id(ts) -> int:
+    """Absolute calendar-month id (year*12 + month - 1) in Slovenian local time --
+    the key an agreed-power schedule is on."""
+    return resolve_reset_window_id(ts, 1)
+
+
+def _moc_ob(dogovorjena, ts) -> Dict[int, float]:
+    """The agreed power in force at `ts`.
+
+    `dogovorjena` is either one flat {block: kW} vector -- a household that
+    pinned its dogovorjena obracunska moc -- or a {month id: {block: kW}}
+    schedule for one that re-sets it every month. Flat vectors are returned
+    unchanged, so both kinds of member settle through the same loop.
+    """
+    if not je_mesecni_razpored(dogovorjena):
+        return dogovorjena
+    return moc_za_mesec(dogovorjena, _mesec_id(ts))
+
+
+def _mean_block_kw(dogovorjena, blok: int) -> float:
+    """One block's agreed power as a single number, for reporting columns.
+
+    A monthly schedule is averaged over its months -- there is no single agreed
+    power to report once the contract changes twelve times a year, and the mean
+    is at least the figure the annual power charge is proportional to.
+    """
+    if not dogovorjena:
+        return float("nan")
+    if not je_mesecni_razpored(dogovorjena):
+        return float(dogovorjena.get(blok, float("nan")))
+    values = [float(v.get(blok, 0.0)) for v in dogovorjena.values()]
+    return sum(values) / len(values) if values else float("nan")
+
+
+def _moc_callable(dogovorjena):
+    """InvoiceBuilder-shaped accessor: f(leto, mesec) -> {block: kW}, or the flat
+    vector itself when there is nothing to look up."""
+    if not je_mesecni_razpored(dogovorjena):
+        return dogovorjena
+    return lambda leto, mesec: moc_za_mesec(dogovorjena, leto * 12 + mesec - 1)
 
 
 def run_interval_scenario(
@@ -103,7 +148,7 @@ def run_interval_scenario(
         pv_scale = float(pv_scale_map.get(hid, 1.0))
 
         builder = InvoiceBuilder(
-            dogovorjena_moc=dogovorjena,
+            dogovorjena_moc=_moc_callable(dogovorjena),
             pricing_scheme=household_scheme,
             interval_minutes=interval_minutes,
             output_dir=Path("Results") / "Invoices",
@@ -160,7 +205,7 @@ def run_interval_scenario(
                 scheme=household_scheme,
                 paket_id=household_paket_id,
                 pricing_reference_year=pricing_reference_year,
-                dogovorjena_moc=dogovorjena,
+                dogovorjena_moc=_moc_ob(dogovorjena, ts),
                 prev_peak_kw=peak_kw,
                 include_raw=True,
             )
@@ -223,7 +268,7 @@ def run_interval_scenario(
                 "pv_scale": pv_scale,
                 "scheme": household_scheme,
                 "paket_id": household_paket_id,
-                "contracted_power_kw": dogovorjena.get(2, float("nan")),
+                "contracted_power_kw": _mean_block_kw(dogovorjena, 2),
                 "total_consumption_kwh": total_consumption_kwh,
                 "total_generation_kwh": total_generation_kwh,
                 "total_imported_kwh": imported_kwh,
@@ -437,12 +482,23 @@ def _souporaba_participants(
     delez_souporabe: float,
     oddajnik_paket_id: str,
     prejemnik_paket_id: str,
+    mesec_id: Optional[int] = None,
 ) -> Dict[str, Dict]:
     """Build the `udelezenci` mapping `obracun_souporabe` expects.
 
     Every sender shares with every receiver in equal parts. `delitev` weights
     are normalized inside `obracun_souporabe`, so equal weights are enough.
+
+    `mesec_id` is the absolute month being settled. A household whose
+    `dogovorjena_map` entry is a monthly schedule gets that month's vector; one
+    that pinned a flat vector gets it unchanged either way. `obracun_souporabe`
+    settles one month at a time, so the participants have to be rebuilt per
+    month rather than once for the period.
     """
+    def _moc(hid):
+        entry = dogovorjena_map[hid]
+        return entry if mesec_id is None else moc_za_mesec(entry, mesec_id)
+
     oddajnik_ids = [str(i) for i in oddajnik_ids]
     prejemnik_ids = [str(i) for i in prejemnik_ids]
     weight = 1.0 / max(len(prejemnik_ids), 1)
@@ -452,7 +508,7 @@ def _souporaba_participants(
         udelezenci[oid] = {
             "gospodinjstvo": Gospodinjstvo(
                 oid,
-                dogovorjena_map[oid],
+                _moc(oid),
                 ima_pv=True,
                 shema_samooskrbe=Shema.NOVA,
                 vloga_souporaba=Vloga.ODDAJNIK,
@@ -466,7 +522,7 @@ def _souporaba_participants(
         udelezenci[pid] = {
             "gospodinjstvo": Gospodinjstvo(
                 pid,
-                dogovorjena_map[pid],
+                _moc(pid),
                 vloga_souporaba=Vloga.PREJEMNIK,
             ),
             "paket": PAKETI[prejemnik_paket_id],
@@ -534,14 +590,18 @@ def run_souporaba_period_scenario(
         else None
     )
 
-    udelezenci = _souporaba_participants(
-        oddajnik_ids,
-        prejemnik_ids,
-        dogovorjena_map=dogovorjena_map,
-        delez_souporabe=delez_souporabe,
-        oddajnik_paket_id=oddajnik_paket_id,
-        prejemnik_paket_id=prejemnik_paket_id,
-    )
+    def participants_for(year: int, month: int):
+        """The `udelezenci` mapping for one settled month. Rebuilt per month
+        because the agreed billing power changes on the 1st."""
+        return _souporaba_participants(
+            oddajnik_ids,
+            prejemnik_ids,
+            dogovorjena_map=dogovorjena_map,
+            delez_souporabe=delez_souporabe,
+            oddajnik_paket_id=oddajnik_paket_id,
+            prejemnik_paket_id=prejemnik_paket_id,
+            mesec_id=year * 12 + month - 1,
+        )
 
     # Pull every household's series out once; .loc per timestamp per household
     # is what makes the naive version unusable at community scale.
@@ -588,7 +648,7 @@ def run_souporaba_period_scenario(
             )
 
         results = obracun_souporabe(
-            udelezenci,
+            participants_for(year, month),
             podatki,
             year,
             month,

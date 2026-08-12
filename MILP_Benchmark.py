@@ -15,6 +15,7 @@ from Pricing_Functions import (
     PRIVZETO_REFERENCNO_LETO,
     calculate_interval_price,
     compute_prorated_fixed_charge_eur,
+    moc_za_mesec,
 )
 
 
@@ -32,6 +33,7 @@ def run_milp_benchmark(
     generate_invoice=False,
     invoice_output_dir=None,
     invoice_run_label="milp_eval",
+    do_not_use_previous_month=False,
 ):
     """
     Runs a MILP benchmark over a HouseholdEnvironment episode.
@@ -165,10 +167,38 @@ def run_milp_benchmark(
 
     INTERVAL_MINS = int(round(env.interval_minutes))
 
+    # Calendar month of every interval, and the agreed billing power in force in
+    # it. The agreed power is a per-month constant (the household may revise it
+    # on the 1st), so it is resolved once per interval here and every pricing
+    # call, constraint and objective term below reads the same figure.
+    #
+    # A run starting part-way into the dataset lands in a month that has a real
+    # predecessor on file, and by default it is billed on it -- the meter was
+    # running before the solver was pointed at this window.
+    # `do_not_use_previous_month=True` refuses that history and treats the run's
+    # first month as a cold start instead; see
+    # `HouseholdEnvironment.agreed_power_for_run`.
+    lok_t = [v_lokalni_cas(dates[t]) for t in range(N_STEPS)]
+    month_key_t = [(lok_t[t].year, lok_t[t].month) for t in range(N_STEPS)]
+    months_sorted = sorted(set(month_key_t))
+    month_idx_t = [months_sorted.index(month_key_t[t]) for t in range(N_STEPS)]
+    run_schedule = env.agreed_power_for_run(
+        start_idx, do_not_use_previous_month=do_not_use_previous_month
+    )
+    agreed_by_month = {
+        m: moc_za_mesec(run_schedule, y * 12 + mo - 1)
+        for m, (y, mo) in enumerate(months_sorted)
+    }
+    agreed_t = [agreed_by_month[month_idx_t[t]] for t in range(N_STEPS)]
+    if verbose and do_not_use_previous_month and start_idx:
+        y, mo = months_sorted[0]
+        print(f"Agreed power: {y}-{mo:02d} bootstrapped "
+              f"({env.agreed_power_bootstrap}), previous month deliberately unused.")
+
     invoice_builder = None
     if generate_invoice:
         invoice_builder = InvoiceBuilder(
-            dogovorjena_moc=env.contracted_power_kw,
+            dogovorjena_moc=lambda year, month: env.agreed_power_kw(year * 12 + month - 1),
             pricing_scheme=env.pricing_scheme,
             interval_minutes=INTERVAL_MINS,
             output_dir=invoice_output_dir or env.invoice_output_dir,
@@ -214,7 +244,7 @@ def run_milp_benchmark(
         fixed_monthly_costs.append(
             compute_prorated_fixed_charge_eur(
                 dates[t], INTERVAL_MINS, scheme=env.pricing_scheme,
-                dogovorjena_moc=env.contracted_power_kw, **pricing_options,
+                dogovorjena_moc=agreed_t[t], **pricing_options,
             )
         )
 
@@ -353,18 +383,36 @@ def run_milp_benchmark(
     # environment's per-step marginal ratchet charge exactly (see the
     # telescoping-sum proof in si_konica.py) -- both formulations charge the
     # same total for the same trajectory.
+    #
+    # The seed only belongs to the reset window the horizon STARTS in. A window
+    # that opens inside the horizon starts its peak at zero by definition of a
+    # reset, so flooring it at the seed too would carry a peak across exactly the
+    # boundary the reset exists to break -- and would then charge the next window
+    # only the increment over that stale peak instead of its own full excess.
     block_arr = env.tariff_blocks[horizon]
     window_id_arr = env.reset_window_ids[horizon]
     seed_peak_kw = env.compute_seed_peak_kw(start_idx)
-
-    lok_t = [v_lokalni_cas(dates[t]) for t in range(N_STEPS)]
-    month_key_t = [(lok_t[t].year, lok_t[t].month) for t in range(N_STEPS)]
-    months_sorted = sorted(set(month_key_t))
-    month_idx_t = [months_sorted.index(month_key_t[t]) for t in range(N_STEPS)]
+    seed_window = int(window_id_arr[0])
 
     month_window = {}
     for t in range(N_STEPS):
         month_window.setdefault(month_idx_t[t], int(window_id_arr[t]))
+
+    # A ratchet window wider than one month carries a peak across a month
+    # boundary, but the agreed power it is charged against may change on exactly
+    # that boundary -- and then the telescoping increment below is measured
+    # against two different contracts and no longer sums to the real charge. The
+    # excess charge is settled monthly in the Akt, so peak_reset_months=1 is the
+    # regime this can be exact in; anything else needs a constant agreed power.
+    for w in set(month_window.values()):
+        in_window = [m for m, mw in month_window.items() if mw == w]
+        if len({tuple(sorted(agreed_by_month[m].items())) for m in in_window}) > 1:
+            raise ValueError(
+                f"Ratchet window {w} spans months with different agreed billing power "
+                f"({[months_sorted[m] for m in in_window]}). Set peak_reset_months=1 so "
+                f"each window is one month, or build the environment with a constant "
+                f"contracted_power_kw."
+            )
 
     ure = INTERVAL_MINS / 60.0
     occurring = sorted({(int(block_arr[t]), month_idx_t[t]) for t in range(N_STEPS)})
@@ -379,12 +427,12 @@ def run_milp_benchmark(
         w = month_window[m]
         if b in last_var_by_block and last_window_by_block[b] == w:
             prob += P_peak_month[(b, m)] >= last_var_by_block[b]
-        else:
+        elif w == seed_window:
             prob += P_peak_month[(b, m)] >= seed_peak_kw.get(b, 0.0)
         last_var_by_block[b] = P_peak_month[(b, m)]
         last_window_by_block[b] = w
 
-        prob += Excess_month[(b, m)] >= P_peak_month[(b, m)] - env.contracted_power_kw.get(b, 0.0)
+        prob += Excess_month[(b, m)] >= P_peak_month[(b, m)] - agreed_by_month[m].get(b, 0.0)
 
     # Incremental (telescoping) objective contribution per (block, month), using
     # each month's own season-correct rate (only block 1's rate depends on season).
@@ -399,8 +447,10 @@ def run_milp_benchmark(
 
         if b in prev_excess_by_block and prev_window_by_block[b] == w:
             prev_term = prev_excess_by_block[b]
+        elif w == seed_window:
+            prev_term = max(0.0, seed_peak_kw.get(b, 0.0) - agreed_by_month[m].get(b, 0.0))
         else:
-            prev_term = max(0.0, seed_peak_kw.get(b, 0.0) - env.contracted_power_kw.get(b, 0.0))
+            prev_term = 0.0          # a fresh window pays its own excess in full
 
         peak_objective_terms.append((Excess_month[(b, m)] - prev_term) * rate_bm * faktor)
         prev_excess_by_block[b] = Excess_month[(b, m)]
@@ -457,6 +507,13 @@ def run_milp_benchmark(
     reporting_peak_kw = env.compute_seed_peak_kw(start_idx)
 
     for t in range(N_STEPS):
+        # The reporting pass has to drop the running peak wherever the ratchet
+        # window turns over, exactly as the objective above does -- otherwise the
+        # per-interval Power_Component_EUR carries a stale peak into a new month
+        # and disagrees with the cost the model actually minimized.
+        if t and window_id_arr[t] != window_id_arr[t - 1]:
+            reporting_peak_kw = {b: 0.0 for b in reporting_peak_kw}
+
         buy_val = P_buy[t].varValue or 0.0
         sell_val = P_sell[t].varValue or 0.0
         e_val = E[t].varValue or 0.0
@@ -478,7 +535,7 @@ def run_milp_benchmark(
             utc_date=dates[t],
             interval_minutes=INTERVAL_MINS,
             scheme=env.pricing_scheme,
-            dogovorjena_moc=env.contracted_power_kw,
+            dogovorjena_moc=agreed_t[t],
             prev_peak_kw=reporting_peak_kw,
             include_raw=invoice_builder is not None,
             **pricing_options,

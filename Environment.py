@@ -20,6 +20,8 @@ Curtailment is applied to generation first; everything downstream then sees
 only what is left.
 """
 
+import calendar
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -33,6 +35,9 @@ from Pricing_Functions import (
     PRIVZETO_REFERENCNO_LETO,
     InvoiceBuilder,
     calculate_interval_price,
+    dogovorjena_moc_iz_konic,
+    mesecni_razpored_moci,
+    oznaka_razporeda_moci,
     resolve_block_for_datetime,
     resolve_reset_window_id,
 )
@@ -62,6 +67,157 @@ CURTAIL_NONE = 0     # export everything the house and battery don't take
 CURTAIL_NO_EXPORT = 1  # curtail exactly the surplus that would be exported
 CURTAIL_ALL = 2      # shut local production off completely
 N_CURTAILMENT_MODES = 3
+
+
+# ---------------------------------------------------------------------------
+# Agreed billing power (dogovorjena obracunska moc)
+#
+# Module-level so the community settlement and the multi-household baselines can
+# build exactly the schedule a HouseholdEnvironment would, without constructing
+# one. The class methods below are thin delegates to these.
+# ---------------------------------------------------------------------------
+def monthly_peak_kw_by_block(naive_power_kw, block_arr, month_id_arr):
+    """{month id: {block: peak kW}} of the no-battery grid draw.
+
+    Blocks that never occur in a month are absent from that month's dict --
+    block 1 exists only in the higher season (Nov-Feb) and block 5 only in the
+    lower one, so every month is missing one of the five.
+    """
+    peaks = {}
+    for i in range(len(month_id_arr)):
+        month = peaks.setdefault(int(month_id_arr[i]), {})
+        block = int(block_arr[i])
+        kw = float(naive_power_kw[i])
+        if kw > month.get(block, -np.inf):
+            month[block] = kw
+    return peaks
+
+
+def month_completeness(month_id_arr, steps_per_day):
+    """{month id: observed intervals / intervals a full month would have}.
+
+    A dataset almost never starts and ends on a month boundary, so the first and
+    last months are usually partial. Anything read off a partial month (a peak,
+    in particular) understates it.
+    """
+    counts = Counter(int(m) for m in month_id_arr)
+    out = {}
+    for month, n in counts.items():
+        days = calendar.monthrange(month // 12, month % 12 + 1)[1]
+        out[month] = n / float(days * steps_per_day)
+    return out
+
+
+def bootstrap_peak_kw(peaks, month_id_arr, steps_per_day, *, mode="cyclic",
+                      first_month=None):
+    """Per-block peaks standing in as the month BEFORE `first_month`.
+
+    `first_month` defaults to the earliest month present. The leading month has
+    no predecessor to read, and the three ways out are not equally good:
+
+    - `"cyclic"` (default) hands it the last complete month in the dataset. On a
+      full year that is the calendar month immediately preceding the first one --
+      December before January -- so it is the same season, it carries the same
+      set of tariff blocks, and it is exactly the kind of figure a household that
+      has lived there for years would walk in with. The leading month then
+      behaves like the other twelve: it can pay an excess charge, and shaving its
+      peak is worth something.
+    - `"own"` sets the leading month's contract from its own realized peaks.
+      Causally impossible, and it biases in a specific direction: the agreed
+      power lands exactly on the peak, so that month can never pay an excess
+      charge and contributes no peak-shaving signal at all.
+    - `"flat_max"` takes the leading month's single largest draw, across all
+      blocks, and agrees that in every block. Still reads the month it prices,
+      but only one scalar from it, and it errs conservatively -- nothing is ever
+      in excess, the household simply overpays the power charge.
+
+    None of the three leaks foresight to the *controller*: the agreed power is a
+    constant in the objective and identical for the baseline and every strategy,
+    so it cannot make a short horizon look better than a long one. What it moves
+    is the level of one month's bill -- which is why the point is to make that
+    month resemble the others, not to make it cheap.
+    """
+    if mode not in {"cyclic", "own", "flat_max"}:
+        raise ValueError(
+            f"agreed_power_bootstrap must be 'cyclic', 'own' or 'flat_max', got {mode!r}"
+        )
+    if not peaks:
+        return None
+    first = min(peaks) if first_month is None else int(first_month)
+    if first not in peaks:
+        return None
+
+    if mode == "own":
+        return None                      # si_moc falls back to the month itself
+    if mode == "flat_max":
+        largest = max(peaks[first].values(), default=0.0)
+        return {b: float(largest) for b in _BLOCKS}
+
+    # cyclic: the last complete month, i.e. the period read as a cycle.
+    complete_by = month_completeness(month_id_arr, steps_per_day)
+    complete = [m for m in sorted(peaks) if m != first and complete_by.get(m, 0.0) >= 0.9]
+    if not complete:
+        # Too short a dataset to have a second complete month; fall back to the
+        # conservative scalar rather than to the month's own outcome.
+        largest = max(peaks[first].values(), default=0.0)
+        return {b: float(largest) for b in _BLOCKS}
+    return dict(peaks[complete[-1]])
+
+
+def agreed_power_schedule_for_profile(
+    data,
+    *,
+    consumption_column,
+    generation_column,
+    steps_per_day=96,
+    pricing_reference_year=None,
+    min_agreed_power_kw=0.0,
+    connection_power_kw=None,
+    lag_months=1,
+    bootstrap="cyclic",
+    carry_missing_blocks=True,
+):
+    """{month id: {block: agreed kW}} for a raw profile, with no environment.
+
+    The same schedule `HouseholdEnvironment` builds for itself, so the community
+    settlement and the multi-household baselines can bill against the identical
+    contract the dispatch was optimized under. Month ids are absolute
+    (year*12 + month - 1) in Slovenian local time; `si_moc.moc_za_mesec`
+    resolves one.
+    """
+    hours = 24.0 / float(steps_per_day)
+    naive_power_kw = np.maximum(
+        data[consumption_column].to_numpy(dtype=float)
+        - data[generation_column].to_numpy(dtype=float),
+        0.0,
+    ) / hours
+
+    block_cache, month_cache = {}, {}
+    n = len(data.index)
+    block_arr = np.empty(n, dtype=np.int32)
+    month_id_arr = np.empty(n, dtype=np.int64)
+    for i in range(n):
+        ts = data.index[i]
+        key = (ts.year, ts.month, ts.day, ts.hour)
+        if key not in block_cache:
+            block_cache[key] = resolve_block_for_datetime(
+                ts, pricing_reference_year=pricing_reference_year
+            )
+            month_cache[key] = resolve_reset_window_id(ts, 1)
+        block_arr[i] = block_cache[key]
+        month_id_arr[i] = month_cache[key]
+
+    peaks = monthly_peak_kw_by_block(naive_power_kw, block_arr, month_id_arr)
+    return mesecni_razpored_moci(
+        peaks,
+        minimalna_moc_kw=min_agreed_power_kw,
+        prikljucna_moc_kw=connection_power_kw,
+        zamik_mesecev=lag_months,
+        prenesi_manjkajoce_bloke=carry_missing_blocks,
+        zacetne_konice=bootstrap_peak_kw(
+            peaks, month_id_arr, steps_per_day, mode=bootstrap
+        ),
+    )
 
 
 class HouseholdEnvironment(gym.Env):
@@ -100,6 +256,11 @@ class HouseholdEnvironment(gym.Env):
         pricing_options=None,
         contracted_power_kw=None,
         peak_reset_months=None,
+        connection_power_kw=None,
+        min_agreed_power_kw=0.0,
+        agreed_power_lag_months=1,
+        agreed_power_carry_missing_blocks=True,
+        agreed_power_bootstrap="cyclic",
         pricing_validate_pv=True,
         generate_monthly_invoice=False,
         generate_period_invoice=False,
@@ -240,16 +401,39 @@ class HouseholdEnvironment(gym.Env):
 
         # --- Contracted power (dogovorjena_moc) + peak-ratchet config --------------
         self.peak_reset_months = None if peak_reset_months is None else int(peak_reset_months)
-        if contracted_power_kw is None:
-            self.contracted_power_kw = self._default_contracted_power_kw()
-        elif isinstance(contracted_power_kw, (int, float)):
-            self.contracted_power_kw = {b: float(contracted_power_kw) for b in _BLOCKS}
-        else:
-            self.contracted_power_kw = {b: float(contracted_power_kw.get(b, 0.0)) for b in _BLOCKS}
 
         self._block_arr, self._window_id_arr, self._peak_seed_history = (
             self._precompute_peak_seed_history()
         )
+        self._month_id_arr = self._precompute_month_ids()
+
+        # Both bounds are optional and off by default: none of these profiles
+        # carries a connection agreement, and inventing one only produces
+        # excess charges that measure the invention. See si_moc.
+        self.connection_power_kw = (
+            None if connection_power_kw is None else float(connection_power_kw)
+        )
+        self.min_agreed_power_kw = float(min_agreed_power_kw)
+        self.agreed_power_bootstrap = str(agreed_power_bootstrap)
+        # None means "not read back off anything": either the caller pinned the
+        # agreed power explicitly, or it asked for no lag at all.
+        self.agreed_power_lag_months = (
+            None if (agreed_power_lag_months is None or contracted_power_kw is not None)
+            else int(agreed_power_lag_months)
+        )
+        self.agreed_power_carry_missing_blocks = bool(agreed_power_carry_missing_blocks)
+        self._agreed_power_schedule = self._build_agreed_power_schedule(contracted_power_kw)
+        self._agreed_power_months = sorted(self._agreed_power_schedule)
+        # Legacy single-vector view, kept because callers that never had a
+        # schedule read it directly (community settlement, reporting columns).
+        # It is the *mean over the months*, so it is a fair summary but never a
+        # price: everything that bills reads `agreed_power_at`/`agreed_power_kw`.
+        self.contracted_power_kw = {
+            b: sum(m[b] for m in self._agreed_power_schedule.values())
+            / len(self._agreed_power_schedule)
+            for b in _BLOCKS
+        }
+
         self._peak_kw = {b: 0.0 for b in _BLOCKS}
         self._peak_window_id = 0
 
@@ -339,20 +523,189 @@ class HouseholdEnvironment(gym.Env):
         """Per-row ratchet reset-window id. Read by the MILP benchmark."""
         return self._window_id_arr
 
+    @property
+    def month_ids(self):
+        """Per-row absolute calendar-month id (year*12 + month - 1), local time.
+        The key the agreed-power schedule and every monthly charge are on."""
+        return self._month_id_arr
+
     def _naive_import_power_kw(self):
         """Grid draw in kW the household would have had with no battery."""
         hours_per_interval = self.interval_minutes / 60.0
         naive_import_kwh = np.maximum(self.arr_consumption - self.arr_generation, 0.0)
         return naive_import_kwh / hours_per_interval
 
-    def _default_contracted_power_kw(self):
-        """Default contracted power: set meaningfully BELOW the historical
-        realized peak, so the agent has real room to improve via peak-shaving
-        rather than starting already compliant with a contract sized to its
-        worst historical moment."""
-        naive_power_kw = self._naive_import_power_kw()
-        historical_peak_kw = float(np.max(naive_power_kw)) if naive_power_kw.size else 0.0
-        return {b: historical_peak_kw / 1.5 for b in _BLOCKS}
+    def _precompute_month_ids(self):
+        """Absolute calendar-month id (year*12 + month - 1) per row, in Slovenian
+        local time -- the same key `si_konica.reset_window_id(..., 1)` produces,
+        so the agreed-power schedule turns over on exactly the day the ratchet
+        window and the network invoice do."""
+        month_cache = {}
+        out = np.empty(self.data_length, dtype=np.int64)
+        for i in range(self.data_length):
+            ts = self.dataset.index[i]
+            key = (ts.year, ts.month, ts.day, ts.hour)
+            mid = month_cache.get(key)
+            if mid is None:
+                mid = resolve_reset_window_id(ts, 1)
+                month_cache[key] = mid
+            out[i] = mid
+        return out
+
+    def _monthly_peak_kw_by_block(self):
+        """{month id: {block: peak kW}} of this household's no-battery grid draw."""
+        return monthly_peak_kw_by_block(
+            self._naive_import_power_kw(), self._block_arr, self._month_id_arr
+        )
+
+    def _month_completeness(self):
+        """{month id: observed intervals / intervals a full month would have}."""
+        return month_completeness(self._month_id_arr, self.steps_per_day)
+
+    def _bootstrap_peak_kw(self, peaks, first_month=None):
+        """Per-block peaks standing in for the month before `first_month`."""
+        return bootstrap_peak_kw(
+            peaks, self._month_id_arr, self.steps_per_day,
+            mode=self.agreed_power_bootstrap, first_month=first_month,
+        )
+
+    def _build_agreed_power_schedule(self, contracted_power_kw):
+        """{month id: {block: agreed kW}} -- the dogovorjena obracunska moc in
+        force each calendar month.
+
+        An explicit `contracted_power_kw` (float or per-block dict) is held
+        constant over every month, which is what the community-settlement and
+        battery-sizing callers pass. Left at None, the household is modelled as
+        one that manages the figure itself: each month it agrees exactly the
+        peak power the previous month realized, clipped to
+        [`min_agreed_power_kw`, `connection_power_kw`] and made non-decreasing
+        across blocks (see `si_moc`). Under the regulation that change is free
+        and takes effect the following month.
+
+        **The schedule is built from the NO-BATTERY profile on purpose.** It has
+        to be exogenous: were the agreed power read off the optimized
+        trajectory, this month's dispatch would move next month's fixed charge,
+        the fixed charge would stop being a constant the MILP can drop out of
+        its objective, and the no-battery baseline would no longer be priced
+        under the same contract as the strategies it is compared against. What
+        is modelled here is a household that sized its agreed power on its own
+        metering history and then installed a battery.
+        """
+        if contracted_power_kw is None:
+            peaks = self._monthly_peak_kw_by_block()
+            self._bootstrap_kw = self._bootstrap_peak_kw(peaks)
+            return mesecni_razpored_moci(
+                peaks,
+                minimalna_moc_kw=self.min_agreed_power_kw,
+                prikljucna_moc_kw=self.connection_power_kw,
+                zamik_mesecev=self.agreed_power_lag_months,
+                prenesi_manjkajoce_bloke=self.agreed_power_carry_missing_blocks,
+                zacetne_konice=self._bootstrap_kw,
+            )
+
+        self._bootstrap_kw = None
+        if isinstance(contracted_power_kw, (int, float)):
+            fixed = {b: float(contracted_power_kw) for b in _BLOCKS}
+        else:
+            fixed = {b: float(contracted_power_kw.get(b, 0.0)) for b in _BLOCKS}
+        months = sorted({int(m) for m in self._month_id_arr}) or [0]
+        return {m: dict(fixed) for m in months}
+
+    @property
+    def agreed_power_bootstrap_kw(self):
+        """The per-block peaks the leading month's contract was set from, or None
+        when it fell back to its own month (`agreed_power_bootstrap='own'`)."""
+        return self._bootstrap_kw
+
+    @property
+    def agreed_power_rule(self):
+        """Tag identifying the agreed-power rule this env prices under. Stamped
+        onto result rows so two runs settled against different agreed powers are
+        never averaged together."""
+        return oznaka_razporeda_moci(
+            minimalna_moc_kw=self.min_agreed_power_kw,
+            prikljucna_moc_kw=self.connection_power_kw,
+            zamik_mesecev=self.agreed_power_lag_months,
+            zacetek=self.agreed_power_bootstrap,
+        )
+
+    def agreed_power_kw(self, month_id):
+        """Agreed power {block: kW} in force in an absolute calendar month.
+
+        Months outside the dataset clamp to the nearest one that is in it, so a
+        horizon running off the end of the data still prices.
+        """
+        month = int(month_id)
+        schedule = self._agreed_power_schedule
+        if month in schedule:
+            return schedule[month]
+        months = self._agreed_power_months
+        return schedule[min(max(month, months[0]), months[-1])]
+
+    def agreed_power_at(self, idx):
+        """Agreed power {block: kW} in force at row `idx`."""
+        return self.agreed_power_kw(int(self._month_id_arr[int(idx)]))
+
+    def agreed_power_for_run(self, start_idx=0, do_not_use_previous_month=False):
+        """{month id: {block: kW}} for an analysis that begins at `start_idx`.
+
+        An analysis starting part-way into the dataset lands in a month that DOES
+        have a predecessor on file, and by default it uses it -- month M is
+        billed on month M-1's peaks whether or not the run happens to begin at M.
+        That is the honest reading: the meter kept running before the solver was
+        pointed at the data, and the household's contract reflects it.
+
+        `do_not_use_previous_month=True` refuses that history and treats the
+        run's first month as a cold start, bootstrapping it exactly the way the
+        dataset's own first month is bootstrapped (`agreed_power_bootstrap`).
+        Use it to model a household that has just moved in, or to check how much
+        of a result rests on the month before the window.
+
+        Only the run's FIRST month is affected; every later month reads a
+        predecessor that is inside the run either way. Returns the shared
+        schedule unchanged whenever the flag is off or the run starts in the
+        dataset's first month, so the common path allocates nothing.
+        """
+        schedule = self._agreed_power_schedule
+        if not do_not_use_previous_month:
+            return schedule
+        first_month = int(self._month_id_arr[int(start_idx)])
+        if first_month == self._agreed_power_months[0]:
+            return schedule                  # already bootstrapped, nothing to refuse
+
+        peaks = self._monthly_peak_kw_by_block()
+        if self.agreed_power_bootstrap == "cyclic":
+            # "cyclic" resolves to the last complete month of the whole dataset,
+            # which for a mid-dataset start is AFTER the run. Fine as a
+            # steady-state stand-in, but it is not a causal one -- pair the flag
+            # with 'own' or 'flat_max' if that matters.
+            pass
+        seeded = dict(schedule)
+        seeded[first_month] = dogovorjena_moc_iz_konic(
+            self._bootstrap_peak_kw(peaks, first_month=first_month) or peaks[first_month],
+            minimalna_moc_kw=self.min_agreed_power_kw,
+            prikljucna_moc_kw=self.connection_power_kw,
+        )
+        return seeded
+
+    def agreed_power_for_timestamp(self, timestamp):
+        """Agreed power {block: kW} in force at a timestamp (row index unknown)."""
+        return self.agreed_power_kw(resolve_reset_window_id(timestamp, 1))
+
+    def agreed_power_frame(self):
+        """The whole schedule as a DataFrame (one row per month, one column per
+        block) next to the no-battery peak it was set from. Reporting only."""
+        import pandas as pd
+
+        peaks = self._monthly_peak_kw_by_block()
+        rows = []
+        for month in self._agreed_power_months:
+            agreed = self._agreed_power_schedule[month]
+            row = {"Month": f"{month // 12:04d}-{month % 12 + 1:02d}"}
+            row.update({f"Agreed_B{b}": agreed[b] for b in _BLOCKS})
+            row.update({f"Peak_B{b}": peaks.get(month, {}).get(b, np.nan) for b in _BLOCKS})
+            rows.append(row)
+        return pd.DataFrame(rows).set_index("Month")
 
     def _precompute_peak_seed_history(self):
         """One-time O(n) precompute of per-row tariff block, reset-window id,
@@ -636,7 +989,9 @@ class HouseholdEnvironment(gym.Env):
                 # would otherwise silently drop the previous episode's invoice.
                 self._invoice_builder.finalize()
             self._invoice_builder = InvoiceBuilder(
-                dogovorjena_moc=self.contracted_power_kw,
+                # Callable, not a dict: the agreed power changes on the 1st, so
+                # each month's invoice has to be built against its own figure.
+                dogovorjena_moc=lambda year, month: self.agreed_power_kw(year * 12 + month - 1),
                 pricing_scheme=self.pricing_scheme,
                 eko_racun=self.invoice_eko_racun,
                 interval_minutes=self.interval_minutes,
@@ -750,7 +1105,7 @@ class HouseholdEnvironment(gym.Env):
             interval_minutes=self.interval_minutes,
             scheme=self.pricing_scheme,
             include_raw=(self.pricing_include_raw or self._invoicing_enabled),
-            dogovorjena_moc=self.contracted_power_kw,
+            dogovorjena_moc=self.agreed_power_at(idx),
             prev_peak_kw=self._peak_kw,
             **self.pricing_options,
         )

@@ -16,7 +16,7 @@ import datetime as dt
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR) not in sys.path:
@@ -460,7 +460,7 @@ class InvoiceBuilder:
     def __init__(
         self,
         *,
-        dogovorjena_moc: Dict[int, float],
+        dogovorjena_moc: Union[Dict[int, float], Callable[[int, int], Dict[int, float]]],
         pricing_scheme: str,
         eko_racun: bool = True,
         interval_minutes: float,
@@ -470,11 +470,19 @@ class InvoiceBuilder:
         write_period: bool = False,
         pricing_reference_year: Optional[int] = None,
     ):
-        self.gospodinjstvo = build_invoice_household(
-            dogovorjena_moc=dogovorjena_moc,
+        # A household that manages its dogovorjena obracunska moc can change it
+        # every month (free, effective the 1st), so this accepts either a fixed
+        # per-block dict or `f(leto, mesec) -> {blok: kW}`; in the latter case a
+        # fresh Gospodinjstvo is built for each invoiced month.
+        self._moc_fn = dogovorjena_moc if callable(dogovorjena_moc) else None
+        self._build_household = lambda moc: build_invoice_household(
+            dogovorjena_moc=moc,
             pricing_scheme=pricing_scheme,
             eko_racun=eko_racun,
             meritve_15min=abs(float(interval_minutes) - 15.0) < 1e-6,
+        )
+        self.gospodinjstvo = (
+            None if self._moc_fn is not None else self._build_household(dogovorjena_moc)
         )
         self.output_dir = Path(output_dir)
         self.run_label = run_label
@@ -501,13 +509,11 @@ class InvoiceBuilder:
 
         lok = raw["lokalni_cas"]
         key = (lok.year, lok.month)
-        if self._current_key is None:
-            self._accumulator = InvoiceAccumulator(
-                lok.year, lok.month, self.gospodinjstvo, self._paket, self._pravila
-            )
-            self._current_key = key
-        elif key != self._current_key:
-            self._finalize_month()
+        if self._current_key is None or key != self._current_key:
+            if self._current_key is not None:
+                self._finalize_month()
+            if self._moc_fn is not None:
+                self.gospodinjstvo = self._build_household(self._moc_fn(lok.year, lok.month))
             self._accumulator = InvoiceAccumulator(
                 lok.year, lok.month, self.gospodinjstvo, self._paket, self._pravila
             )
