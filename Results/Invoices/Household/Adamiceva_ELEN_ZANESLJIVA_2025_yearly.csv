@@ -1,0 +1,32 @@
+obdobje,produkt,kolicina,enota,cena_eur_em,znesek_eur_brez_ddv,kategorija
+2025,Elektro energija – Zanesljiva oskrba (redni cenik),,,,,naslov
+2025,Električna energija MT,644.0,kWh,0.1029,66.2676,energija
+2025,Električna energija VT,1052.0,kWh,0.1249,131.3948,energija
+2025,Skupaj električna energija,,,,197.6624,skupaj
+2025,Dogovorjena moč za časovni blok 1,14.0,kW,1.71126,23.95764,omreznina
+2025,Dogovorjena moč za časovni blok 2,42.0,kW,0.91224,38.31408,omreznina
+2025,Dogovorjena moč za časovni blok 3,42.0,kW,0.162969,6.84468,omreznina
+2025,Dogovorjena moč za časovni blok 4,42.0,kW,0.004069,0.17088,omreznina
+2025,Prevzeta EE za časovni blok 1,221.0,kWh,0.01998,4.41558,omreznina
+2025,Prevzeta EE za časovni blok 2,695.0,kWh,0.01833,12.73935,omreznina
+2025,Prevzeta EE za časovni blok 3,555.0,kWh,0.01809,10.03995,omreznina
+2025,Prevzeta EE za časovni blok 4,187.0,kWh,0.01855,3.46885,omreznina
+2025,Skupaj omrežnina za elektroenergetski sistem,,,,100.62529,skupaj
+2025,Prispevek za delovanje operaterja trga,1696.0,kWh,0.00013,0.22048,prispevki
+2025,Prispevek za energetsko učinkovitost,1696.0,kWh,0.0008,1.3568,prispevki
+2025,Prispevek za SPTE in OVE,42.0,kW,0.323175,13.57334,prispevki
+2025,Skupaj prispevki in ostale dajatve,,,,15.15062,skupaj
+2025,Trošarina,1696.0,kWh,0.00153,2.59488,trosarina
+2025,Skupaj trošarina,,,,2.59488,skupaj
+2025,100% Jedrska energija,12.0,kos,0.0,0.0,poslovanje
+2025,Pavšalni strošek poslovanja,12.0,kos,1.99,23.88,poslovanje
+2025,E-popust,12.0,kos,-0.81,-9.72,poslovanje
+2025,Obračun storitev pogodbenega računa,,,,14.16,skupaj
+2025,Skupaj brez DDV,,,,330.19319,skupaj
+2025,DDV 22%,,,,72.64251,ddv
+2025,Skupaj z DDV,,,,402.8357,skupaj
+2025,ZA PLAČILO,,,,402.8357,za_placilo
+2025,"Paket 'Zanesljiva oskrba (redni cenik)' velja šele od 2025-03-01, obračunavaš pa 2025-01-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
+2025,"Paket 'Zanesljiva oskrba (redni cenik)' velja šele od 2025-03-01, obračunavaš pa 2025-02-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
+2025,Dogovorjena moč za časovni blok 5,28.0,kW,0.0,0.0,omreznina
+2025,Prevzeta EE za časovni blok 5,36.0,kWh,0.01873,0.67428,omreznina

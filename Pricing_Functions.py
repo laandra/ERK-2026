@@ -9,6 +9,7 @@ directly via `importlib` and re-exports the surface used from outside that
 folder.
 """
 import importlib.util
+import sys
 from pathlib import Path
 
 _IMPL_DIR = Path(__file__).resolve().parent / "New pricing functions"
@@ -17,6 +18,10 @@ _IMPL_DIR = Path(__file__).resolve().parent / "New pricing functions"
 def _load(module_name: str, file_name: str):
     spec = importlib.util.spec_from_file_location(module_name, _IMPL_DIR / file_name)
     module = importlib.util.module_from_spec(spec)
+    # Registering before exec is what `@dataclass` needs: it looks its own class
+    # up via `sys.modules[cls.__module__]` while the module body is still
+    # running, and gets None (then AttributeError) if the module is not there.
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -58,6 +63,56 @@ oznaka_razporeda_moci = _MOC.oznaka_razporeda
 je_mesecni_razpored = _MOC.je_mesecni_razpored
 moc_za_mesec = _MOC.moc_za_mesec
 
-# --- Invoice generation (monthly / whole-period line-item bills) -----------
+# The operator's own once-a-year proposal (URO rule), and its no-history
+# fallback -- so every path settles against the same agreed-power tables.
+dogovorjena_moc_operaterja = _MOC.dogovorjena_moc_operaterja
+administrativna_moc = _MOC.administrativna_moc
+minimalna_dogovorjena_moc = _MOC.minimalna_dogovorjena_moc
+referencno_okno = _MOC.referencno_okno
+zaokrozi_moc = _MOC.zaokrozi_moc
+PRIKLJUCNE_MOCI_KW = _MOC.PRIKLJUCNE_MOCI_KW
+ST_KONIC = _MOC.ST_KONIC
+KONICNI_BLOKI = _MOC.KONICNI_BLOKI
+
+# --- Invoice generation ----------------------------------------------------
+# `si_invoice` is the ONLY invoice generator: every path (RL environment, MILP
+# benchmark, real meter profiles) accumulates intervals into an InvoiceBuilder
+# and reads its views from there.
 InvoiceBuilder = _INVOICE.InvoiceBuilder
+InvoiceAccumulator = _INVOICE.InvoiceAccumulator
+build_invoice_household = _INVOICE.build_invoice_household
+racun_to_line_items = _INVOICE.racun_to_line_items
 aggregate_household_invoices = _INVOICE.aggregate_household_invoices
+aggregate_line_items = _INVOICE.aggregate_line_items
+round_invoice_rows = _INVOICE.round_invoice_rows
+block_reconciliation_gap = _INVOICE.block_reconciliation_gap
+composition_frame = _INVOICE.composition_frame
+invoice_frame = _INVOICE.invoice_frame
+invoice_total = _INVOICE.invoice_total
+sum_amount = _INVOICE.sum_amount
+write_rows_csv = _INVOICE.write_rows_csv
+BILL_PARTS = _INVOICE.BILL_PARTS
+INVOICE_DECIMALS = _INVOICE.INVOICE_DECIMALS
+
+# --- Bills for the real meter exports in `Input data/Poraba doma/` ---------
+# Loaded last on purpose: `si_poraba_doma` does `from Pricing_Functions import
+# ...`, which resolves to THIS module while it is still executing, so every name
+# it needs has to be bound above this line.
+_HOME = _load("_household_profile_impl", "si_poraba_doma.py")
+
+Household = _HOME.Household
+HOUSEHOLDS = _HOME.HOUSEHOLDS
+RACUNI_MOCI = _HOME.RACUNI_MOCI
+household_names = _HOME.household_names
+get_household = _HOME.get_household
+unconfigured_folders = _HOME.unconfigured_folders
+opis_prikljucka = _HOME.opis_prikljucka
+load_profile = _HOME.load_profile
+verify_blocks = _HOME.verify_blocks
+konice_v_oknu = _HOME.konice_v_oknu
+agreed_power_by_year = _HOME.agreed_power_by_year
+agreed_power_schedule = _HOME.agreed_power_schedule
+validate_agreed_power = _HOME.validate_agreed_power
+AgreedPower = _HOME.AgreedPower
+invoice_household = _HOME.invoice_household
+InvoiceResult = _HOME.InvoiceResult

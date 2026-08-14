@@ -39,6 +39,17 @@ peaks than by inventing a connection size and then billing the household for
 exceeding it. `minimalna_dogovorjena_moc` is kept for callers that do know the
 connection power and want the real floor back.
 
+TWO WAYS THE VECTOR GETS SET:
+
+  * `dogovorjena_moc_operaterja` — what the elektrooperater itself proposes once
+    a year: the average of the five highest 15-minute peaks per block over
+    October(y-2)..September(y-1), blocks 1-4 only, with the published minimum
+    applied. `administrativna_moc` is its fallback for a metering point with no
+    15-minute history.
+  * `dogovorjena_moc_iz_konic` / `mesecni_razpored` — what a household that
+    manages the figure itself would sign, which is what a peak-shaving study
+    models.
+
 AND ONE THE CALLER HAS TO DECIDE ABOUT: a household that never touches its
 agreed power is **permanently exempt** from the excess-power charge [3]; one
 that sets it itself — which is exactly what a peak-shaving battery study models
@@ -47,23 +58,71 @@ together: choosing the first means paying for the second.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import math
-from typing import Dict, Iterable, Mapping, Optional
+from decimal import Decimal, ROUND_HALF_UP
+from typing import Dict, Iterable, Mapping, Optional, Tuple
 
 BLOKI = (1, 2, 3, 4, 5)
 
+#: Agreed power is stated to 0.1 kW, on the bill and in the operator's proposal.
+KORAK_KW = 0.1
+
 # Priključna moč we assume where the connection agreement is not in the data.
 # 3 x 16 A is the standard Slovenian household connection; operators state it as
-# 11 kW in the soglasje za priključitev.
+# 11 kW in the soglasju za priključitev.
 PRIKLJUCNA_MOC_3X16A_KW = 11.0
 
-# Minimalna dogovorjena obračunska moč, trifazni priključek <= 43 kW.
-# Do 31. 12. 2025: 27 % priključne moči, najmanj 3,5 kW.
-# Od 1. 1. 2026:   20 % priključne moči, najmanj 2,8 kW.  [1]
-MIN_TRIFAZNI_KW = {2025: 3.5, 2026: 2.8}
-MIN_DELEZ_TRIFAZNI = {2025: 0.27, 2026: 0.20}
-MIN_ENOFAZNI_KW = {2025: 2.0, 2026: 1.8}
-MIN_DELEZ_ENOFAZNI = {2025: 0.31, 2026: 0.31}
+#: Nazivna varovalka -> priključna moč [kW], as the soglasje states it. [1]
+PRIKLJUCNE_MOCI_KW = {
+    "1x16": 4.0, "1x20": 5.0, "1x25": 6.0, "1x32": 7.0, "1x35": 8.0,
+    "3x16": 11.0, "3x20": 14.0, "3x25": 17.0, "3x32": 22.0,
+    "3x35": 24.0, "3x40": 28.0, "3x50": 35.0, "3x63": 43.0,
+}
+
+# Minimalna obračunska moč as PUBLISHED per fuse rating [1]. Kept as tables
+# rather than only as the percentage rules below them, because the two disagree
+# in places (1 x 35 A in 2025 is published as 2,2 kW where 31 % gives 2,5) and
+# the table is what the operator bills.
+MIN_MOC_KW: Dict[Tuple[int, int], Dict[float, float]] = {
+    (2025, 1): {4: 2.0, 5: 2.0, 6: 2.0, 7: 2.2, 8: 2.2},
+    (2025, 3): {11: 3.5, 14: 3.8, 17: 4.6, 22: 7.5, 24: 8.2, 28: 9.5, 35: 11.9, 43: 14.6},
+    (2026, 1): {4: 1.8, 5: 1.8, 6: 1.9, 7: 2.2, 8: 2.5},
+    (2026, 3): {11: 2.8, 14: 2.8, 17: 3.4, 22: 4.4, 24: 4.8, 28: 5.6, 35: 7.0, 43: 8.6},
+}
+
+# Dogovorjena obračunska moč assigned to a metering point WITHOUT 15-minute
+# data ("administrativna moč") -- a flat share of the connection power. [1]
+ADMIN_MOC_KW: Dict[Tuple[int, int], Dict[float, float]] = {
+    (2025, 1): {4: 2.1, 5: 2.6, 6: 3.1, 7: 3.6, 8: 4.2},
+    (2025, 3): {11: 4.0, 14: 5.0, 17: 6.1, 22: 11.4, 24: 12.5, 28: 14.6, 35: 18.2, 43: 22.4},
+    (2026, 1): {4: 1.8, 5: 2.3, 6: 2.7, 7: 3.2, 8: 3.6},
+    (2026, 3): {11: 3.5, 14: 4.5, 17: 5.4, 22: 9.9, 24: 10.8, 28: 12.6, 35: 15.8, 43: 19.4},
+}
+
+#: Peaks averaged per block, and the blocks the rule is run for. Block 5 is NOT
+#: derived from its own peaks -- the act names blocks 1 to 4 -- it comes out of
+#: the monotonicity rule, which is why a real bill shows P5 == P4. [1]
+ST_KONIC = 5
+KONICNI_BLOKI = (1, 2, 3, 4)
+
+
+def _tabela_leto(leto: int) -> int:
+    return 2026 if int(leto) >= 2026 else 2025
+
+
+def zaokrozi_moc(kw: float, korak: float = KORAK_KW) -> float:
+    """Round to the 0.1 kW step the operator states, half away from zero."""
+    q = Decimal(str(korak))
+    return float((Decimal(str(float(kw))) / q).quantize(Decimal(1), ROUND_HALF_UP) * q)
+
+
+def _iz_tabele(tabela, prikljucna_moc_kw: float, faze: int, leto: int) -> Optional[float]:
+    vrstice = tabela.get((_tabela_leto(leto), 1 if int(faze) == 1 else 3), {})
+    for moc, kw in vrstice.items():
+        if abs(float(moc) - float(prikljucna_moc_kw)) < 1e-9:
+            return kw
+    return None
 
 
 def minimalna_dogovorjena_moc(
@@ -72,14 +131,85 @@ def minimalna_dogovorjena_moc(
     """Regulatory floor on the agreed power in block 1 [kW]. [1]
 
     Blocks 2-5 inherit it through the monotonicity rule, so this is the floor on
-    every block.
+    every block. Published fuse ratings come from `MIN_MOC_KW`; anything else
+    falls back to the percentage rule the tables were built from.
     """
-    tabela = 2026 if int(leto) >= 2026 else 2025
+    prikljucna = float(prikljucna_moc_kw)
+    iz_tabele = _iz_tabele(MIN_MOC_KW, prikljucna, faze, leto)
+    if iz_tabele is not None:
+        return iz_tabele
+    tabela = _tabela_leto(leto)
+    if prikljucna > 43.0:
+        return max(0.15 * prikljucna, 8.6 if tabela == 2026 else 0.0)
     if int(faze) == 1:
-        return max(MIN_DELEZ_ENOFAZNI[tabela] * float(prikljucna_moc_kw),
-                   MIN_ENOFAZNI_KW[tabela])
-    return max(MIN_DELEZ_TRIFAZNI[tabela] * float(prikljucna_moc_kw),
-               MIN_TRIFAZNI_KW[tabela])
+        return max(0.31 * prikljucna, 2.0 if tabela == 2025 else 1.8)
+    if tabela == 2026:
+        return max(0.20 * prikljucna, 2.8)
+    return max(0.27 * prikljucna, 3.5) if prikljucna <= 17.0 else 0.34 * prikljucna
+
+
+def administrativna_moc(
+    prikljucna_moc_kw: float, *, faze: int = 3, leto: int = 2026
+) -> float:
+    """Agreed power the operator assigns without 15-minute metering history [1].
+
+    Same figure in every block, so this is the whole vector.
+    """
+    prikljucna = float(prikljucna_moc_kw)
+    iz_tabele = _iz_tabele(ADMIN_MOC_KW, prikljucna, faze, leto)
+    if iz_tabele is not None:
+        return iz_tabele
+    tabela = _tabela_leto(leto)
+    if int(faze) == 1:
+        delez = 0.52 if tabela == 2025 else 0.45
+    elif prikljucna <= 17.0:
+        delez = 0.36 if tabela == 2025 else 0.32
+    else:
+        delez = 0.52 if tabela == 2025 else 0.45
+    return zaokrozi_moc(delez * prikljucna)
+
+
+def referencno_okno(leto: int) -> Tuple[_dt.date, _dt.date]:
+    """The 12 months the operator reads to set the agreed power for `leto`. [1]
+
+    "Od oktobra predprejšnjega leta do vključno septembra prejšnjega leta" — so
+    2026's figure comes from 10/2024 through 09/2025. End is exclusive.
+    """
+    return _dt.date(int(leto) - 2, 10, 1), _dt.date(int(leto) - 1, 10, 1)
+
+
+def dogovorjena_moc_operaterja(
+    konice_po_blokih: Mapping[int, float],
+    *,
+    leto: int,
+    prikljucna_moc_kw: Optional[float] = None,
+    faze: int = 3,
+    minimalna_moc_kw: Optional[float] = None,
+) -> Dict[int, float]:
+    """The operator's own proposal: average of the five highest peaks per block. [1]
+
+    `konice_po_blokih` is that average, per block, already taken over
+    `referencno_okno(leto)`. Only blocks 1-4 are read; block 5 comes out of the
+    monotonicity rule. The floor defaults to the published minimum for the
+    connection, which is mandatory — pass `minimalna_moc_kw=0.0` to switch it
+    off for a study that wants the agreed power to follow the peaks alone.
+    """
+    if minimalna_moc_kw is None:
+        minimalna_moc_kw = (
+            minimalna_dogovorjena_moc(prikljucna_moc_kw, faze=faze, leto=leto)
+            if prikljucna_moc_kw
+            else 0.0
+        )
+    konice = {
+        b: zaokrozi_moc(konice_po_blokih[b])
+        for b in KONICNI_BLOKI
+        if konice_po_blokih.get(b) is not None
+    }
+    return uskladi_bloke(
+        konice,
+        minimalna_moc_kw=float(minimalna_moc_kw),
+        prikljucna_moc_kw=prikljucna_moc_kw,
+    )
 
 
 def _je_omejen(meja: Optional[float]) -> bool:

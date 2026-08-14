@@ -1,0 +1,35 @@
+obdobje,produkt,kolicina,enota,cena_eur_em,znesek_eur_brez_ddv,kategorija
+2023,Elektro energija – Zanesljiva oskrba (redni cenik),,,,,naslov
+2023,Električna energija MT,272.492,kWh,0.1029,28.03942,energija
+2023,Električna energija VT,386.302,kWh,0.1249,48.24913,energija
+2023,Skupaj električna energija,,,,76.28855,skupaj
+2023,Dogovorjena moč za časovni blok 2,14.0,kW,1.092286,15.292,omreznina
+2023,Dogovorjena moč za časovni blok 3,14.0,kW,0.289036,4.0465,omreznina
+2023,Dogovorjena moč za časovni blok 4,14.0,kW,0.024357,0.341,omreznina
+2023,Dogovorjena moč za časovni blok 5,8.4,kW,0.002464,0.0207,omreznina
+2023,Prevzeta EE za časovni blok 2,246.932,kWh,0.01998,4.9337,omreznina
+2023,Prevzeta EE za časovni blok 3,208.473,kWh,0.01717,3.57948,omreznina
+2023,Prevzeta EE za časovni blok 4,76.467,kWh,0.01805,1.38024,omreznina
+2023,Prevzeta EE za časovni blok 5,13.273,kWh,0.01299,0.17242,omreznina
+2023,Skupaj omrežnina za elektroenergetski sistem,,,,47.27183,skupaj
+2023,Prispevek za delovanje operaterja trga,658.794,kWh,0.00013,0.08564,prispevki
+2023,Prispevek za energetsko učinkovitost,658.794,kWh,0.0008,0.52705,prispevki
+2023,Prispevek za SPTE in OVE,14.0,kW,0.387811,5.42935,prispevki
+2023,Skupaj prispevki in ostale dajatve,,,,6.04202,skupaj
+2023,Trošarina,658.794,kWh,0.00153,1.00796,trosarina
+2023,Skupaj trošarina,,,,1.00796,skupaj
+2023,100% Jedrska energija,5.0,kos,0.0,0.0,poslovanje
+2023,Pavšalni strošek poslovanja,5.0,kos,1.99,9.95,poslovanje
+2023,E-popust,5.0,kos,-0.81,-4.05,poslovanje
+2023,Obračun storitev pogodbenega računa,,,,5.9,skupaj
+2023,Skupaj brez DDV,,,,136.51026,skupaj
+2023,DDV 22%,,,,30.03226,ddv
+2023,Skupaj z DDV,,,,166.54252,skupaj
+2023,ZA PLAČILO,,,,166.54252,za_placilo
+2023,"Paket 'Zanesljiva oskrba (redni cenik)' velja šele od 2025-03-01, obračunavaš pa 2023-08-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
+2023,"Paket 'Zanesljiva oskrba (redni cenik)' velja šele od 2025-03-01, obračunavaš pa 2023-09-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
+2023,"Paket 'Zanesljiva oskrba (redni cenik)' velja šele od 2025-03-01, obračunavaš pa 2023-10-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
+2023,Dogovorjena moč za časovni blok 1,5.6,kW,2.676107,14.9862,omreznina
+2023,Prevzeta EE za časovni blok 1,113.649,kWh,0.02217,2.5196,omreznina
+2023,"Paket 'Zanesljiva oskrba (redni cenik)' velja šele od 2025-03-01, obračunavaš pa 2023-11-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
+2023,"Paket 'Zanesljiva oskrba (redni cenik)' velja šele od 2025-03-01, obračunavaš pa 2023-12-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo

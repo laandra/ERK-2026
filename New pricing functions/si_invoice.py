@@ -436,6 +436,220 @@ def aggregate_household_invoices(
 
 
 # ---------------------------------------------------------------------------
+# Paper-invoice rounding
+# ---------------------------------------------------------------------------
+#: Decimals a quantity carries on a printed bill, per unit of measure.
+INVOICE_DECIMALS = {"kWh": 0, "kW": 1, "kos": 0}
+
+#: Line categories that are detail lines; everything else is a subtotal, a tax
+#: line, a title or a warning.
+DETAIL_KATEGORIJE = ("energija", "omreznina", "prispevki", "trosarina", "poslovanje")
+
+#: Decimals kept on money. The quantity is what a bill rounds; the amount that
+#: follows from it stays at source precision, as the printed line does
+#: (`183 kWh x 0,124900 = 22,85670`).
+ZNESEK_DECIMALS = 5
+
+
+def sum_amount(rows, kategorije, enota: Optional[str] = None) -> float:
+    """Total of the line items in the given categories.
+
+    With `enota` set it sums the *quantity* column instead, which is how the
+    intake is recovered from a rounded bill.
+    """
+    field = "kolicina" if enota else "znesek_eur_brez_ddv"
+    return float(
+        sum(
+            r[field] or 0.0
+            for r in rows
+            if r["kategorija"] in kategorije and (enota is None or r["enota"] == enota)
+        )
+    )
+
+
+def round_invoice_rows(rows: List[Dict[str, Any]], ddv_stopnja: Optional[float] = None):
+    """Re-cast line items the way a printed bill states them.
+
+    Checked line by line against a real Elektro energija invoice (Posavskega,
+    06/2026), which fixes three rules that are easy to guess wrong:
+
+      1. The QUANTITY is rounded, the amount is not — the amount is that rounded
+         quantity times the unit price at full precision.
+      2. The unit price is never rounded; it comes from the price list as published.
+      3. One intake figure per bill: the levies and the excise are charged on the
+         rounded energy quantity the bill already states (183 + 184 = 367 kWh),
+         not on a separately rounded total (which would give 368).
+
+    Subtotals, VAT and the total are then re-derived from the rounded lines.
+    """
+    if not rows:
+        return []
+    if ddv_stopnja is None:
+        from si_tarife import DDV as _DDV  # local: keeps the module import light
+        ddv_stopnja = float(_DDV)
+
+    out = [dict(r) for r in rows]
+
+    def _round_qty(row):
+        decimals = INVOICE_DECIMALS.get(row["enota"])
+        if row["kolicina"] is None or decimals is None:
+            return
+        row["kolicina"] = round(float(row["kolicina"]), decimals)
+        if decimals == 0:
+            row["kolicina"] = float(int(row["kolicina"]))
+
+    def _rederive_amount(row):
+        if row["znesek_eur_brez_ddv"] is None:
+            return
+        if row["kolicina"] is not None and row["cena_eur_em"] is not None:
+            row["znesek_eur_brez_ddv"] = round(
+                row["kolicina"] * row["cena_eur_em"], ZNESEK_DECIMALS
+            )
+
+    # 1. Energy lines first: they are what the bill states the intake to be.
+    for r in out:
+        if r["kategorija"] == "energija":
+            _round_qty(r)
+            _rederive_amount(r)
+    billed_kwh = sum_amount(out, ("energija",), enota="kWh")
+
+    # 2. Everything else; per-kWh levies reuse the intake already stated.
+    for r in out:
+        if r["kategorija"] not in DETAIL_KATEGORIJE or r["kategorija"] == "energija":
+            continue
+        if r["kategorija"] in ("prispevki", "trosarina") and r["enota"] == "kWh":
+            r["kolicina"] = billed_kwh
+        else:
+            _round_qty(r)
+        _rederive_amount(r)
+
+    # 3. Section subtotals: the sum of the detail lines that precede them.
+    pending: Dict[str, float] = {}
+    tail: List[Dict[str, Any]] = []
+    for r in out:
+        kat = r["kategorija"]
+        if kat in DETAIL_KATEGORIJE:
+            pending[kat] = pending.get(kat, 0.0) + (r["znesek_eur_brez_ddv"] or 0.0)
+        elif kat == "skupaj":
+            if pending:
+                r["znesek_eur_brez_ddv"] = round(sum(pending.values()), ZNESEK_DECIMALS)
+                pending = {}
+            else:
+                tail.append(r)  # bill-level totals, filled in below
+
+    # 4. Bill-level totals, from the rounded detail lines.
+    neto = round(sum_amount(out, DETAIL_KATEGORIJE), ZNESEK_DECIMALS)
+    ddv = round(neto * ddv_stopnja, ZNESEK_DECIMALS)
+    bruto = round(neto + ddv, ZNESEK_DECIMALS)
+    dobropis = -sum_amount(out, ("dobropis",))
+    for r, value in zip(tail, (neto, bruto)):  # "Skupaj brez DDV", "Skupaj z DDV"
+        r["znesek_eur_brez_ddv"] = value
+    for r in out:
+        if r["kategorija"] == "ddv":
+            r["znesek_eur_brez_ddv"] = ddv
+        elif r["kategorija"] == "za_placilo":
+            r["znesek_eur_brez_ddv"] = round(bruto - dobropis, ZNESEK_DECIMALS)
+    return out
+
+
+def block_reconciliation_gap(rows) -> float:
+    """Rounded per-block intake minus the intake the bill states, in kWh.
+
+    A real bill reconciles; rounding each block independently does not guarantee
+    it. Reported rather than silently reallocated.
+    """
+    return round(
+        sum(
+            r["kolicina"] or 0.0
+            for r in rows
+            if r["kategorija"] == "omreznina" and r["enota"] == "kWh"
+        )
+        - sum_amount(rows, ("energija",), enota="kWh"),
+        3,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Views over a set of line items
+# ---------------------------------------------------------------------------
+def invoice_total(rows) -> float:
+    """The `ZA PLAČILO` figure of a set of line items."""
+    for r in rows:
+        if r["kategorija"] == "za_placilo":
+            return float(r["znesek_eur_brez_ddv"] or 0.0)
+    return 0.0
+
+
+#: What each bill line rolls up into. The five buckets are disjoint and, absent
+#: a dobropis, add up to `za plačilo`.
+BILL_PARTS = {
+    "Energija": ("energija",),
+    "Omrežnina": ("omreznina",),
+    "Prispevki in trošarina": ("prispevki", "trosarina"),
+    "Poslovanje": ("poslovanje",),
+    "DDV": ("ddv",),
+}
+
+#: Column labels for `invoice_frame`, in the order a paper bill prints them.
+_INVOICE_COLUMNS = {
+    "produkt": "Postavka",
+    "kolicina": "Količina",
+    "enota": "EM",
+    "cena_eur_em": "Cena [EUR/EM]",
+    "znesek_eur_brez_ddv": "Znesek [EUR]",
+}
+
+
+def invoice_frame(rows, *, drop_warnings: bool = False):
+    """Line items as a bill-shaped DataFrame for display in a notebook.
+
+    Keeps row order (that order *is* the bill layout) and returns `kategorija`
+    as the index name, which is what a caller styles on.
+    """
+    import pandas as pd
+
+    if not rows:
+        return pd.DataFrame(columns=list(_INVOICE_COLUMNS.values()))
+    kept = [r for r in rows if not (drop_warnings and r["kategorija"] == "opozorilo")]
+    frame = pd.DataFrame(kept)[list(_INVOICE_COLUMNS)].rename(columns=_INVOICE_COLUMNS)
+    frame.index = pd.Index([r["kategorija"] for r in kept], name="kategorija")
+    return frame
+
+
+def composition_frame(by_month: Dict[Any, List[Dict[str, Any]]]):
+    """Month-by-month bill composition, one row per invoiced month.
+
+    Indexed by the `MM/YYYY` label, with the five `BILL_PARTS` buckets, the
+    intake the bill states, and the resulting average price.
+    """
+    import pandas as pd
+
+    bucket_of = {kat: name for name, kats in BILL_PARTS.items() for kat in kats}
+    records = []
+    for (leto, mesec) in sorted(by_month):
+        rows = by_month[(leto, mesec)]
+        totals = {name: 0.0 for name in BILL_PARTS}
+        for row in rows:
+            name = bucket_of.get(row["kategorija"])
+            if name is not None:
+                totals[name] += float(row["znesek_eur_brez_ddv"] or 0.0)
+        prevzeto = sum_amount(rows, ("energija",), enota="kWh")
+        za_placilo = invoice_total(rows)
+        records.append({
+            "obdobje": f"{mesec:02d}/{leto}",
+            "leto": leto,
+            "mesec": mesec,
+            **{k: round(v, 2) for k, v in totals.items()},
+            "Za plačilo": round(za_placilo, 2),
+            "Prevzeto [kWh]": round(prevzeto, 2),
+            "Povprečna cena [EUR/kWh]": (
+                round(za_placilo / prevzeto, 4) if prevzeto else float("nan")
+            ),
+        })
+    return pd.DataFrame(records).set_index("obdobje")
+
+
+# ---------------------------------------------------------------------------
 # CSV export
 # ---------------------------------------------------------------------------
 def write_rows_csv(rows: List[Dict[str, Any]], path) -> None:
@@ -452,10 +666,14 @@ def write_rows_csv(rows: List[Dict[str, Any]], path) -> None:
 # Stateful driver used by Environment.py and by MILP replay code
 # ---------------------------------------------------------------------------
 class InvoiceBuilder:
-    """Accumulates per-interval price_result dicts (as returned by
-    calculate_interval_price(..., include_raw=True)) into calendar-month
-    invoices, optionally writing a running monthly-line-items CSV and, on
-    finalize(), a whole-period aggregate CSV."""
+    """The one settlement driver: per-interval price_result dicts in (as returned
+    by `calculate_interval_price(..., include_raw=True)`), calendar-month
+    line-item invoices out.
+
+    Every invoicing path in the repo goes through this — the RL environment, the
+    MILP benchmark, and the real meter profiles in `si_poraba_doma` — so a bill
+    is built the same way whatever produced the intervals.
+    """
 
     def __init__(
         self,
@@ -464,11 +682,15 @@ class InvoiceBuilder:
         pricing_scheme: str,
         eko_racun: bool = True,
         interval_minutes: float,
-        output_dir,
-        run_label: str,
+        output_dir=None,
+        run_label: str = "racun",
         write_monthly: bool = False,
         write_period: bool = False,
         pricing_reference_year: Optional[int] = None,
+        round_like_invoice: bool = False,
+        obracunaj_presezno_moc: bool = True,
+        strogo: bool = True,
+        on_month: Optional[Callable[[Any, List[Dict[str, Any]], Racun], None]] = None,
     ):
         # A household that manages its dogovorjena obracunska moc can change it
         # every month (free, effective the 1st), so this accepts either a fixed
@@ -484,10 +706,19 @@ class InvoiceBuilder:
         self.gospodinjstvo = (
             None if self._moc_fn is not None else self._build_household(dogovorjena_moc)
         )
-        self.output_dir = Path(output_dir)
+        self.output_dir = Path(output_dir) if output_dir is not None else None
         self.run_label = run_label
         self.write_monthly = write_monthly
         self.write_period = write_period
+        # `round_like_invoice` is applied PER MONTH, before any roll-up, because
+        # that is the order the real bills happen in: a year is the sum of twelve
+        # rounded invoices, not one rounding of the year.
+        self.round_like_invoice = bool(round_like_invoice)
+        self._acc_kwargs = {
+            "obracunaj_presezno_moc": bool(obracunaj_presezno_moc),
+            "strogo": bool(strogo),
+        }
+        self._on_month = on_month
         # Same regulatory regime the per-interval calculate_interval_price
         # calls use -- keeps month-end fixed-charge finalization (network
         # power fee, OVE+SPTE, excess-power ratchet) consistent with them,
@@ -498,8 +729,29 @@ class InvoiceBuilder:
         self._paket: Optional[Paket] = None
         self._current_key = None
         self._accumulator: Optional[InvoiceAccumulator] = None
-        self.monthly_line_items: List[Dict[str, Any]] = []
+        #: `{(leto, mesec): rows}` — each month's bill kept separate, so a caller
+        #: can roll them up any way it likes.
+        self.by_month: Dict[Any, List[Dict[str, Any]]] = {}
 
+    # -- state ------------------------------------------------------------
+    @property
+    def monthly_line_items(self) -> List[Dict[str, Any]]:
+        """Every closed month's line items, concatenated chronologically."""
+        return [r for key in sorted(self.by_month) for r in self.by_month[key]]
+
+    @property
+    def months(self) -> List[Any]:
+        return sorted(self.by_month)
+
+    @property
+    def years(self) -> List[int]:
+        return sorted({leto for leto, _ in self.by_month})
+
+    @property
+    def paket(self) -> Optional[Paket]:
+        return self._paket
+
+    # -- accumulation -----------------------------------------------------
     def add_interval(self, price_result: Dict[str, Any]) -> None:
         raw = price_result.get("raw_result")
         if raw is None:
@@ -515,7 +767,8 @@ class InvoiceBuilder:
             if self._moc_fn is not None:
                 self.gospodinjstvo = self._build_household(self._moc_fn(lok.year, lok.month))
             self._accumulator = InvoiceAccumulator(
-                lok.year, lok.month, self.gospodinjstvo, self._paket, self._pravila
+                lok.year, lok.month, self.gospodinjstvo, self._paket, self._pravila,
+                **self._acc_kwargs,
             )
             self._current_key = key
 
@@ -530,36 +783,60 @@ class InvoiceBuilder:
         rows = racun_to_line_items(
             racun, po_blokih_omreznina, energija_po_skupini, paket, gosp, min_date, max_date
         )
-        self.monthly_line_items.extend(rows)
+        if self.round_like_invoice:
+            rows = round_invoice_rows(rows, racun.ddv_stopnja)
+        # Appended, not assigned: with `pricing_reference_year` remapping every
+        # timestamp into one year, two calendar months of a multi-year dataset
+        # can land on the same (leto, mesec) key, and dropping one silently would
+        # under-bill the run.
+        self.by_month.setdefault(self._current_key, []).extend(rows)
         self._accumulator = None
-        if self.write_monthly:
-            write_rows_csv(self.monthly_line_items, self.output_dir / f"{self.run_label}_monthly.csv")
+        if self._on_month is not None:
+            self._on_month(self._current_key, rows, racun)
+        if self.write_monthly and self.output_dir is not None:
+            write_rows_csv(
+                self.monthly_line_items, self.output_dir / f"{self.run_label}_monthly.csv"
+            )
 
     def finalize(self, period_label: Optional[str] = None) -> None:
         self._finalize_month()
-        if self.write_period and self.monthly_line_items:
-            label = period_label or self.run_label
-            agg = aggregate_line_items(self.monthly_line_items, label)
+        if self.write_period and self.output_dir is not None and self.by_month:
+            agg = self.get_period_line_items(period_label)
             write_rows_csv(agg, self.output_dir / f"{self.run_label}_period.csv")
 
+    # -- views ------------------------------------------------------------
     def get_monthly_line_items(self) -> List[Dict[str, Any]]:
-        """Returns all collected monthly line-items (in chronological order)."""
+        """All collected monthly line items, in chronological order."""
         self._finalize_month()
-        return list(self.monthly_line_items)
+        return self.monthly_line_items
 
     def get_period_line_items(self, period_label: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Returns whole-period aggregated line-items without writing to disk."""
+        """One aggregated bill over every invoiced month."""
         rows = self.get_monthly_line_items()
         if not rows:
             return []
-        label = period_label or self.run_label
-        return aggregate_line_items(rows, label)
+        return aggregate_line_items(rows, period_label or self.run_label)
+
+    def get_month_line_items(self, leto: int, mesec: int) -> List[Dict[str, Any]]:
+        """One month's line items, exactly as they were billed."""
+        self._finalize_month()
+        return list(self.by_month.get((int(leto), int(mesec)), []))
+
+    def get_year_line_items(self, leto: int) -> List[Dict[str, Any]]:
+        """One aggregated bill over every invoiced month of one calendar year."""
+        self._finalize_month()
+        rows = [r for key in sorted(self.by_month) if key[0] == int(leto)
+                for r in self.by_month[key]]
+        return aggregate_line_items(rows, str(int(leto))) if rows else []
+
+    def get_composition(self):
+        """Month-by-month bill composition as a DataFrame."""
+        self._finalize_month()
+        return composition_frame(self.by_month)
 
     def get_invoice_views(self, period_label: Optional[str] = None) -> Dict[str, Any]:
-        """Returns monthly and period views in one object for API consumers."""
-        monthly = self.get_monthly_line_items()
-        period = self.get_period_line_items(period_label=period_label)
+        """Monthly and period views in one object for API consumers."""
         return {
-            "monthly": monthly,
-            "period": period,
+            "monthly": self.get_monthly_line_items(),
+            "period": self.get_period_line_items(period_label=period_label),
         }

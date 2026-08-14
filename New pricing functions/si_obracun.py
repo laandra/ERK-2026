@@ -480,7 +480,11 @@ class MesecniObracun:
         moc, razdelitev = 0.0, {}
         for b in sorted(bloki):
             z = self.g.dogovorjena_moc.get(b, 0.0) * om.postavka_moc(b, vs)
-            razdelitev[b] = round(z, 4)
+            # Full precision: si_invoice turns this breakdown into actual bill
+            # lines and back-derives their unit price from it, so rounding here
+            # showed 1,092289 EUR/kW on the invoice where the tariff act says
+            # 1,092300. It also kept the breakdown from summing to `moc`.
+            razdelitev[b] = z
             moc += z
         self._post["omreznina_moc"] = moc
         self._razdelitev_moci = razdelitev
