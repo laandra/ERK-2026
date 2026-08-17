@@ -33,7 +33,7 @@ if str(_THIS_DIR) not in sys.path:
 
 from si_cas import bloki_v_mesecu, casovni_blok, je_visja_sezona, v_lokalni_cas
 from si_obracun import Pravila, dobava, samooskrba
-from si_paketi import PAKETI, TipCene, TipOdkupa
+from si_paketi import PAKETI, Paket, TipCene, TipOdkupa
 from si_tarife import DDV, PRIVZETO_REFERENCNO_LETO, ima_tarifne_postavke, ove_spte_eur_kw
 from si_konica import marginal_excess_charge_eur, reset_window_id, update_running_peak
 
@@ -188,24 +188,36 @@ def _select_si_package_cached(
 def _select_si_package(
     scheme: str,
     *,
-    paket_id: Optional[str],
+    paket_id: Optional[Any],
     pricing_mode: Optional[Any],
     buyback_mode: Optional[Any],
     provider: Optional[str],
     warnings: List[str],
-) -> str:
+) -> Paket:
+    """Resolve the caller's package request to a `Paket`.
+
+    `paket_id` accepts either a catalogue key or a `Paket` object. The object
+    form exists so a study can price a *variant* of a catalogued list -- most
+    obviously the single-tariff (ET) reading of a list that also publishes VT/MT
+    rates, which is `dataclasses.replace(paket, vt=0.0, mt=0.0)` and which
+    `_cena_prevzema` then bills off `paket.et` with no other change. Passing the
+    object keeps such a variant out of the shared `PAKETI` catalogue, so a study
+    that needs one cannot alter what every other caller sees.
+    """
+    if isinstance(paket_id, Paket):
+        return paket_id
     if paket_id is not None:
         if paket_id not in PAKETI:
             raise ValueError(f"Unknown paket_id={paket_id!r}.")
-        return paket_id
+        return PAKETI[paket_id]
     tip_cene = _parse_tip_cene(pricing_mode)
     tip_odkupa = _parse_tip_odkupa(buyback_mode)
-    return _select_si_package_cached(
+    return PAKETI[_select_si_package_cached(
         scheme,
         tip_cene.value if tip_cene is not None else None,
         tip_odkupa.value if tip_odkupa is not None else None,
         provider,
-    )
+    )]
 
 
 def _infer_consumed_produced(
@@ -369,11 +381,11 @@ def _resolve_si_dobava(
     paket_id, pricing_mode, buyback_mode, provider, pravila, meritve_15min,
     apply_ddv, total_produced_kwh, dogovorjena_moc, prev_peak_kw, eko_racun, warnings,
 ):
-    resolved_paket_id = _select_si_package(
+    paket = _select_si_package(
         SCHEME_SI_DOBAVA, paket_id=paket_id, pricing_mode=pricing_mode,
         buyback_mode=buyback_mode, provider=provider, warnings=warnings,
     )
-    paket = PAKETI[resolved_paket_id]
+    resolved_paket_id = paket.id
     raw = dobava(
         smp_market_price_mwh, total_consumed_kwh, utc_date, interval_minutes,
         paket=paket, pravila=pravila, meritve_15min=meritve_15min,
@@ -406,11 +418,11 @@ def _resolve_si_samooskrba(
     apply_ddv, total_produced_kwh, dogovorjena_moc, prev_peak_kw, eko_racun, warnings,
 ):
     consumed, produced = _infer_consumed_produced(total_consumed_kwh, total_produced_kwh)
-    resolved_paket_id = _select_si_package(
+    paket = _select_si_package(
         SCHEME_SI_SAMOOSKRBA, paket_id=paket_id, pricing_mode=pricing_mode,
         buyback_mode=buyback_mode, provider=provider, warnings=warnings,
     )
-    paket = PAKETI[resolved_paket_id]
+    resolved_paket_id = paket.id
     raw = samooskrba(
         smp_market_price_mwh, consumed, utc_date, interval_minutes,
         total_produced_kwh=produced, paket=paket, pravila=pravila,
@@ -497,9 +509,12 @@ def calculate_interval_price(
     """Unified single-user interval pricing dispatcher for RL/MILP.
 
     Key features:
-    - Select an explicit SI package with `paket_id`, or by pricing model via
-      `pricing_mode` (TipCene) / `buyback_mode` (TipOdkupa), optionally
-      constrained by `provider`.
+    - Select an explicit SI package with `paket_id` -- either a catalogue key
+      or a `Paket` object, the latter so a caller can price a variant of a
+      catalogued list (e.g. its single-tariff ET reading) without registering
+      it in the shared catalogue -- or by pricing model via `pricing_mode`
+      (TipCene) / `buyback_mode` (TipOdkupa), optionally constrained by
+      `provider`.
     - Non-15-minute intervals are supported: if `meritve_15min` is omitted
       and `interval_minutes != 15`, it's auto-set to False (a warning is
       returned in `warnings`).
@@ -592,12 +607,12 @@ def compute_prorated_fixed_charge_eur(
         raise ValueError(f"Unknown scheme={scheme!r}. Supported: {SUPPORTED_SCHEMES}")
     warnings: List[str] = []
     resolved_pravila = _resolve_pravila(utc_date, pravila, pricing_reference_year, warnings)
-    resolved_paket_id = _select_si_package(
+    resolved_paket = _select_si_package(
         scheme, paket_id=paket_id, pricing_mode=pricing_mode,
         buyback_mode=buyback_mode, provider=provider, warnings=warnings,
     )
     return _prorated_fixed_charge_eur(
-        utc_date, interval_minutes, pravila=resolved_pravila, paket=PAKETI[resolved_paket_id],
+        utc_date, interval_minutes, pravila=resolved_pravila, paket=resolved_paket,
         dogovorjena_moc=_resolve_dogovorjena_moc(dogovorjena_moc),
         apply_ddv=bool(apply_ddv), eko_racun=bool(eko_racun),
     )

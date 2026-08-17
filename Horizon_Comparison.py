@@ -152,7 +152,9 @@ CONSUMPTION_COLUMN = "Consumption_Volume_kWh"
 # PV; the three samooskrba lists carry the PV groups (and, as the existing study
 # defines them, the no-PV groups too, where they reduce to their import side).
 # The standalone no-PV comparison across every list a consumer can actually sign
-# is `no_pv_tariff_comparison` at the bottom of this module.
+# is `no_pv_tariff_comparison` at the bottom of this module; the matching question
+# for a PV roof -- which samooskrba list, and what the buyback term is worth -- is
+# `pv_tariff_comparison` beside it. Both drive `No_battery_comparison.ipynb`.
 #
 # `slug` is the results-file suffix. The default list carries no suffix, so the
 # CSVs written before this study grew a tariff axis are still read as its rows.
@@ -702,6 +704,19 @@ def peak_reset_tag(df):
     return set(df["Peak_Reset"].fillna("never").astype(str))
 
 
+def sample_tag(df):
+    """The `per_group` a cached comparison frame was computed on.
+
+    Read alongside `agreed_power_tag` before trusting a cache: a frame written
+    for 3 households per group is a different sample, not an older one, and
+    averaging it as if it were 5 would silently change every mean in a table.
+    Frames written before this column existed return `{None}`.
+    """
+    if "Per_Group" not in df.columns:
+        return {None}
+    return {int(v) for v in pd.unique(df["Per_Group"])}
+
+
 def agreed_power_tag(df):
     """The agreed-power rule(s) a result frame was priced under, as a set of tags.
 
@@ -861,7 +876,7 @@ def summarize_by_group(df_scored, tariff=None):
 
 
 # ---------------------------------------------------------------------------
-# Which price list should a household with NO PV sign?
+# Which price list should a household with no battery sign?
 # ---------------------------------------------------------------------------
 # A separate question from the horizon study, and one the horizon study cannot
 # answer: it runs the three GEN-I *samooskrba* lists, and all three carry
@@ -877,24 +892,168 @@ def summarize_by_group(df_scored, tariff=None):
 # depends only on the calendar and the market price, never on the household, so
 # one pass per list prices every household.
 CONSUMER_SCHEME = "si_dobava"
+PROSUMER_SCHEME = "si_samooskrba"
 NO_PV_GROUPS = [g for g in DATASET_GROUPS if not has_pv(g)]
+PV_GROUPS = [g for g in DATASET_GROUPS if has_pv(g)]
+
+
+# ---------------------------------------------------------------------------
+# Price OPTIONS: a price list plus, where the supplier publishes both, which
+# metering variant the household is on.
+# ---------------------------------------------------------------------------
+# A "tarifni" list usually publishes THREE supplier rates: VT and MT for a
+# two-tariff meter, and a single ET rate for a one-tariff meter. They are
+# alternative products on the same cenik and the household picks one when it
+# picks its meter, so a comparison that silently takes one of them is comparing
+# suppliers on an assumption the customer actually gets to make.
+#
+# `si_obracun._cena_prevzema` bills VT/MT whenever the package carries them and
+# falls through to ET only when it does not -- so the ET reading of such a list
+# is `dataclasses.replace(paket, vt=0, mt=0)`, which changes the supplier energy
+# rate and nothing else. That variant is built here and handed to
+# `calculate_interval_price` as an object rather than registered in `PAKETI`,
+# so nothing outside this module sees a catalogue that grew rows.
+#
+# Lists priced on a 4-block (AKTIVNI) or spot-linked (DINAMICNI) rate have no
+# such choice: their `et` field is a fallback for missing 15-minute data, not a
+# product, and it is never offered as an alternative.
+VARIANT_2T = "2T"          # VT/MT, two-tariff meter
+VARIANT_1T = "1T"          # ET, single-tariff meter
+VARIANT_NA = "-"           # the list has no VT/MT-vs-ET choice to make
+
+_OPTION_PAKETI = {}        # option id -> Paket (base or derived variant)
+
+
+def _register_options(paket_id):
+    """The option ids one catalogued list expands into, cached in _OPTION_PAKETI."""
+    import dataclasses
+
+    from Pricing_Functions import PAKETI, TipCene
+
+    p = PAKETI[paket_id]
+    offers_both = p.tip_cene is TipCene.TARIFNI and (p.vt or p.mt) and p.et
+    if not offers_both:
+        _OPTION_PAKETI[paket_id] = p
+        return [paket_id]
+
+    two, one = f"{paket_id}@{VARIANT_2T}", f"{paket_id}@{VARIANT_1T}"
+    # The 2T option IS the catalogued package -- billing it needs no variant,
+    # because VT/MT is what _cena_prevzema already reaches for.
+    _OPTION_PAKETI[two] = dataclasses.replace(p, id=two)
+    _OPTION_PAKETI[one] = dataclasses.replace(p, id=one, vt=0.0, mt=0.0)
+    return [two, one]
+
+
+def option_paket(option_id):
+    """The `Paket` an option is billed on, building it on first use."""
+    if option_id not in _OPTION_PAKETI:
+        _register_options(option_base_id(option_id))
+    return _OPTION_PAKETI[option_id]
+
+
+def option_base_id(option_id):
+    """The catalogue key an option belongs to (`GENI_REDNI@2T` -> `GENI_REDNI`)."""
+    return str(option_id).split("@", 1)[0]
+
+
+def option_variant(option_id):
+    """Which metering variant an option is: '2T', '1T', or '-' where there is no choice."""
+    parts = str(option_id).split("@", 1)
+    return parts[1] if len(parts) == 2 else VARIANT_NA
+
+
+def option_label(option_id):
+    """Option id with the variant spelled out, for a table or an axis."""
+    variant = option_variant(option_id)
+    base = option_base_id(option_id)
+    return base if variant == VARIANT_NA else f"{base} [{variant}]"
+
+
+def tariff_structure_label(option_id):
+    """What the household is actually billed on, in words.
+
+    The variant alone is not self-explanatory on a list that has no choice to
+    offer, so this names the structure instead of printing a bare dash.
+    """
+    from Pricing_Functions import TipCene
+
+    p = option_paket(option_id)
+    variant = option_variant(option_id)
+    if variant == VARIANT_2T:
+        return f"2T: VT {p.vt:.5f} / MT {p.mt:.5f}"
+    if variant == VARIANT_1T:
+        return f"1T: ET {p.et:.5f}"
+    if p.tip_cene is TipCene.DINAMICNI:
+        return f"dynamic: SIPX + {p.pribitek_odjem:.5f}"
+    if p.tip_cene is TipCene.AKTIVNI:
+        return (f"4 blocks: {min(p.soncna_ns, p.soncna_vs, p.osnovna, p.konicna):.5f}"
+                f" -> {max(p.soncna_ns, p.soncna_vs, p.osnovna, p.konicna):.5f}")
+    return f"1T: ET {p.et:.5f}"      # tarifni with no VT/MT published at all
 
 
 def consumer_price_lists(provider=None):
-    """Every catalogued list a household without a self-consumption device can
-    sign, newest supplier offer first within each supplier."""
+    """Every option a household without a self-consumption device can sign.
+
+    One entry per (list, metering variant), so a supplier that publishes both a
+    VT/MT and an ET rate contributes two rows rather than one.
+    """
     from Pricing_Functions import PAKETI
 
     lists = [pid for pid, p in PAKETI.items() if not p.zahteva_pv]
     if provider is not None:
         lists = [pid for pid in lists if PAKETI[pid].dobavitelj == provider]
-    return sorted(lists, key=lambda pid: (PAKETI[pid].dobavitelj, pid))
+    lists.sort(key=lambda pid: (PAKETI[pid].dobavitelj, pid))
+    return [opt for pid in lists for opt in _register_options(pid)]
+
+
+def prosumer_price_lists(provider=None, include_net_metering=False):
+    """Every *samooskrba* option a household with a PV roof can sign.
+
+    Same (list, metering variant) expansion as `consumer_price_lists`. Only the
+    tarifni samooskrba lists have a variant to expand: `PETROL_SAMOOSKRBA`
+    publishes VT/MT and ET both, while `GENI_SAMO_REDNI` publishes a single ET
+    rate and no VT/MT at all -- GEN-I sells no two-tariff samooskrba product,
+    which is a real asymmetry between the two and not a gap in the catalogue.
+
+    NET metering is left out by default: it is closed to new consents and settles
+    once a year rather than per interval, so it is neither a list a household can
+    choose into nor a bill this per-interval evaluator can produce. Ask for it
+    explicitly if a legacy holder is what is being priced.
+    """
+    from Pricing_Functions import PAKETI, TipOdkupa
+
+    lists = [
+        pid for pid, p in PAKETI.items()
+        if p.zahteva_pv
+        and (include_net_metering or p.tip_odkupa is not TipOdkupa.NET_METERING)
+    ]
+    if provider is not None:
+        lists = [pid for pid in lists if PAKETI[pid].dobavitelj == provider]
+    lists.sort(key=lambda pid: (PAKETI[pid].dobavitelj, pid))
+    return [opt for pid in lists for opt in _register_options(pid)]
+
+
+def buyback_rate_label(option_id):
+    """One-line description of what an option pays for an exported kWh."""
+    from Pricing_Functions import TipOdkupa
+
+    p = option_paket(option_id)
+    if p.tip_odkupa is TipOdkupa.NI:
+        return "no buyback"
+    if p.tip_odkupa is TipOdkupa.NET_METERING:
+        return "annual netting"
+    if p.tip_odkupa is TipOdkupa.DINAMICNI:
+        return f"SIPX - {p.pribitek_oddaja:.5f}"
+    if p.tip_odkupa is TipOdkupa.AKTIVNI:
+        rates = [p.odkup_soncna_ns, p.odkup_soncna_vs, p.odkup_osnovna, p.odkup_konicna]
+        return f"4 blocks, {min(rates):.5f} -> {max(rates):.5f}"
+    return f"{p.odkup_fiksni:.5f} flat"
 
 
 _RATE_CACHE = {}
 
 
-def _unit_import_rates(env, paket_id, n_steps):
+def _unit_import_rates(env, option_id, n_steps, scheme=CONSUMER_SCHEME):
     """Per-interval delivered price of one imported kWh [EUR], VAT included.
 
     Supplier energy + network energy + levies. Excludes both fixed charges and
@@ -904,7 +1063,8 @@ def _unit_import_rates(env, paket_id, n_steps):
     cached across households: every household in the study is indexed on the
     same year and carries the same SMP series, and the cache key says so.
     """
-    key = (paket_id, n_steps, env.dataset.index[0], env.dataset.index[n_steps - 1],
+    key = ("import", scheme, option_id, n_steps, env.dataset.index[0],
+           env.dataset.index[n_steps - 1],
            float(np.round(env.arr_price[:n_steps].sum(), 9)))
     hit = _RATE_CACHE.get(key)
     if hit is not None:
@@ -917,8 +1077,8 @@ def _unit_import_rates(env, paket_id, n_steps):
             total_consumed_kwh=1.0,
             utc_date=env.dataset.index[idx],
             interval_minutes=env.interval_minutes,
-            scheme=CONSUMER_SCHEME,
-            paket_id=paket_id,
+            scheme=scheme,
+            paket_id=option_paket(option_id),
             pricing_reference_year=PRICING_REFERENCE_YEAR,
         )
         rates[idx] = result["variable_price_aud"]
@@ -926,7 +1086,44 @@ def _unit_import_rates(env, paket_id, n_steps):
     return rates
 
 
-def _consumer_fixed_and_excess(env, paket_id, n_steps, import_kwh):
+def _unit_export_credits(env, option_id, n_steps, scheme=PROSUMER_SCHEME):
+    """Per-interval credit for one exported kWh [EUR], **not** subject to VAT.
+
+    Read off the package's `tip_odkupa` (`si_obracun._cena_oddaje`): a flat rate,
+    the four aktivni buyback blocks, or SIPX minus the supplier's spread. Carries
+    no network charge and no levy -- an exported kWh is a credit against the
+    bill, not a delivered good -- so it is not the mirror image of the import
+    rate above, and on a dynamic list it can go negative when SIPX does.
+
+    Cached on the same calendar/market key as the import rate: within one
+    interval the credit is a function of the price list and the clock only.
+    """
+    key = ("export", scheme, option_id, n_steps, env.dataset.index[0],
+           env.dataset.index[n_steps - 1],
+           float(np.round(env.arr_price[:n_steps].sum(), 9)))
+    hit = _RATE_CACHE.get(key)
+    if hit is not None:
+        return hit
+
+    credits = np.empty(n_steps, dtype=float)
+    for idx in range(n_steps):
+        result = calculate_interval_price(
+            smp_market_price_kwh=env.arr_price[idx],
+            total_consumed_kwh=0.0,
+            total_produced_kwh=1.0,
+            utc_date=env.dataset.index[idx],
+            interval_minutes=env.interval_minutes,
+            scheme=scheme,
+            paket_id=option_paket(option_id),
+            pricing_reference_year=PRICING_REFERENCE_YEAR,
+        )
+        credits[idx] = result["dobropis_odkup_eur"]
+    _RATE_CACHE[key] = credits
+    return credits
+
+
+def _consumer_fixed_and_excess(env, option_id, n_steps, import_kwh,
+                               scheme=CONSUMER_SCHEME):
     """(fixed charge, excess-power charge) for the whole horizon [EUR].
 
     Both are per-month quantities. The fixed part is constant inside a month, so
@@ -954,8 +1151,8 @@ def _consumer_fixed_and_excess(env, paket_id, n_steps, import_kwh):
             total_consumed_kwh=0.0,
             utc_date=env.dataset.index[first],
             interval_minutes=env.interval_minutes,
-            scheme=CONSUMER_SCHEME,
-            paket_id=paket_id,
+            scheme=scheme,
+            paket_id=option_paket(option_id),
             pricing_reference_year=PRICING_REFERENCE_YEAR,
             dogovorjena_moc=env.agreed_power_at(first),
         )["constant_price_aud"]
@@ -975,8 +1172,8 @@ def _consumer_fixed_and_excess(env, paket_id, n_steps, import_kwh):
                 total_consumed_kwh=float(import_kwh[idx]),
                 utc_date=env.dataset.index[idx],
                 interval_minutes=env.interval_minutes,
-                scheme=CONSUMER_SCHEME,
-                paket_id=paket_id,
+                scheme=scheme,
+                paket_id=option_paket(option_id),
                 pricing_reference_year=PRICING_REFERENCE_YEAR,
                 dogovorjena_moc=env.agreed_power_at(idx),
                 prev_peak_kw=peak_state,
@@ -987,11 +1184,16 @@ def _consumer_fixed_and_excess(env, paket_id, n_steps, import_kwh):
 
 
 def no_pv_tariff_comparison(groups=None, per_group=HOUSEHOLDS_PER_GROUP,
-                            paket_ids=None, n_steps=None, verbose=False):
-    """Annual bill of every no-PV household on every list it could sign.
+                            options=None, n_steps=None, verbose=False):
+    """Annual bill of every no-PV household on every option it could sign.
 
-    One row per (dataset, household, price list) with no battery. Returns the
+    One row per (dataset, household, price option) with no battery, where an
+    option is a price list plus -- on a list that publishes both -- which
+    metering variant the household is on (`2T` VT/MT or `1T` ET). Returns the
     long frame; `summarize_no_pv_tariffs` turns it into the ranking table.
+
+    `per_group` is recorded on every row as `Per_Group`, so a cached frame
+    states the sample it was computed on rather than leaving a caller to assume.
     """
     groups = groups or NO_PV_GROUPS
     with_pv = [g for g in groups if has_pv(g)]
@@ -1000,7 +1202,7 @@ def no_pv_tariff_comparison(groups=None, per_group=HOUSEHOLDS_PER_GROUP,
             f"{with_pv} carry PV. This comparison is defined for households that "
             f"never export; a PV roof makes the buyback terms decide the answer."
         )
-    paket_ids = paket_ids or consumer_price_lists()
+    options = options or consumer_price_lists()
 
     rows = []
     for dataset, household_id in study_units(groups, per_group):
@@ -1015,60 +1217,179 @@ def no_pv_tariff_comparison(groups=None, per_group=HOUSEHOLDS_PER_GROUP,
         if verbose:
             print(f"  {dataset} {household_id}: {import_kwh.sum():.0f} kWh", flush=True)
 
-        for paket_id in paket_ids:
-            energy = float(np.dot(import_kwh, _unit_import_rates(env, paket_id, steps)))
-            fixed, excess = _consumer_fixed_and_excess(env, paket_id, steps, import_kwh)
+        for option_id in options:
+            energy = float(np.dot(import_kwh, _unit_import_rates(env, option_id, steps)))
+            fixed, excess = _consumer_fixed_and_excess(env, option_id, steps, import_kwh)
             rows.append({
                 "Dataset": dataset,
                 "Household": household_id,
-                "Paket_ID": paket_id,
+                "Option": option_id,
+                "Paket_ID": option_base_id(option_id),
+                "Variant": option_variant(option_id),
                 "Cost_EUR": energy + fixed + excess,
                 "Energy_EUR": energy,
                 "Fixed_EUR": fixed,
                 "Excess_Power_EUR": excess,
                 "Import_kWh": float(import_kwh.sum()),
                 "Agreed_Power": AGREED_POWER_TAG,
+                "Per_Group": int(per_group),
             })
     return pd.DataFrame(rows)
 
 
-def summarize_no_pv_tariffs(df_no_pv):
-    """Rank the lists by mean annual bill, with the gap to the cheapest.
+def pv_tariff_comparison(groups=None, per_group=HOUSEHOLDS_PER_GROUP,
+                         options=None, n_steps=None, buyback=True,
+                         verbose=False):
+    """Annual bill of every PV household on every samooskrba list, no battery.
 
-    `Delta_EUR` / `Delta_pct` are against the cheapest list *per household*, then
-    averaged, so a list is not flattered by a household mix that happens to suit
-    it. `Cheapest_For` counts the households it actually wins.
+    Same shape as `no_pv_tariff_comparison`, and the same reason to exist: with no
+    battery there is no dispatch decision, so the answer is a pure price-list
+    question. What is new is the export side. Netting inside the 15-minute
+    interval is *physical* -- the meter registers the residual whatever the
+    contract says -- so what the price list decides is only what the residual
+    *surplus* is worth, and that is what separates the lists here as much as the
+    import price does.
+
+    `buyback=False` prices every exported kWh at **zero** while leaving the import
+    side untouched: the household that produces its own power, nets it inside the
+    interval, and gives the rest away. `PETROL_SAMOOSKRBA` is that contract in the
+    catalogue (`tip_odkupa=NI`), so on that one list the two runs are identical by
+    construction -- which is the check that the flag is doing only what it says.
+
+    Note what the flag does *not* do, and what these profiles cannot show. The
+    Fluvius columns are **meter registers**: `Consumption_Volume_kWh` is grid
+    offtake and `Feed_In_Volume_kWh` is grid injection, and they are very nearly
+    mutually exclusive (both non-zero in ~12 % of intervals, which is the 15-min
+    aggregation of a meter that netted at a finer resolution). The roof's
+    self-consumption has therefore already been netted away before the data
+    starts, and no contract term can reach it. What is priced here is the
+    *residual* -- the import that survived the roof and the export it could not
+    absorb -- which is exactly what a bill is measured on, but it means the flag
+    moves only the surplus and never the far larger saving a roof makes by
+    displacing retail import in the first place.
+    """
+    groups = groups or PV_GROUPS
+    without_pv = [g for g in groups if not has_pv(g)]
+    if without_pv:
+        raise ValueError(
+            f"{without_pv} carry no PV. A samooskrba list requires a "
+            f"self-consumption device (zahteva_pv=True); use "
+            f"no_pv_tariff_comparison for those groups."
+        )
+    options = options or prosumer_price_lists()
+
+    rows = []
+    for dataset, household_id in study_units(groups, per_group):
+        data = load_user(household_id, dataset)
+        env = build_env(data)
+        steps = int(env.episode_length if n_steps is None else n_steps)
+        net_kwh = env.arr_consumption[:steps] - env.arr_generation[:steps]
+        import_kwh = np.maximum(net_kwh, 0.0)
+        export_kwh = np.maximum(-net_kwh, 0.0)
+        # Not self-consumption -- see the note above. Both registers are non-zero
+        # in the same 15-minute bucket only where the meter netted at a finer
+        # resolution, so this is an aggregation artefact and is reported as a
+        # diagnostic on the data, not as a quantity a contract prices.
+        overlap_kwh = float(np.minimum(env.arr_consumption[:steps],
+                                       env.arr_generation[:steps]).sum())
+        if verbose:
+            print(f"  {dataset} {household_id}: {import_kwh.sum():.0f} kWh offtake, "
+                  f"{export_kwh.sum():.0f} kWh injection", flush=True)
+
+        for option_id in options:
+            import_eur = float(np.dot(
+                import_kwh, _unit_import_rates(env, option_id, steps, PROSUMER_SCHEME)))
+            credit_eur = 0.0 if not buyback else float(np.dot(
+                export_kwh, _unit_export_credits(env, option_id, steps, PROSUMER_SCHEME)))
+            fixed, excess = _consumer_fixed_and_excess(
+                env, option_id, steps, import_kwh, PROSUMER_SCHEME)
+            rows.append({
+                "Dataset": dataset,
+                "Household": household_id,
+                "Option": option_id,
+                "Paket_ID": option_base_id(option_id),
+                "Variant": option_variant(option_id),
+                "Buyback": bool(buyback),
+                "Cost_EUR": import_eur - credit_eur + fixed + excess,
+                "Energy_EUR": import_eur - credit_eur,
+                "Import_EUR": import_eur,
+                "Export_Credit_EUR": credit_eur,
+                "Fixed_EUR": fixed,
+                "Excess_Power_EUR": excess,
+                "Import_kWh": float(import_kwh.sum()),
+                "Export_kWh": float(export_kwh.sum()),
+                "Register_Overlap_kWh": overlap_kwh,
+                "Agreed_Power": AGREED_POWER_TAG,
+                "Per_Group": int(per_group),
+            })
+    return pd.DataFrame(rows)
+
+
+def _rank_tariff_bills(df, extra_means=()):
+    """Rank price lists by mean annual bill, with the gap to the cheapest.
+
+    `Delta_EUR` / `Delta_pct` are against the cheapest list *for that same
+    household*, then averaged, so a list is not flattered by a household mix that
+    happens to suit it. `Cheapest_For` counts the households it actually wins.
     """
     from Pricing_Functions import PAKETI
 
-    per_household = df_no_pv.set_index(["Dataset", "Household", "Paket_ID"])["Cost_EUR"]
+    per_household = df.set_index(["Dataset", "Household", "Option"])["Cost_EUR"]
     best = per_household.groupby(level=["Dataset", "Household"]).min()
     winner = per_household.groupby(level=["Dataset", "Household"]).idxmin()
 
-    df = df_no_pv.copy()
+    df = df.copy()
     keys = list(zip(df["Dataset"], df["Household"]))
     df["Best_EUR"] = [best[k] for k in keys]
     df["Delta_EUR"] = df["Cost_EUR"] - df["Best_EUR"]
     df["Delta_pct"] = 100.0 * df["Delta_EUR"] / df["Best_EUR"]
 
     wins = pd.Series([w[2] for w in winner], index=winner.index).value_counts()
-    summary = (
-        df.groupby("Paket_ID")
-        .agg(
-            Households=("Cost_EUR", "size"),
-            Cost_EUR=("Cost_EUR", "mean"),
-            Delta_EUR=("Delta_EUR", "mean"),
-            Delta_pct=("Delta_pct", "mean"),
-            Worst_Delta_pct=("Delta_pct", "max"),
-            Energy_EUR=("Energy_EUR", "mean"),
-            Fixed_EUR=("Fixed_EUR", "mean"),
-            Excess_Power_EUR=("Excess_Power_EUR", "mean"),
-        )
-        .sort_values("Cost_EUR")
+    aggregations = dict(
+        Households=("Cost_EUR", "size"),
+        Cost_EUR=("Cost_EUR", "mean"),
+        Delta_EUR=("Delta_EUR", "mean"),
+        Delta_pct=("Delta_pct", "mean"),
+        Worst_Delta_pct=("Delta_pct", "max"),
+        Energy_EUR=("Energy_EUR", "mean"),
+        Fixed_EUR=("Fixed_EUR", "mean"),
+        Excess_Power_EUR=("Excess_Power_EUR", "mean"),
     )
-    summary.insert(0, "Supplier", [PAKETI[p].dobavitelj for p in summary.index])
-    summary.insert(1, "Structure", [PAKETI[p].tip_cene.name.lower() for p in summary.index])
+    aggregations.update({c: (c, "mean") for c in extra_means if c in df.columns})
+    summary = df.groupby("Option").agg(**aggregations).sort_values("Cost_EUR")
+    summary.insert(0, "Supplier",
+                   [PAKETI[option_base_id(o)].dobavitelj for o in summary.index])
+    # What the household is billed on, spelled out: "2T: VT .. / MT .." vs
+    # "1T: ET ..", so no table can leave which variant was used implicit.
+    summary.insert(1, "Structure", [tariff_structure_label(o) for o in summary.index])
+    summary.insert(2, "Variant", [option_variant(o) for o in summary.index])
     summary["Cheapest_For"] = [int(wins.get(p, 0)) for p in summary.index]
+    return summary
+
+
+def summarize_no_pv_tariffs(df_no_pv):
+    """Ranking table for `no_pv_tariff_comparison`."""
+    return _rank_tariff_bills(df_no_pv)
+
+
+def summarize_pv_tariffs(df_pv):
+    """Ranking table for `pv_tariff_comparison`, with the export side broken out.
+
+    `Buyback` is carried through so a caller cannot accidentally rank a credited
+    run and a zero-export run in the same table -- the two are different
+    contracts, and chapter 4 of `No_battery_comparison.ipynb` is where they meet,
+    by ranking each separately and joining the top few on `Paket_ID`.
+    """
+    modes = set(df_pv["Buyback"]) if "Buyback" in df_pv.columns else {True}
+    if len(modes) > 1:
+        raise ValueError(
+            "df_pv mixes credited and zero-export rows. Rank each separately, "
+            "then join on Paket_ID."
+        )
+    summary = _rank_tariff_bills(
+        df_pv, extra_means=("Import_EUR", "Export_Credit_EUR", "Export_kWh"))
+    summary.insert(3, "Buyback", [buyback_rate_label(o) if modes == {True} else "zeroed"
+                                  for o in summary.index])
     return summary
 
 
