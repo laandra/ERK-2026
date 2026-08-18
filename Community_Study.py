@@ -483,12 +483,61 @@ def scenario_profiles(members, data, scenario: str):
     return align_profiles(profiles)
 
 
+def dispatch_horizon(members, data, scenario: str) -> int:
+    """How many intervals the battery members were actually dispatched over.
+
+    `build_env` follows `episode_length = len(data) - 1`, so a dispatched
+    trajectory is one interval shorter than the raw profile it came from, and
+    `align_profiles` then cuts the whole community down to it. Anything that has
+    to be comparable with a dispatched run -- the no-battery baseline, the
+    counterfactual -- must be settled over exactly this many intervals, so the
+    number is read off the cached files directly rather than by rebuilding every
+    effective profile.
+    """
+    dispatch_scenario = DISPATCH_ALIAS.get(scenario, scenario)
+    lengths = [len(data[m.key]) for m in members]
+    for member in members:
+        if not member.has_battery:
+            continue
+        path = dispatch_path(dispatch_scenario, member.key)
+        if not path.exists():
+            raise FileNotFoundError(
+                f"No cached dispatch for {member.key} under {dispatch_scenario!r}. "
+                f"Run Community_Study.run_batch_dispatch() first."
+            )
+        with path.open() as handle:
+            lengths.append(sum(1 for _ in handle) - 1)  # minus the header row
+    return min(lengths)
+
+
+def no_battery_profiles(members, data, scenario: str):
+    """The same community with every battery taken out -- the baseline.
+
+    Nothing else moves: same households, same load, same PV yield, same price
+    list, same contracted power. The horizon is cut to `dispatch_horizon`, so
+    the baseline covers exactly the period the dispatched scenario was settled
+    over and the two are subtractable interval by interval.
+    """
+    horizon = dispatch_horizon(members, data, scenario)
+    return {m.key: data[m.key].iloc[:horizon] for m in members}
+
+
 # ---------------------------------------------------------------------------
 # Settlement
 # ---------------------------------------------------------------------------
-def run_scenario(members, data, scenario: str, collect_flows=False, verbose=True):
-    """Settle the whole community under one scenario."""
-    profiles = scenario_profiles(members, data, scenario)
+def run_scenario(members, data, scenario: str, collect_flows=False, verbose=True,
+                 no_battery=False):
+    """Settle the whole community under one scenario.
+
+    `no_battery=True` settles the very same community with the ten batteries
+    removed. Scenario, package and horizon are unchanged, so the difference
+    between the two runs is the batteries and nothing else.
+    """
+    profiles = (
+        no_battery_profiles(members, data, scenario)
+        if no_battery
+        else scenario_profiles(members, data, scenario)
+    )
     by_key = {m.key: m for m in members}
 
     if scenario == "souporaba":
@@ -644,14 +693,15 @@ def _attach_member_columns(summary: pd.DataFrame, by_key, profiles, data=None) -
     return summary
 
 
-def run_all_scenarios(members, data, scenarios=None, verbose=True):
+def run_all_scenarios(members, data, scenarios=None, verbose=True, no_battery=False):
     scenarios = scenarios or list(SCENARIOS)
     results = {}
     for scenario in scenarios:
         if verbose:
-            print(f"--- {scenario} ---", flush=True)
+            print(f"--- {scenario}{' (no battery)' if no_battery else ''} ---", flush=True)
         t0 = time.time()
-        results[scenario] = run_scenario(members, data, scenario, verbose=verbose)
+        results[scenario] = run_scenario(members, data, scenario, verbose=verbose,
+                                         no_battery=no_battery)
         if verbose:
             print(f"    settled in {time.time() - t0:.1f}s", flush=True)
     return results
@@ -834,11 +884,11 @@ def battery_counterfactual(members, data, results, scenarios=None) -> pd.DataFra
 
     rows = []
     for scenario in scenarios:
-        # Cut the no-battery profiles to exactly the horizon the battery run was
-        # settled over, or the counterfactual would be priced over one interval
-        # more than the thing it is compared against.
-        horizon = len(next(iter(scenario_profiles(members, data, scenario).values())))
-        profiles = {m.key: data[m.key].iloc[:horizon] for m in battery_members}
+        # The same cut as the community baseline: settled over exactly the
+        # horizon the battery run was, or the counterfactual would be priced
+        # over one interval more than the thing it is compared against.
+        baseline = no_battery_profiles(members, data, scenario)
+        profiles = {m.key: baseline[m.key] for m in battery_members}
         out = mht.run_interval_scenario(
             profiles,
             scenario_name=f"{scenario}_nobattery",

@@ -944,6 +944,33 @@ def _register_options(paket_id):
     return [two, one]
 
 
+VARIANT_NOSALE = "NOSALE"  # synthetic: the same list with its export clause struck
+
+
+def _zero_buyback_control(option_id):
+    """Register a synthetic twin of `option_id` whose exported kWh is worth zero.
+
+    `pv_tariff_comparison(buyback=False)` claims to change the export side and
+    nothing else. Until the Petrol samooskrba entry was corrected the catalogue
+    held a `tip_odkupa=NI` list that made that claim checkable for free: the two
+    runs had to agree on it. Every real samooskrba list now pays *something* for
+    a surplus, so the control has to be built rather than found.
+
+    Returns an option id billed on the same package with `tip_odkupa=NI`, for
+    which `buyback=True` must reproduce `buyback=False` on the base list exactly.
+    Synthetic and not on any shelf -- keep it out of price-list tables.
+    """
+    import dataclasses
+
+    from Pricing_Functions import TipOdkupa
+
+    control = f"{option_base_id(option_id)}@{VARIANT_NOSALE}"
+    if control not in _OPTION_PAKETI:
+        _OPTION_PAKETI[control] = dataclasses.replace(
+            option_paket(option_id), id=control, tip_odkupa=TipOdkupa.NI)
+    return control
+
+
 def option_paket(option_id):
     """The `Paket` an option is billed on, building it on first use."""
     if option_id not in _OPTION_PAKETI:
@@ -1009,11 +1036,13 @@ def consumer_price_lists(provider=None):
 def prosumer_price_lists(provider=None, include_net_metering=False):
     """Every *samooskrba* option a household with a PV roof can sign.
 
-    Same (list, metering variant) expansion as `consumer_price_lists`. Only the
-    tarifni samooskrba lists have a variant to expand: `PETROL_SAMOOSKRBA`
-    publishes VT/MT and ET both, while `GENI_SAMO_REDNI` publishes a single ET
-    rate and no VT/MT at all -- GEN-I sells no two-tariff samooskrba product,
-    which is a real asymmetry between the two and not a gap in the catalogue.
+    Same (list, metering variant) expansion as `consumer_price_lists`, except
+    that here it never fires: **no** samooskrba list in the catalogue publishes a
+    VT/MT pair, so every option comes back unsuffixed. That is the product and
+    not a gap -- Petrol states it outright ("v samooskrbi se vsa električna
+    energija obračuna samo po ET"), and GEN-I likewise quotes a single ET rate.
+    A prosumer has no metering variant to choose; the tariff choice a roof faces
+    is between lists, and on the aktivni and dinamični ones between time blocks.
 
     NET metering is left out by default: it is closed to new consents and settles
     once a year rather than per interval, so it is neither a list a household can
@@ -1252,9 +1281,12 @@ def pv_tariff_comparison(groups=None, per_group=HOUSEHOLDS_PER_GROUP,
 
     `buyback=False` prices every exported kWh at **zero** while leaving the import
     side untouched: the household that produces its own power, nets it inside the
-    interval, and gives the rest away. `PETROL_SAMOOSKRBA` is that contract in the
-    catalogue (`tip_odkupa=NI`), so on that one list the two runs are identical by
-    construction -- which is the check that the flag is doing only what it says.
+    interval, and gives the rest away. No catalogued list is that contract any
+    more -- every samooskrba list a household can sign today values its surplus at
+    something -- so the flag now prices a counterfactual rather than a shelf, and
+    the difference between the two runs *is* the annual worth of the export clause.
+    `_zero_buyback_control` is what remains of the identity check the old (wrong)
+    `PETROL_SAMOOSKRBA` entry used to provide for free.
 
     Note what the flag does *not* do, and what these profiles cannot show. The
     Fluvius columns are **meter registers**: `Consumption_Volume_kWh` is grid
