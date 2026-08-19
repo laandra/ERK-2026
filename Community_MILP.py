@@ -1,119 +1,39 @@
 """Perfect-foresight community MILP: skupnostna samooskrba vs souporaba.
 
-`MILP_Benchmark.run_milp_benchmark` optimizes ONE household against ONE price
-list. Nothing in the repository optimizes a GROUP, and the two Slovenian
-group schemes are not the same scheme with a different name -- they settle
-different quantities, at different tariffs, with different rules about what
-happens to energy nobody used. This module is the group version: one MILP over
-every member of a community, solving
+One MILP over every member of a community, solving each member's battery and
+how much of each producer's surplus is shared rather than sold to its supplier,
+against one objective: the community's total electricity bill.
 
-  * every member's battery (the same continuous formulation the single-household
-    MILP uses -- charge, discharge, curtailment, SOC, one energy balance per
-    member per interval), and
-  * how much of each producer's surplus is SHARED rather than sold to its
-    supplier, and who receives it,
+Both schemes are BILLING overlays on the same physical flows. Under skupnostna
+samooskrba a shared kWh is billed as community energy price + reduced network
+energy tariff + levies, and allocation nobody used returns to the pool and is
+sold at the producer's buyback price. Under souporaba a shared kWh reduces only
+the energy quantity the receiver's supplier invoices -- network charge, levies
+and excise stay on the full metered offtake -- allocation unused inside the
+interval is destroyed, and the organizer charges a monthly fee per metering
+point. The per-kWh advantage of the first over the second is exactly the
+distribution part of the network tariff.
 
-against one objective -- the community's total electricity bill.
+Under ZOEE the share is a contract number, one static percentage applied to
+every interval, which is why `SHARING_STATIC` is the contract as written and
+`SHARING_DYNAMIC` -- allocation free per interval -- is the upper bound on any
+sharing rule.
 
----------------------------------------------------------------------------
-THE TWO SCHEMES
----------------------------------------------------------------------------
-Both move a producing member's surplus to a consuming member over the public
-grid. Neither moves an electron differently from the no-sharing case: the
-meters register exactly what they registered before, and the schemes are
-BILLING overlays on top of the same physical flows. What they change is what
-those metered kWh cost.
+The model stays an LP almost everywhere. Receivers hold a price list with no
+buyback, so the buy/sell complementarity is implied by the objective
+(`assert_no_receiver_buyback` enforces the precondition), and simultaneous
+charge and discharge is only profitable where the delivered import rate is
+negative. Both are enforced lazily: the first pass is a pure LP, the trajectory
+is checked for flows no meter could produce, and a binary is spent only where
+one occurred. The exception is community self-supply with mismatched price lists
+and an internal price too low for its VAT to hold the trade below profitable;
+there the lazy loop converges badly and `exposed_intervals` get their binary up
+front.
 
-SKUPNOSTNA SAMOOSKRBA (community self-supply, `si_obracun.skupnost`)
-  A shared kWh at the receiver is billed as
-      community energy price + REDUCED network energy tariff + levies
-  where the reduced tariff is the transmission postavka plus the *community*
-  distribution postavka `energija_skupnost[znacilni_primer][blok]` -- for
-  `znacilni_primer = 1` (members behind the same transformer) that second term
-  is 0.00000 EUR/kWh, and the distribution component of the network charge
-  disappears entirely. The grid remainder is billed at the full tariff.
-  Allocation that a member cannot use in the interval is NOT destroyed: it goes
-  back to the pool and is sold at the producer's own buyback price.
-
-SOUPORABA ELEKTRICNE ENERGIJE (energy sharing under ZOEE, `si_obracun.souporaba_*`)
-  A shared kWh reduces the ENERGY quantity the receiver's supplier invoices --
-  and nothing else. Network charge, levies and excise stay on the FULL metered
-  offtake. Allocation the receiver cannot consume inside the same 15-minute
-  interval is destroyed: it does not carry to the next interval, earns no
-  credit, and (by default) the producer is still paid for it while the
-  receiver's supplier keeps the energy. The organizer charges a monthly fee per
-  metering point (`si_paketi.STORITVE_SOUPORABE`).
-
-So the per-kWh advantage of skupnostna samooskrba over souporaba is exactly the
-distribution part of the network tariff that souporaba keeps charging, and its
-second advantage is that it wastes nothing. Souporaba's advantages are
-regulatory rather than arithmetic: no shared production device is required, the
-members may sit anywhere and hold different suppliers, and -- the one that
-decides the answer in this repository -- GEN-I's *dinamicni samooskrba* price
-list, the cheapest list in the battery-sizing study, carries
-`dovoljuje_skupnostno=False` and cannot be held inside a community self-supply
-scheme at all.
-
----------------------------------------------------------------------------
-THE SHARE OF SHARED ENERGY (`delez deljene energije`)
----------------------------------------------------------------------------
-Under ZOEE the share is a CONTRACT NUMBER: one static percentage of the
-producer's surplus, split over the receivers by a static key, applied to every
-15-minute interval of the year. It cannot react to whether a receiver is
-actually drawing power right now, which is the whole reason souporaba wastes
-energy. This module therefore offers two sharing modes:
-
-  SHARING_STATIC   one share `alpha` of every producer's surplus, split by
-                   fixed weights. This is the contract as it is actually
-                   written, and `alpha` is what the sweep in the notebook
-                   solves for -- one MILP per candidate share, the community
-                   optimum read off the resulting curve.
-  SHARING_DYNAMIC  the allocation is a decision variable per interval, bounded
-                   by the surplus that exists and by what each receiver can
-                   absorb. No static key can beat it, so it is the upper bound
-                   on any sharing rule, and the gap between it and the best
-                   static share is the price of the contract being static.
-
----------------------------------------------------------------------------
-WHY THIS STAYS AN LP ALMOST EVERYWHERE
----------------------------------------------------------------------------
-Two structural facts keep a community of sixteen households solvable:
-
-1. RECEIVERS CANNOT EXPORT. A receiver holds a plain (brez odkupa) price list,
-   whose export credit is identically zero, so no solution ever wants
-   `sell > 0` at a receiver and the buy/sell complementarity that would
-   otherwise need one binary per member per interval is implied by the
-   objective. `assert_no_receiver_buyback` enforces the precondition rather
-   than assuming it -- with a positive buyback at a receiver the model could
-   import a shared kWh at the reduced tariff and export it at the full buyback
-   price in the same interval, which is not something a single meter can do.
-2. SIMULTANEOUS CHARGE AND DISCHARGE is only ever profitable where the
-   delivered import rate is negative, which happens on the SIPX-linked lists
-   and in about 140 intervals of 2024. `ch + dis <= inverter rating` -- one
-   inverter, one rating -- is free and holds always; whatever is left is caught
-   after the solve.
-
-Both are normally enforced LAZILY: the first pass is a pure LP, the solved
-trajectory is checked for flows no meter or inverter could produce, and a binary
-is spent only where one actually occurred. Sixteen members over a month is a
-~270 000-column model, and handing it a few thousand binaries up front turns a
-17-second LP into an hour of branching for a correction worth about one euro.
-
-The exception is the one case where the objective wants the trade EVERYWHERE it
-is allowed -- community self-supply, a producer on a single-rate list beside a
-receiver on a VT/MT one, and an internal price too low for its VAT to hold the
-trade below profitable. Fixing one interval there hands the same trade to the
-next, so the lazy loop converges badly and those intervals are given their
-binary up front instead. `exposed_intervals` reports how many that was; in
-every other configuration it is zero and the model is a pure LP.
-
-The horizon is decomposed by CALENDAR MONTH, which is not an approximation for
-the tariff: the network power charge, the OVE+SPTE levy and the excess-power
-ratchet all reset monthly (`peak_reset_months=1`), so a month is a complete
-billing unit. It IS an approximation for the battery -- each month opens and
-closes at `soc_fraction` of capacity, so no month can borrow storage from
-December -- and that is the same convention the annual single-household solves
-already use at the year boundary.
+The horizon is decomposed by calendar month, which is exact for the tariff --
+the power charge, the OVE+SPTE levy and the ratchet all reset monthly -- and an
+approximation for the battery, which opens and closes each month at
+`soc_fraction` of capacity.
 """
 
 from __future__ import annotations
@@ -137,8 +57,7 @@ from Pricing_Functions import (
     moc_za_mesec,
 )
 
-# The community settlement primitives live in the spaced folder, exactly as
-# `multi_household_tools` reaches them.
+# The community settlement primitives live in the spaced folder.
 _SI_DIR = Path(__file__).resolve().parent / "New pricing functions"
 if str(_SI_DIR) not in sys.path:
     sys.path.append(str(_SI_DIR))
@@ -167,9 +86,7 @@ ROLE_SENDER = "oddajnik"
 ROLE_RECEIVER = "prejemnik"
 
 # Excise + energy-efficiency + market-operator levies, EUR/kWh excluding VAT.
-# Charged on every metered kWh under both schemes -- souporaba says so
-# explicitly, and `si_obracun.skupnost` charges them on `iz_omrezja + deljena`,
-# which is the same total.
+# Charged on every metered kWh under both schemes.
 LEVIES_EUR_PER_KWH = TROSARINA_EUR_KWH + URE_EUR_KWH + OPERATER_TRGA_EUR_KWH
 VAT_FACTOR = 1.0 + float(DDV)
 
@@ -180,24 +97,13 @@ VAT_FACTOR = 1.0 + float(DDV)
 @dataclass
 class CommunityMember:
     """One metering point in the community.
-
-    `env` is a fully built `HouseholdEnvironment` -- the profile, the battery,
-    the price list and the agreed billing power all come off it, so a member
-    here is priced by exactly the same machinery as a household in the
-    single-household study and the two are comparable line by line.
-
-    `role` is the ZOEE role. A sender puts surplus into the scheme; a receiver
-    takes allocation out of it. A member is not both: see the module docstring
-    for why receiving at a metering point that can also export needs a binary
-    per interval to stay physical.
-
-    `key_weight` is that receiver's static share of the pool (the `delitev` of
-    `obracun_souporabe`); weights are normalized over the receivers.
-
-    `znacilni_primer` is the "typical connection case" 1-10 that picks the
-    community distribution postavka in `si_tarife.Omreznina.energija_skupnost`.
-    1 = members on the same transformer station (0.00000 EUR/kWh), 4 = the full
-    distribution postavka, i.e. no reduction at all.
+    
+    `env` is a fully built `HouseholdEnvironment`: the profile, the battery, the
+    price list and the agreed billing power all come off it. `role` is the ZOEE
+    role, and a member is one or the other, never both. `key_weight` is a
+    receiver's static share of the pool. `znacilni_primer` is the connection
+    case 1-10 picking the community distribution postavka (1 = same transformer
+    station, 0.00000 EUR/kWh; 4 = no reduction).
     """
 
     member_id: str
@@ -231,16 +137,10 @@ _RATE_CACHE: Dict[tuple, Dict[str, np.ndarray]] = {}
 
 def paket_rate_table(paket_id, dates, smp_eur_kwh, interval_minutes, ref_year):
     """Per-interval ex-VAT rates for one price list, cached per (list, horizon).
-
-    Everything the objective needs that depends on the PRICE LIST rather than
-    on the household: the supplier energy price, the buyback price and the
-    tariff block. Households on the same list over the same calendar share one
-    table -- which is the whole reason a sixteen-member year is affordable to
-    price: sixteen households on four lists cost four passes, not sixteen.
-
-    Rates come out of `si_obracun.samooskrba`, the same function the invoices
-    and the RL environment bill through, so a per-kWh rate here is the per-kWh
-    rate there.
+    
+    The supplier energy price, the buyback price and the tariff block -- what
+    depends on the list rather than on the household. Rates come out of
+    `si_obracun.samooskrba`, the function the invoices bill through.
     """
     key = (paket_id, int(ref_year), len(dates), dates[0], dates[-1], float(interval_minutes))
     cached = _RATE_CACHE.get(key)
@@ -275,13 +175,11 @@ def paket_rate_table(paket_id, dates, smp_eur_kwh, interval_minutes, ref_year):
 
 
 def network_rate_tables(blocks, ref_year, znacilni_primer):
-    """Network ENERGY postavke per interval, ex VAT.
-
-    `full` is what a kWh out of the grid costs; `shared` is what the same kWh
-    costs when it arrives as a community allocation -- transmission plus the
-    community distribution postavka for this connection case. The difference
-    between them is the entire per-kWh advantage of skupnostna samooskrba over
-    souporaba, and it is zero by construction at `znacilni_primer = 4`.
+    """Network energy postavke per interval, ex VAT.
+    
+    `full` is what a kWh out of the grid costs, `shared` what the same kWh costs
+    as a community allocation. Their difference is the entire per-kWh advantage
+    of skupnostna samooskrba over souporaba, and is zero at `znacilni_primer=4`.
     """
     om = Pravila.za_leto(int(ref_year)).omreznina
     full = np.array([om.energija[int(b)] for b in blocks], dtype=float)
@@ -295,22 +193,19 @@ def network_rate_tables(blocks, ref_year, znacilni_primer):
 
 def assert_no_receiver_buyback(members):
     """Receivers must hold a price list that credits an export nothing.
-
-    With a positive buyback at a receiver the LP can import a shared kWh at the
-    reduced community tariff and export it at the full buyback price inside the
-    same interval, netting the difference -- a trade a single metering point
-    cannot make, because the meter nets import against export within the
-    interval before either is billed. Enforcing the precondition costs one
-    assert; the alternative is one binary per member per interval.
+    
+    With a positive buyback the LP could import a shared kWh at the reduced
+    tariff and export it at the buyback price in the same interval -- a trade one
+    meter cannot make. The precondition costs one assert; the alternative is one
+    binary per member per interval.
     """
     offenders = []
     for m in members:
         if m.is_sender:
             continue
         paket = PAKETI[m.paket_id]
-        # NET metering is excluded for a second, legal reason as well: a
-        # household settling its exports once a year cannot be a receiver in
-        # souporaba at all (`si_paketi.preveri_souporabo`).
+        # A household settling its exports once a year cannot be a receiver in
+        # souporaba (`si_paketi.preveri_souporabo`).
         if paket.tip_odkupa.value != "ni":
             offenders.append(f"{m.label} ({m.paket_id}, odkup={paket.tip_odkupa.value})")
     if offenders:
@@ -344,37 +239,15 @@ def solve_community_milp(
     verbose: bool = False,
 ):
     """One perfect-foresight community solve over `n_steps` intervals.
-
-    Returns a dict with the per-member settlement, the community total and the
-    per-interval flow table. Every euro in it is VAT-inclusive on the charge
-    side and VAT-free on the credit side, which is how `si_obracun.Racun`
-    settles a bill: `za_placilo = neto * 1.22 - dobropis`.
-
-    Parameters that carry the scheme
-    --------------------------------
-    scheme                  SCHEME_INDIVIDUAL disables sharing entirely and
-                            gives every member the bill it would get on its own
-                            -- the baseline the two schemes are measured
-                            against, solved by the same code so nothing but the
-                            settlement differs.
-    sharing_mode            SHARING_STATIC applies `share_of_surplus` to every
-                            producer's surplus in every interval and splits it
-                            by the members' `key_weight`; SHARING_DYNAMIC lets
-                            the solver place the allocation.
-    internal_price_eur_kwh  What the receiver pays the producer per shared kWh.
-                            It is a TRANSFER between two members, so it moves
-                            the split of the community bill and not, in the
-                            main, its total -- except that the receiver's side
-                            is a taxable invoice item while the producer's side
-                            is a VAT-free credit, exactly as the buyback credit
-                            is ("odkup presezka ... ni predmet obdavcitve z
-                            DDV"). Every euro of internal price therefore costs
-                            the community 22 cents of VAT, which is why 0.00 is
-                            the community-optimal price and any positive value
-                            is a fairness choice, not an efficiency one.
-    pay_for_unused          ZOEE default: the producer is paid for what it
-                            transferred, whether or not the receiver could use
-                            it. Only affects souporaba, and only the split.
+    
+    Returns the per-member settlement, the community total and the per-interval
+    flow table, VAT-inclusive on the charge side and VAT-free on the credit side.
+    
+    `scheme=SCHEME_INDIVIDUAL` disables sharing and gives the baseline bill.
+    `sharing_mode` is the static contract share or a free per-interval allocation.
+    `internal_price_eur_kwh` is a transfer between members, taxable at the
+    receiver and VAT-free at the producer, so every euro of it leaks 22 cents.
+    `pay_for_unused` is the ZOEE default and affects souporaba only.
     """
     if scheme not in SCHEMES:
         raise ValueError(f"scheme must be one of {SCHEMES}, got {scheme!r}")
@@ -397,9 +270,7 @@ def solve_community_milp(
     dates = env0.dataset.index[horizon]
     smp = env0.arr_price[horizon]
 
-    # Calendar bookkeeping, shared by every member: the block a kWh falls in and
-    # the month it is billed in are properties of the clock, not of the
-    # household.
+    # Calendar bookkeeping, shared by every member.
     local_times = [v_lokalni_cas(dates[t]) for t in range(n_steps)]
     month_key_t = [(lt.year, lt.month) for lt in local_times]
     months_sorted = sorted(set(month_key_t))
@@ -418,21 +289,18 @@ def solve_community_milp(
         raise ValueError(f"share_of_surplus must be in [0, 1], got {alpha}")
     p_int = float(internal_price_eur_kwh)
 
-    # ---- pass 1: the rates. Every member's, before any variable exists,
-    # because whether a producer needs a complementarity binary depends on what
-    # a shared kWh is worth at the RECEIVERS.
+    # ---- pass 1: the rates, before any variable exists -- whether a producer
+    # needs a complementarity binary depends on what a shared kWh is worth at
+    # the receivers.
     rates: Dict[str, dict] = {}
     for m in members:
         table = paket_rate_table(m.paket_id, dates, smp, interval_minutes, ref_year)
         r_net_full, r_net_shared = network_rate_tables(table["blocks"], ref_year, m.znacilni_primer)
-        # The delivered cost of one imported kWh, VAT included -- the number the
-        # single-household MILP calls `import_rates`.
+        # The delivered cost of one imported kWh, VAT included.
         delivered = VAT_FACTOR * (table["energy"] + r_net_full + LEVIES_EUR_PER_KWH)
-        # A buyback worth more than an import costs is an unbounded loop: buy and
-        # sell the same kWh forever. Real on the SIPX-linked lists, where a deeply
-        # negative market price makes the delivered import rate negative while the
-        # buyback stays at zero. Flooring makes the round trip exactly neutral;
-        # curtailment is free, so the optimum never exports there anyway.
+        # A buyback worth more than an import costs is an unbounded loop.
+        # Flooring makes the round trip exactly neutral, and curtailment is
+        # free, so the optimum never exports there anyway.
         rates[m.member_id] = dict(
             r_energy=table["energy"], blocks=table["blocks"],
             r_net_full=r_net_full, r_net_shared=r_net_shared, delivered=delivered,
@@ -440,8 +308,8 @@ def solve_community_milp(
             n_floored=int(np.sum(table["export"] > delivered)),
         )
 
-    # What one shared kWh displaces at the best-placed receiver, ex VAT. Under
-    # souporaba only the supplier's energy price; under community self-supply the
+    # What one shared kWh displaces at the best-placed receiver, ex VAT: under
+    # souporaba the supplier's energy price, under community self-supply the
     # distribution part of the network tariff as well.
     if sharing:
         displaced = np.max(np.stack([
@@ -488,12 +356,9 @@ def solve_community_milp(
             inverter_kwh = max(max_ch, max_dis)
             for t in range(n_steps):
                 prob += soc[t + 1] == soc[t] + ch[t] * env.charge_efficiency - dis[t] / env.discharge_efficiency
-                # One inverter, one rating: whatever the split between charging
-                # and discharging, their sum cannot exceed what the unit can pass.
-                # Free for any single-direction operating point, and it halves the
-                # only thing a solver would use a simultaneous pair for -- burning
-                # energy through the round-trip loss when a kWh is worth less than
-                # nothing. The rest of that is caught after the solve.
+                # One inverter, one rating: charging and discharging cannot sum
+                # to more than the unit can pass. The rest is caught after the
+                # solve.
                 prob += ch[t] + dis[t] <= inverter_kwh
         else:
             ch = [0.0] * n_steps
@@ -502,42 +367,21 @@ def solve_community_milp(
 
         for t in range(n_steps):
             prob += gen[t] + buy[t] + dis[t] == con[t] + sell[t] + ch[t] + spill[t]
-            # A meter nets import against export INSIDE the interval, so a
-            # household is either importing or exporting, never both. These two
-            # inequalities are implied by that and hold at every physical
-            # operating point -- the export cannot exceed the production left
-            # after the member's own load plus what the battery gives back, and
-            # the import cannot exceed the load the production did not cover
-            # plus what the battery and a spill take. They also bound the LP,
-            # which the energy balance alone does not: `buy` and `sell` can
-            # otherwise both run away together.
+            # A meter nets import against export inside the interval. These two
+            # inequalities hold at every physical operating point and bound the
+            # LP, which the energy balance alone does not: `buy` and `sell` can
+            # otherwise run away together.
             prob += sell[t] <= max(gen[t] - con[t], 0.0) + dis[t]
             prob += buy[t] <= max(con[t] - gen[t], 0.0) + ch[t] + spill[t]
 
         # Where those two inequalities are not enough. Importing and exporting
-        # the same kWh in one interval is normally self-punishing
-        # (`r_export <= delivered` by construction), but a shared kWh can be
-        # worth more at the receiver than a bought one costs at the producer.
-        # Buying one kWh, "exporting" it and having it consumed as allocation
-        # moves the community bill by
-        #
-        #     1.22 x (energy + network + levies at the producer)
-        #   - 1.22 x (displaced at the best-placed receiver)
-        #   + 0.22 x internal price          <- the VAT the transfer leaks
-        #
-        # and wherever that is negative the model will do it: "export" PV it is
-        # simultaneously buying back for its own load, a trade one meter cannot
-        # make because it nets the two before billing either. It is not
-        # hypothetical -- a producer on the single-rate samooskrba list beside a
-        # receiver on the VT/MT plain list, under community self-supply, in VT
-        # hours, is exactly it, and a zero internal price removes the VAT term
-        # that otherwise holds it just below profitable.
-        #
-        # Those intervals get their binary UP FRONT. The lazy loop below is kept
-        # as a backstop, but it converges badly here: fixing one interval hands
-        # the same trade to the next, and a run left 991 of them unresolved after
-        # six rounds and 8 500 binaries. Every other configuration has an empty
-        # `exposed` and stays a pure LP.
+        # the same kWh in one interval is normally self-punishing, but a shared
+        # kWh can be worth more at the receiver than a bought one costs at the
+        # producer -- under community self-supply, with mismatched price lists
+        # and an internal price whose VAT no longer holds the trade below
+        # profitable. Those intervals get their binary up front, because fixing
+        # one hands the same trade to the next and the lazy loop converges
+        # badly. Every other configuration has an empty `exposed`.
         exposed = (np.flatnonzero(
             (VAT_FACTOR * (r_energy + r_net_full + LEVIES_EUR_PER_KWH - displaced)
              + (VAT_FACTOR - 1.0) * p_int < 0.0) & (gen > 0.0))
@@ -549,10 +393,8 @@ def solve_community_milp(
         n_upfront_binaries += len(exposed)
 
         # ---- the ratchet excess-power charge, one variable per (block, month).
-        # Lifted from MILP_Benchmark so the two agree euro for euro on the same
-        # trajectory: the peak is measured on the METERED import `buy`, which no
-        # billing overlay can move -- sharing changes what a kWh costs, never
-        # when it crossed the meter.
+        # The peak is measured on the METERED import `buy`, which no billing
+        # overlay can move.
         agreed_by_month = {
             i: moc_za_mesec(env.agreed_power_for_run(start_idx), y * 12 + mo - 1)
             for i, (y, mo) in enumerate(months_sorted)
@@ -599,9 +441,7 @@ def solve_community_milp(
             prev_exc[b] = excess_var[(b, mi)]
             prev_win[b] = w
 
-        # ---- the decision-independent fixed monthly charge, prorated. Same
-        # helper the single-household MILP uses, so the two carry the same
-        # network power fee, OVE+SPTE levy and supplier monthly fee.
+        # ---- the decision-independent fixed monthly charge, prorated.
         fixed_by_month = {}
         for mi, (y, mo) in enumerate(months_sorted):
             first_t = month_idx_t.index(mi)
@@ -612,8 +452,8 @@ def solve_community_milp(
             )
         fixed_total = sum(fixed_by_month[month_idx_t[t]] for t in range(n_steps))
 
-        # ---- the organizer's monthly fee, souporaba only. A taxable invoice
-        # item per metering point per month, charged on the role.
+        # ---- the organizer's monthly fee, souporaba only: a taxable item per
+        # metering point per month.
         service_fee = 0.0
         if scheme == SCHEME_SOUPORABA and service_id:
             service = STORITVE_SOUPORABE[service_id]
@@ -653,33 +493,29 @@ def solve_community_milp(
 
         for t in range(n_steps):
             if sharing_mode == SHARING_STATIC:
-                # The contract as written: a fixed fraction of whatever surplus
-                # the interval happens to produce, split by a fixed key. `alpha`
-                # is a parameter, `sell` a variable, so the product stays linear
-                # and the dispatch is still free to decide how big the surplus is.
+                # The contract as written: a fixed fraction of the interval's
+                # surplus, split by a fixed key. `alpha` is a parameter and
+                # `sell` a variable, so the product stays linear.
                 pool_t = alpha * pulp.lpSum(state[s.member_id]["sell"][t] for s in senders)
                 for m in receivers:
                     prob += used_vars[m.member_id][t] <= weights[m.member_id] * pool_t
             else:
                 for s in senders:
                     prob += shared_vars[s.member_id][t] <= state[s.member_id]["sell"][t]
-                # Equality, not <=: energy put into the scheme but not consumed
-                # would otherwise be an accounting free lunch under
-                # `pay_for_unused`, paid for by nobody. A dynamic scheme has no
-                # reason to transfer what cannot be used, so this only removes
-                # solutions that are artefacts.
+                # Equality, not <=: under `pay_for_unused` an unconsumed
+                # transfer would otherwise be paid for by nobody.
                 prob += (pulp.lpSum(used_vars[m.member_id][t] for m in receivers)
                          == pulp.lpSum(shared_vars[s.member_id][t] for s in senders))
             for m in receivers:
                 # A shared kWh is an allocation ON the metered offtake, never on
-                # top of it: it can only displace energy the member actually drew.
+                # top of it.
                 prob += used_vars[m.member_id][t] <= state[m.member_id]["buy"][t]
 
     # ----------------------------------------------------------------------
     # Objective: the community's bill
     # ----------------------------------------------------------------------
-    # ---- what every member pays on its own metered offtake, and what the
-    # producers are credited for what they exported.
+    # ---- what every member pays on its own offtake, and what the producers
+    # are credited for what they exported.
     no_incentive = {}
     for m in members:
         st = state[m.member_id]
@@ -688,29 +524,22 @@ def solve_community_milp(
         r_net_full, r_net_shared = st["r_net_full"], st["r_net_shared"]
         used = st["used"]
 
-        # The per-kWh discount a shared kWh carries at this member. Negative =
-        # the member is better off with the allocation, which is what makes the
-        # solver take as much of it as the rule allows. It can only turn
-        # non-negative on a SIPX-linked list in an interval whose market price
-        # has fallen below the internal price; counted, not silently allowed,
-        # because there the model would decline an allocation the regulation
-        # applies automatically.
+        # The per-kWh discount a shared kWh carries at this member; negative
+        # means the member is better off with the allocation. It turns
+        # non-negative only where a SIPX price has fallen below the internal
+        # price, and those intervals are counted rather than silently allowed.
         if used is not None:
             delta = (p_int - r_energy) if scheme == SCHEME_SOUPORABA else (
                 p_int - r_energy - r_net_full + r_net_shared)
             no_incentive[m.member_id] = int(np.sum(delta >= 0.0))
 
         for t in range(n_steps):
-            # Taxable base, ex VAT, then grossed up -- the order si_obracun.Racun
-            # settles in. The internal price is NOT here: it is charged on the
-            # allocation the member was given, which under souporaba is not the
-            # same as the allocation it managed to use, and both sides of it are
-            # settled on the pool below.
+            # Taxable base, ex VAT, then grossed up, as si_obracun.Racun
+            # settles. The internal price is settled on the pool below.
             taxable = buy[t] * (r_energy[t] + r_net_full[t] + LEVIES_EUR_PER_KWH)
             if used is not None:
                 if scheme == SCHEME_SOUPORABA:
-                    # Only the supplier's energy quantity falls. Network charge,
-                    # excise and levies stay on the full metered offtake.
+                    # Only the supplier's energy quantity falls.
                     taxable -= used[t] * r_energy[t]
                 else:
                     # Community self-supply: the energy price AND the
@@ -723,11 +552,9 @@ def solve_community_milp(
                 obj_terms.append(-sell[t] * r_export[t])
 
     # ---- what the schemes take out of the producers' buyback contract, and
-    # what the receivers pay them for it instead. Both are settled on the POOL
-    # rather than per producer: which producer's electron a receiver consumed is
-    # not a question the meters can answer, and with one price list on the
-    # sending side (asserted here) the community total does not depend on the
-    # answer either.
+    # what the receivers pay for it instead. Settled on the POOL rather than per
+    # producer: with one price list on the sending side (asserted here) the
+    # community total does not depend on the split.
     if sharing:
         sender_paketi = {s.paket_id for s in senders}
         if len(sender_paketi) > 1:
@@ -740,26 +567,21 @@ def solve_community_milp(
         for t in range(n_steps):
             used_total = pulp.lpSum(used_vars[m.member_id][t] for m in receivers)
             if scheme == SCHEME_SKUPNOST:
-                # Nothing is destroyed: allocation a member could not use goes
-                # back to the pool and is sold at the producers' own buyback
-                # price, so only the CONSUMED part leaves the buyback contract.
+                # Allocation a member could not use returns to the pool, so
+                # only the consumed part leaves the buyback contract.
                 transferred_t = used_total
                 paid_t = used_total
             elif sharing_mode == SHARING_STATIC:
                 # ZOEE: `alpha` of the surplus leaves the buyback contract
-                # whether or not a receiver could use it, and under the default
-                # contract term the producer is paid for all of it.
+                # whether or not a receiver could use it.
                 transferred_t = alpha * pulp.lpSum(state[s.member_id]["sell"][t] for s in senders)
                 paid_t = transferred_t if pay_for_unused else used_total
             else:
                 transferred_t = pulp.lpSum(shared_vars[s.member_id][t] for s in senders)
                 paid_t = transferred_t          # dynamic transfers nothing unusable
             obj_terms.append(transferred_t * r_export_pool[t])   # buyback given up
-            # The internal price is a taxable invoice item at the receiver and a
-            # VAT-free credit at the producer, exactly as the buyback credit is
-            # ("odkup presezka ... ni predmet obdavcitve z DDV"). The transfer
-            # therefore nets to a 22 % VAT leak: the community pays it, neither
-            # member keeps it, and the community-optimal internal price is 0.
+            # Taxable at the receiver, VAT-free at the producer, so the
+            # transfer nets to a 22 % leak and the optimal internal price is 0.
             obj_terms.append(paid_t * p_int * (VAT_FACTOR - 1.0))
 
     prob += pulp.lpSum(obj_terms)
@@ -768,23 +590,11 @@ def solve_community_milp(
         solver = pulp.PULP_CBC_CMD(msg=False)
 
     # Solve, look for metering points that imported and exported in the same
-    # interval, force the ones that did to pick a side, solve again. Adding the
-    # binaries up front instead costs two orders of magnitude more time for a
-    # model that -- as the round counter reports -- usually needs none of them.
-    #
-    # The first pass is a pure LP and is solved exactly. Every later pass is a
-    # MIP, and it is solved to `lazy_gap_rel` rather than to proven optimality:
-    # what those binaries remove is a fraction of a euro of unphysical trade out
-    # of a bill in the hundreds, and CBC will otherwise spend an hour closing a
-    # gap that is already far below the thing being measured. Whichever bound it
-    # reached is reported.
-    #
-    # The battery binaries are the other reason a pass can be a MIP: on the
-    # SIPX-linked lists a handful of intervals a year have a negative delivered
-    # import rate, and each of those needs one. Sixteen members times those
-    # intervals is enough to keep CBC branching for an hour on a 270 000-column
-    # model, so a build that created any binary at all uses the gapped solver
-    # from the start.
+    # interval, force those to pick a side, solve again. Adding the binaries up
+    # front costs two orders of magnitude more time for a model that usually
+    # needs none. The first pass is a pure LP and exact; every later pass is a
+    # MIP solved to `lazy_gap_rel`, because what the binaries remove is a
+    # fraction of a euro out of a bill in the hundreds.
     lazy_solver = pulp.PULP_CBC_CMD(msg=False, gapRel=float(lazy_gap_rel),
                                     timeLimit=float(lazy_time_limit_s))
     solve_s = 0.0
@@ -792,15 +602,13 @@ def solve_community_milp(
     n_binaries = 0
     while True:
         t0 = time.time()
-        # A build that already carries binaries is a MIP on the first pass, and
-        # proving optimality on one of those costs hours for a correction worth
-        # about a euro -- so it gets the gapped solver too.
+        # A build that already carries binaries is a MIP on the first pass, so
+        # it gets the gapped solver too.
         prob.solve(solver if (rounds == 0 and n_upfront_binaries == 0) else lazy_solver)
         solve_s += time.time() - t0
         status = pulp.LpStatus[prob.status]
-        # A gap-limited or time-limited MIP comes back "Optimal" from CBC when it
-        # closed the gap and with an incumbent otherwise; anything with no
-        # solution at all has no trajectory to extract and must not be reported.
+        # A gapped MIP returns "Optimal" when it closed the gap and an incumbent
+        # otherwise; anything with no solution has no trajectory to extract.
         if status not in ("Optimal", "Not Solved") or prob.objective.value() is None:
             raise RuntimeError(f"community solve ended {status}, no usable solution")
 
@@ -808,13 +616,9 @@ def solve_community_milp(
         if not violations:
             break
         if rounds >= max_lazy_rounds:
-            # Better to fail than to return a trajectory no meter could have
-            # recorded. A caller that reaches this has found a configuration
-            # where the objective wants the trade faster than binaries can
-            # forbid it -- community self-supply, mismatched price lists and an
-            # internal price too low for its VAT to hold the trade below
-            # profitable is the known one. Raise the internal price, drop the
-            # storage, or accept that this combination is not solvable here.
+            # Fail rather than return a trajectory no meter could have
+            # recorded: the objective wants the trade faster than binaries can
+            # forbid it. Raise the internal price or drop the storage.
             if strict:
                 raise RuntimeError(
                     f"{len(violations)} metering points still import and export in the "
@@ -866,9 +670,7 @@ def _v(x):
 
 
 def _safe_ratio(part, whole, tol=1e-12):
-    """`part / whole`, zero where the whole is zero. Attribution keys are ratios
-    of solved quantities and the denominator is zero in every interval nobody
-    exported, which is most of them."""
+    """`part / whole`, zero where the whole is zero."""
     whole = np.asarray(whole, dtype=float)
     return np.divide(np.asarray(part, dtype=float), whole,
                      out=np.zeros_like(whole), where=np.abs(whole) > tol)
@@ -876,20 +678,10 @@ def _safe_ratio(part, whole, tol=1e-12):
 
 def _complementarity_violations(members, state, tol=1e-4):
     """Solved flows that no single metering point or inverter could produce.
-
-    Two kinds, both caught the same way and both fixed by the same lazy binary:
-
-      "grid"     imported and exported in the same interval. A meter nets the
-                 two before either is billed, so a settlement cannot be built
-                 on it.
-      "battery"  charged and discharged in the same interval. A battery cannot,
-                 and the environment cannot express it either -- one signed
-                 setpoint per step. A solver reaches for it only where a kWh is
-                 worth less than nothing and the round-trip loss becomes a way
-                 to get paid for burning energy.
-
-    The tolerance is in kWh: well above solver noise, far below anything that
-    moves a bill.
+    
+    "grid" imported and exported in the same interval, which a meter nets before
+    billing; "battery" charged and discharged in the same interval. The
+    tolerance is in kWh, above solver noise and below anything that moves a bill.
     """
     out = []
     for m in members:
@@ -903,10 +695,7 @@ def _complementarity_violations(members, state, tol=1e-4):
 
 
 def _verify_no_simultaneous_battery(ch, dis, tol=1e-6):
-    """A battery cannot charge and discharge in the same interval, and the
-    environment cannot express it either -- one signed setpoint per step. The
-    binaries above are only created where the LP could want to, so this checks
-    the assumption held everywhere else."""
+    """Check that no battery charged and discharged in the same interval."""
     return int(sum(1 for c, d in zip(ch, dis) if _v(c) > tol and _v(d) > tol))
 
 
@@ -914,10 +703,9 @@ def _extract(*, members, state, senders, receivers, scheme, sharing_mode, alpha,
              p_int, pay_for_unused, weights, n_steps, dates, hours,
              month_idx_t, months_sorted, no_incentive=None):
     """Re-price the solved trajectory member by member.
-
+    
     The bill is rebuilt from the flows rather than read off the objective, so a
-    mistake in the objective shows up as a mismatch instead of propagating: the
-    caller gets both and the notebook asserts they agree.
+    mistake shows up as a mismatch instead of propagating.
     """
     sharing = scheme != SCHEME_INDIVIDUAL
     rows, flows = [], []
@@ -937,11 +725,8 @@ def _extract(*, members, state, senders, receivers, scheme, sharing_mode, alpha,
     if sharing:
         for s in senders:
             if scheme == SCHEME_SKUPNOST:
-                # Only the consumed part leaves the buyback contract; it is
-                # attributed to the producers in proportion to what each of them
-                # put into the pool. With one price list on the sending side any
-                # split gives the same community total, and this is the split
-                # the members would agree to.
+                # Only the consumed part leaves the buyback contract, split
+                # over the producers in proportion to what each put in.
                 transferred_by_sender[s.member_id] = used_total_t * _safe_ratio(
                     sell_by_sender[s.member_id], sell_total_t)
             elif sharing_mode == SHARING_STATIC:
@@ -980,8 +765,8 @@ def _extract(*, members, state, senders, receivers, scheme, sharing_mode, alpha,
             transferred = consumed = paid_for = wasted = np.zeros(n_steps)
             sold = sell if m.is_sender else np.zeros(n_steps)
 
-        # What the receiver is INVOICED for -- the allocation it was given, which
-        # under souporaba is not the allocation it managed to use.
+        # What the receiver is INVOICED for: the allocation it was given, which
+        # under souporaba is not the allocation it used.
         if sharing and not m.is_sender:
             if scheme == SCHEME_SOUPORABA and sharing_mode == SHARING_STATIC and pay_for_unused:
                 charged_internal = weights[m.member_id] * transferred_total_t
@@ -1004,7 +789,7 @@ def _extract(*, members, state, senders, receivers, scheme, sharing_mode, alpha,
         credit_eur = float(np.sum(sold * r_export))
         internal_received_eur = float(np.sum(paid_for) * p_int)
 
-        # The excess-power charge, re-derived from the trajectory exactly as the
+        # The excess-power charge, re-derived from the trajectory as the
         # objective built it: peak per (block, month), less the agreed power.
         power_eur = _excess_charge_eur(
             buy / hours, st["blocks"], month_idx_t, months_sorted, m.env,
@@ -1045,10 +830,8 @@ def _extract(*, members, state, senders, receivers, scheme, sharing_mode, alpha,
             "Cost_EUR": total,
             "Peak_Import_kW": float(np.max(buy) / hours) if n_steps else 0.0,
             "Simultaneous_Battery_Intervals": _verify_no_simultaneous_battery(st["ch"], st["dis"]),
-            # Import and export in the same interval. The binaries above are
-            # created only where the objective could want it, so anything left
-            # here is a place the assumption failed and the flows are not
-            # something one meter could have recorded.
+            # Import and export in the same interval: anything left here is a
+            # place one meter could not have recorded the flows.
             "Simultaneous_Grid_Intervals": int(np.sum((buy > 1e-6) & (sell > 1e-6))),
             "Grid_Binaries": st["n_grid_binaries"],
             "Battery_Binaries": st["n_battery_binaries"],
@@ -1096,12 +879,10 @@ def _extract(*, members, state, senders, receivers, scheme, sharing_mode, alpha,
 
 
 def _excess_charge_eur(power_kw, blocks, month_idx_t, months_sorted, env, pravila):
-    """The ratchet excess-power charge for one solved trajectory.
-
-    Same rule as the objective and as `si_konica`: per block and month, the
-    highest quarter-hour power above the agreed billing power, priced at that
-    month's season-correct power postavka and weighted by the transitional
-    factor. Ex VAT, matching `Pricing_Functions._apply_peak_ratchet`.
+    """The ratchet excess-power charge for one solved trajectory, ex VAT.
+    
+    Per block and month, the highest quarter-hour power above the agreed billing
+    power, at that month's season-correct postavka.
     """
     total = 0.0
     peaks: Dict[tuple, float] = {}
@@ -1123,21 +904,13 @@ def _excess_charge_eur(power_kw, blocks, month_idx_t, months_sorted, env, pravil
 # A whole year, month by month
 # --------------------------------------------------------------------------
 def month_slices(index, min_intervals=0):
-    """(start_idx, n_steps, (year, month)) per calendar month, in Slovenian local time.
-
-    The month is the billing unit -- power charge, OVE+SPTE and the excess-power
-    ratchet all reset on the 1st -- so cutting the year here costs nothing on
-    the tariff side and makes the twelve solves independent.
-
-    `min_intervals` folds a slice shorter than that into its neighbour. A whole
-    calendar year of data does not always produce twelve slices: the Fluvius
-    profiles are stamped in Brussels local time with a `Z` suffix, so a file
-    ending 31 Dec 23:45 spills its last hour into the following January. Those
-    few intervals are a real part of the year and must not be dropped, but they
-    are not a month, and solving them as one puts a whole month's worth of
-    calendar into a horizon four intervals long. Folding them into December is
-    exact: the fixed charge is prorated per interval and the peak is tracked per
-    (block, month) inside the solve either way.
+    """(start_idx, n_steps, (year, month)) per calendar month, Slovenian local time.
+    
+    The month is the billing unit -- power charge, OVE+SPTE and the ratchet all
+    reset on the 1st -- so cutting the year here costs nothing on the tariff side.
+    `min_intervals` folds a short slice into its neighbour: the Fluvius stamps are
+    Brussels-local despite the `Z` suffix, so a year spills a few intervals into
+    the following January.
     """
     local_months = np.array([(v_lokalni_cas(ts).year, v_lokalni_cas(ts).month) for ts in index])
     keys = [tuple(int(v) for v in k) for k in local_months]
@@ -1156,8 +929,7 @@ def month_slices(index, min_intervals=0):
                 merged[-1] = (ps, pn + n, pkey)
             else:
                 merged.append((s, n, key))
-        # A short FIRST slice has no predecessor to fold into, so it folds the
-        # successor into itself instead.
+        # A short first slice folds its successor into itself instead.
         while len(merged) > 1 and merged[0][1] < min_intervals:
             s, n, key = merged.pop(0)
             ns, nn, nkey = merged[0]
@@ -1184,12 +956,9 @@ def run_community_year(
     verbose: bool = False,
 ):
     """The whole horizon, one solve per calendar month, summed.
-
-    Returns the same shape as `solve_community_milp` with the twelve monthly
-    settlements added up. Each month opens and closes at `soc_fraction` of every
-    battery's capacity, so no month can raid another's storage; that is the one
-    place the decomposition costs anything, and the notebook measures it against
-    an annual single-household solve.
+    
+    Each month opens and closes at `soc_fraction` of every battery's capacity, so
+    no month can raid another's storage.
     """
     members = list(members)
     slices = slices if slices is not None else month_slices(members[0].env.dataset.index)
@@ -1218,9 +987,7 @@ def combine_months(monthly, keep_flows=False):
     """Add up monthly settlements into one period result."""
     keys = ["Member", "Role", "Contract", "Paket", "Capacity_kWh"]
     frames = pd.concat([r["per_member"] for r in monthly], ignore_index=True)
-    # Everything is a monthly total and adds up; the peak is the highest month's,
-    # because the peak charge is settled per month against the same agreed power
-    # and the annual figure that describes the connection is the largest of them.
+    # Monthly totals add up; the peak is the highest month's.
     how = {c: ("max" if c == "Peak_Import_kW" else "sum")
            for c in frames.columns if c not in keys}
     per_member = frames.groupby(keys, as_index=False, sort=False).agg(how)
@@ -1239,8 +1006,7 @@ def combine_months(monthly, keep_flows=False):
         "shared_wasted_kwh": float(per_member["Shared_Wasted_kWh"].sum()),
         "transferred_kwh": float(per_member["Shared_Out_kWh"].sum()),
         "solve_s": sum(r["solve_s"] for r in monthly),
-        # How much of the year needed a binary at all, and whether anything was
-        # left unfixed when the lazy loop ran out of rounds.
+        # How much of the year needed a binary, and what the loop left unfixed.
         "lazy_rounds": max(r.get("lazy_rounds", 0) for r in monthly),
         "grid_binaries": sum(r.get("grid_binaries", 0) for r in monthly),
         "unresolved_violations": sum(r.get("unresolved_violations", 0) for r in monthly),

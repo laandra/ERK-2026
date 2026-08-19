@@ -1,23 +1,11 @@
 """Gymnasium environments for household / energy-community battery dispatch.
 
 `HouseholdEnvironment` is continuous-first: an action is a signed battery
-setpoint in kWh for the interval (positive = charge, negative = discharge),
-the same quantity the MILP benchmark solves for. Discrete actions remain
-available via `action_mode="discrete"` so the legacy DQN keeps working; they
-are a five-entry lookup that produces a setpoint and then goes through exactly
-the same energy router.
+setpoint in kWh (positive = charge), the quantity the MILP benchmark solves
+for. `action_mode="discrete"` keeps the legacy five-entry action set.
 
-With `allow_curtailment=True` the agent also controls how much local production
-to shut off, matching the MILP's `P_spill`, which makes the MILP optimum
-reachable on profiles where exporting is loss-making:
-
-  - continuous: the action gains a second component, the curtailed kWh
-    (clipped to the interval's generation)
-  - discrete: the action index encodes both choices,
-    `battery_action + n_discrete_actions * curtailment_mode`
-
-Curtailment is applied to generation first; everything downstream then sees
-only what is left.
+With `allow_curtailment=True` the action gains the curtailed kWh, matching the
+MILP's `P_spill`. Curtailment is applied to generation first.
 """
 
 import calendar
@@ -55,14 +43,8 @@ ACTION_DISCHARGE_ANY = 3  # discharge fully, exporting whatever the house can't 
 ACTION_IDLE = 4           # battery unused
 N_DISCRETE_ACTIONS = 5
 
-# Curtailment modes available in discrete mode when allow_curtailment=True.
-# For a fixed battery setpoint the interval energy cost is piecewise-linear in
-# the curtailed amount with breakpoints at exactly these three values, so an
-# energy-only optimum never needs anything in between. The peak/excess-power
-# ratchet adds one further kink (where grid draw crosses the running peak), so
-# on rare intervals an intermediate level can edge these out -- use
-# action_mode="continuous", which sets the curtailed kWh directly and matches
-# the MILP's P_spill exactly.
+# Curtailment modes in discrete mode: the breakpoints of the piecewise-linear
+# interval cost. `action_mode="continuous"` sets the curtailed kWh directly.
 CURTAIL_NONE = 0     # export everything the house and battery don't take
 CURTAIL_NO_EXPORT = 1  # curtail exactly the surplus that would be exported
 CURTAIL_ALL = 2      # shut local production off completely
@@ -70,18 +52,13 @@ N_CURTAILMENT_MODES = 3
 
 
 # ---------------------------------------------------------------------------
-# Agreed billing power (dogovorjena obracunska moc)
-#
-# Module-level so the community settlement and the multi-household baselines can
-# build exactly the schedule a HouseholdEnvironment would, without constructing
-# one. The class methods below are thin delegates to these.
+# Agreed billing power (dogovorjena obracunska moc). Module-level so callers can
+# build a schedule without constructing an environment.
 # ---------------------------------------------------------------------------
 def monthly_peak_kw_by_block(naive_power_kw, block_arr, month_id_arr):
     """{month id: {block: peak kW}} of the no-battery grid draw.
-
-    Blocks that never occur in a month are absent from that month's dict --
-    block 1 exists only in the higher season (Nov-Feb) and block 5 only in the
-    lower one, so every month is missing one of the five.
+    
+    Blocks that never occur in a month are absent from that month's dict.
     """
     peaks = {}
     for i in range(len(month_id_arr)):
@@ -94,12 +71,7 @@ def monthly_peak_kw_by_block(naive_power_kw, block_arr, month_id_arr):
 
 
 def month_completeness(month_id_arr, steps_per_day):
-    """{month id: observed intervals / intervals a full month would have}.
-
-    A dataset almost never starts and ends on a month boundary, so the first and
-    last months are usually partial. Anything read off a partial month (a peak,
-    in particular) understates it.
-    """
+    """{month id: observed intervals / intervals a full month would have}."""
     counts = Counter(int(m) for m in month_id_arr)
     out = {}
     for month, n in counts.items():
@@ -110,32 +82,11 @@ def month_completeness(month_id_arr, steps_per_day):
 
 def bootstrap_peak_kw(peaks, month_id_arr, steps_per_day, *, mode="cyclic",
                       first_month=None):
-    """Per-block peaks standing in as the month BEFORE `first_month`.
-
-    `first_month` defaults to the earliest month present. The leading month has
-    no predecessor to read, and the three ways out are not equally good:
-
-    - `"cyclic"` (default) hands it the last complete month in the dataset. On a
-      full year that is the calendar month immediately preceding the first one --
-      December before January -- so it is the same season, it carries the same
-      set of tariff blocks, and it is exactly the kind of figure a household that
-      has lived there for years would walk in with. The leading month then
-      behaves like the other twelve: it can pay an excess charge, and shaving its
-      peak is worth something.
-    - `"own"` sets the leading month's contract from its own realized peaks.
-      Causally impossible, and it biases in a specific direction: the agreed
-      power lands exactly on the peak, so that month can never pay an excess
-      charge and contributes no peak-shaving signal at all.
-    - `"flat_max"` takes the leading month's single largest draw, across all
-      blocks, and agrees that in every block. Still reads the month it prices,
-      but only one scalar from it, and it errs conservatively -- nothing is ever
-      in excess, the household simply overpays the power charge.
-
-    None of the three leaks foresight to the *controller*: the agreed power is a
-    constant in the objective and identical for the baseline and every strategy,
-    so it cannot make a short horizon look better than a long one. What it moves
-    is the level of one month's bill -- which is why the point is to make that
-    month resemble the others, not to make it cheap.
+    """Per-block peaks standing in as the month before `first_month`.
+    
+    `"cyclic"` (default) reads the last complete month of the dataset, `"own"`
+    the leading month's own peaks, `"flat_max"` its single largest draw in
+    every block.
     """
     if mode not in {"cyclic", "own", "flat_max"}:
         raise ValueError(
@@ -153,12 +104,10 @@ def bootstrap_peak_kw(peaks, month_id_arr, steps_per_day, *, mode="cyclic",
         largest = max(peaks[first].values(), default=0.0)
         return {b: float(largest) for b in _BLOCKS}
 
-    # cyclic: the last complete month, i.e. the period read as a cycle.
     complete_by = month_completeness(month_id_arr, steps_per_day)
     complete = [m for m in sorted(peaks) if m != first and complete_by.get(m, 0.0) >= 0.9]
     if not complete:
-        # Too short a dataset to have a second complete month; fall back to the
-        # conservative scalar rather than to the month's own outcome.
+        # No second complete month; fall back to the conservative scalar.
         largest = max(peaks[first].values(), default=0.0)
         return {b: float(largest) for b in _BLOCKS}
     return dict(peaks[complete[-1]])
@@ -178,12 +127,9 @@ def agreed_power_schedule_for_profile(
     carry_missing_blocks=True,
 ):
     """{month id: {block: agreed kW}} for a raw profile, with no environment.
-
-    The same schedule `HouseholdEnvironment` builds for itself, so the community
-    settlement and the multi-household baselines can bill against the identical
-    contract the dispatch was optimized under. Month ids are absolute
-    (year*12 + month - 1) in Slovenian local time; `si_moc.moc_za_mesec`
-    resolves one.
+    
+    The same schedule `HouseholdEnvironment` builds for itself, so a settlement
+    bills against the contract the dispatch was optimized under.
     """
     hours = 24.0 / float(steps_per_day)
     naive_power_kw = np.maximum(
@@ -301,8 +247,7 @@ class HouseholdEnvironment(gym.Env):
         if not 1 <= self.n_discrete_actions <= N_DISCRETE_ACTIONS:
             raise ValueError(f"n_discrete_actions must be in 1..{N_DISCRETE_ACTIONS}")
 
-        # Curtailment ("shut local production off"), matching the MILP's P_spill.
-        # Off by default so the legacy battery-only action spaces are unchanged.
+        # Curtailment, matching the MILP's P_spill. Off by default.
         self.allow_curtailment = bool(allow_curtailment)
         self.n_curtailment_modes = N_CURTAILMENT_MODES if self.allow_curtailment else 1
 
@@ -334,17 +279,13 @@ class HouseholdEnvironment(gym.Env):
             raise ValueError("pricing_scheme must be 'si_dobava' or 'si_samooskrba'")
         self.pricing_include_raw = bool(pricing_include_raw)
 
-        # Fresh dict per instance -- a mutable default argument here would be
-        # mutated in place below (pricing_reference_year) and shared/corrupted
-        # across every subsequent construction that also omits pricing_options.
+        # Fresh dict per instance: it is mutated below, so a mutable default
+        # would be shared across every construction that omits it.
         self.pricing_options = {"pricing_mode": "dinamicni", "buyback_mode": "dinamicni"}
         self.pricing_options.update(pricing_options or {})
 
-        # Dataset timestamps (Ausgrid 2010-2013, Fluvius) predate the published
-        # SI tariff acts, so leaving this unset would make pricing fall back to
-        # the 2026 regime anyway (see Pricing_Functions._resolve_pravila); pin
-        # it explicitly so the RL environment, the MILP benchmark and the
-        # invoice builder all agree on the same year.
+        # The profiles predate the published SI tariff acts, so the reference
+        # year is pinned rather than resolved from the data date.
         self.pricing_reference_year = (
             PRIVZETO_REFERENCNO_LETO if pricing_reference_year is None
             else int(pricing_reference_year)
@@ -407,16 +348,13 @@ class HouseholdEnvironment(gym.Env):
         )
         self._month_id_arr = self._precompute_month_ids()
 
-        # Both bounds are optional and off by default: none of these profiles
-        # carries a connection agreement, and inventing one only produces
-        # excess charges that measure the invention. See si_moc.
+        # No floor and no ceiling by default: the profiles carry no connection
+        # agreement, and inventing one only manufactures excess charges.
         self.connection_power_kw = (
             None if connection_power_kw is None else float(connection_power_kw)
         )
         self.min_agreed_power_kw = float(min_agreed_power_kw)
         self.agreed_power_bootstrap = str(agreed_power_bootstrap)
-        # None means "not read back off anything": either the caller pinned the
-        # agreed power explicitly, or it asked for no lag at all.
         self.agreed_power_lag_months = (
             None if (agreed_power_lag_months is None or contracted_power_kw is not None)
             else int(agreed_power_lag_months)
@@ -424,10 +362,8 @@ class HouseholdEnvironment(gym.Env):
         self.agreed_power_carry_missing_blocks = bool(agreed_power_carry_missing_blocks)
         self._agreed_power_schedule = self._build_agreed_power_schedule(contracted_power_kw)
         self._agreed_power_months = sorted(self._agreed_power_schedule)
-        # Legacy single-vector view, kept because callers that never had a
-        # schedule read it directly (community settlement, reporting columns).
-        # It is the *mean over the months*, so it is a fair summary but never a
-        # price: everything that bills reads `agreed_power_at`/`agreed_power_kw`.
+        # Single-vector summary (the mean over the months) for reporting only;
+        # everything that bills reads `agreed_power_at` / `agreed_power_kw`.
         self.contracted_power_kw = {
             b: sum(m[b] for m in self._agreed_power_schedule.values())
             / len(self._agreed_power_schedule)
@@ -475,9 +411,8 @@ class HouseholdEnvironment(gym.Env):
         self.window_past = 0
         self.window_future = 11 * (self.steps_per_day // 24)
 
-        # Continuous actions carry a second component (curtailed kWh) when
-        # curtailment is enabled; discrete actions flatten the (battery,
-        # curtailment) pair into one index -- see _resolve_action.
+        # Continuous actions carry a second component (curtailed kWh); discrete
+        # actions flatten the (battery, curtailment) pair into one index.
         if self.action_mode == "discrete":
             self.action_space = gym.spaces.Discrete(
                 self.n_discrete_actions * self.n_curtailment_modes
@@ -525,8 +460,7 @@ class HouseholdEnvironment(gym.Env):
 
     @property
     def month_ids(self):
-        """Per-row absolute calendar-month id (year*12 + month - 1), local time.
-        The key the agreed-power schedule and every monthly charge are on."""
+        """Per-row absolute calendar-month id (year*12 + month - 1), local time."""
         return self._month_id_arr
 
     def _naive_import_power_kw(self):
@@ -536,10 +470,9 @@ class HouseholdEnvironment(gym.Env):
         return naive_import_kwh / hours_per_interval
 
     def _precompute_month_ids(self):
-        """Absolute calendar-month id (year*12 + month - 1) per row, in Slovenian
-        local time -- the same key `si_konica.reset_window_id(..., 1)` produces,
-        so the agreed-power schedule turns over on exactly the day the ratchet
-        window and the network invoice do."""
+        """Absolute calendar-month id per row, Slovenian local time -- the key the
+        ratchet window and the network invoice also turn over on.
+        """
         month_cache = {}
         out = np.empty(self.data_length, dtype=np.int64)
         for i in range(self.data_length):
@@ -570,26 +503,12 @@ class HouseholdEnvironment(gym.Env):
         )
 
     def _build_agreed_power_schedule(self, contracted_power_kw):
-        """{month id: {block: agreed kW}} -- the dogovorjena obracunska moc in
-        force each calendar month.
-
-        An explicit `contracted_power_kw` (float or per-block dict) is held
-        constant over every month, which is what the community-settlement and
-        battery-sizing callers pass. Left at None, the household is modelled as
-        one that manages the figure itself: each month it agrees exactly the
-        peak power the previous month realized, clipped to
-        [`min_agreed_power_kw`, `connection_power_kw`] and made non-decreasing
-        across blocks (see `si_moc`). Under the regulation that change is free
-        and takes effect the following month.
-
-        **The schedule is built from the NO-BATTERY profile on purpose.** It has
-        to be exogenous: were the agreed power read off the optimized
-        trajectory, this month's dispatch would move next month's fixed charge,
-        the fixed charge would stop being a constant the MILP can drop out of
-        its objective, and the no-battery baseline would no longer be priced
-        under the same contract as the strategies it is compared against. What
-        is modelled here is a household that sized its agreed power on its own
-        metering history and then installed a battery.
+        """{month id: {block: agreed kW}} in force each calendar month.
+        
+        An explicit `contracted_power_kw` is held constant over every month. Left
+        at None, each month agrees the peak the previous month realized. Built from
+        the NO-BATTERY profile, so the contract stays exogenous to the dispatch
+        being optimized against it.
         """
         if contracted_power_kw is None:
             peaks = self._monthly_peak_kw_by_block()
@@ -613,15 +532,12 @@ class HouseholdEnvironment(gym.Env):
 
     @property
     def agreed_power_bootstrap_kw(self):
-        """The per-block peaks the leading month's contract was set from, or None
-        when it fell back to its own month (`agreed_power_bootstrap='own'`)."""
+        """The per-block peaks the leading month's contract was set from."""
         return self._bootstrap_kw
 
     @property
     def agreed_power_rule(self):
-        """Tag identifying the agreed-power rule this env prices under. Stamped
-        onto result rows so two runs settled against different agreed powers are
-        never averaged together."""
+        """Tag for the agreed-power rule, stamped onto every result row."""
         return oznaka_razporeda_moci(
             minimalna_moc_kw=self.min_agreed_power_kw,
             prikljucna_moc_kw=self.connection_power_kw,
@@ -630,11 +546,7 @@ class HouseholdEnvironment(gym.Env):
         )
 
     def agreed_power_kw(self, month_id):
-        """Agreed power {block: kW} in force in an absolute calendar month.
-
-        Months outside the dataset clamp to the nearest one that is in it, so a
-        horizon running off the end of the data still prices.
-        """
+        """Agreed power {block: kW} in force in an absolute calendar month."""
         month = int(month_id)
         schedule = self._agreed_power_schedule
         if month in schedule:
@@ -648,23 +560,10 @@ class HouseholdEnvironment(gym.Env):
 
     def agreed_power_for_run(self, start_idx=0, do_not_use_previous_month=False):
         """{month id: {block: kW}} for an analysis that begins at `start_idx`.
-
-        An analysis starting part-way into the dataset lands in a month that DOES
-        have a predecessor on file, and by default it uses it -- month M is
-        billed on month M-1's peaks whether or not the run happens to begin at M.
-        That is the honest reading: the meter kept running before the solver was
-        pointed at the data, and the household's contract reflects it.
-
-        `do_not_use_previous_month=True` refuses that history and treats the
-        run's first month as a cold start, bootstrapping it exactly the way the
-        dataset's own first month is bootstrapped (`agreed_power_bootstrap`).
-        Use it to model a household that has just moved in, or to check how much
-        of a result rests on the month before the window.
-
-        Only the run's FIRST month is affected; every later month reads a
-        predecessor that is inside the run either way. Returns the shared
-        schedule unchanged whenever the flag is off or the run starts in the
-        dataset's first month, so the common path allocates nothing.
+        
+        By default the run's first month is billed on its real predecessor in the
+        data; `do_not_use_previous_month=True` bootstraps it as a cold start
+        instead. Only the first month is affected.
         """
         schedule = self._agreed_power_schedule
         if not do_not_use_previous_month:
@@ -675,10 +574,8 @@ class HouseholdEnvironment(gym.Env):
 
         peaks = self._monthly_peak_kw_by_block()
         if self.agreed_power_bootstrap == "cyclic":
-            # "cyclic" resolves to the last complete month of the whole dataset,
-            # which for a mid-dataset start is AFTER the run. Fine as a
-            # steady-state stand-in, but it is not a causal one -- pair the flag
-            # with 'own' or 'flat_max' if that matters.
+            # "cyclic" resolves to the last complete month of the dataset,
+            # which for a mid-dataset start lies after the run.
             pass
         seeded = dict(schedule)
         seeded[first_month] = dogovorjena_moc_iz_konic(
@@ -693,8 +590,7 @@ class HouseholdEnvironment(gym.Env):
         return self.agreed_power_kw(resolve_reset_window_id(timestamp, 1))
 
     def agreed_power_frame(self):
-        """The whole schedule as a DataFrame (one row per month, one column per
-        block) next to the no-battery peak it was set from. Reporting only."""
+        """The schedule as a DataFrame beside the peaks it was set from."""
         import pandas as pd
 
         peaks = self._monthly_peak_kw_by_block()
@@ -708,10 +604,7 @@ class HouseholdEnvironment(gym.Env):
         return pd.DataFrame(rows).set_index("Month")
 
     def _precompute_peak_seed_history(self):
-        """One-time O(n) precompute of per-row tariff block, reset-window id,
-        and a per-block running 'historical no-battery peak so far' array, used
-        to seed the ratchet peak tracker at arbitrary episode-start indices
-        (see compute_seed_peak_kw)."""
+        """Per-row tariff block, reset-window id and running no-battery peak."""
         naive_power_kw = self._naive_import_power_kw()
 
         block_cache = {}
@@ -741,10 +634,7 @@ class HouseholdEnvironment(gym.Env):
         return block_arr, window_id_arr, peak_seed_history
 
     def compute_seed_peak_kw(self, start_idx):
-        """Running peak state (per block) to seed an episode starting at
-        `start_idx`, derived from historical no-battery grid draw up to (but
-        not including) start_idx. Returns all-zero at the very start of the
-        dataset or right after a reset-window boundary."""
+        """Per-block peak state seeding an episode that starts at `start_idx`."""
         if start_idx <= 0:
             return {b: 0.0 for b in _BLOCKS}
         ref_idx = start_idx - 1
@@ -825,8 +715,7 @@ class HouseholdEnvironment(gym.Env):
         return 0.0
 
     def _reward_arbitrage(self, relative_price, battery_delta_kwh):
-        """Reward charging when the price is below its rolling median and
-        discharging when it is above."""
+        """Reward charging below the rolling median price and discharging above it."""
         if self.battery_capacity_kwh <= 0:
             return 0.0
         gamma = 3.0
@@ -838,9 +727,7 @@ class HouseholdEnvironment(gym.Env):
         return -(5.0 / 8.0) * variable_cost_eur * self.reward_weight_cost
 
     def compute_reward(self, soc_norm, relative_price, battery_delta_kwh, variable_cost_eur):
-        """Weighted sum of the three reward components, normalized by the sum of
-        the weights. Public so the MILP benchmark can score its own trajectory
-        with exactly the environment's reward."""
+        """Weighted sum of the three reward components, normalized by weight."""
         if self.battery_capacity_kwh <= 0:
             return self._reward_cost(variable_cost_eur)
         denominator = (
@@ -858,8 +745,7 @@ class HouseholdEnvironment(gym.Env):
     # Actions
     # ------------------------------------------------------------------
     def battery_limits(self, soc_kwh):
-        """(max charge, max discharge) setpoints feasible at this state of
-        charge, both non-negative kWh at the AC side."""
+        """(max charge, max discharge) setpoints, non-negative kWh at the AC side."""
         return (
             max_charge_now(
                 soc_kwh, self.charge_efficiency, self.max_charge_kwh, self.battery_capacity_kwh
@@ -896,11 +782,9 @@ class HouseholdEnvironment(gym.Env):
         raise ValueError(f"Unsupported curtailment mode: {mode}")
 
     def _resolve_action(self, action, soc_kwh, generation_kwh, consumption_kwh):
-        """Turn whatever the agent produced into (setpoint_kwh, curtailed_kwh, action_int).
-
-        Curtailment is resolved first, then the battery setpoint is derived from
-        the *remaining* generation -- so "charge from PV only" charges from what
-        is left after curtailing, exactly as the MILP's balance treats P_spill.
+        """The agent's action as (setpoint_kwh, curtailed_kwh, action_int).
+        
+        Curtailment is resolved first; the setpoint then sees only what is left.
         """
         if self.action_mode == "discrete":
             action_int = int(getattr(action, "value", action))
@@ -1204,13 +1088,7 @@ class HouseholdEnvironment(gym.Env):
     def _infeasible_request_penalty(
         self, action_int, soc_kwh, surplus_kwh, setpoint_requested, setpoint_applied
     ):
-        """Discourage asking for something the battery cannot do.
-
-        Discrete mode keeps the original flat penalty so legacy DQN runs stay
-        comparable. Continuous mode scales `clip_penalty` (0 by default) by how
-        much of the request had to be clipped away -- clipping alone already
-        removes any benefit from an infeasible setpoint.
-        """
+        """Penalty for asking for something the battery cannot do."""
         if self.action_mode == "discrete":
             battery_action = action_int % self.n_discrete_actions
             if battery_action in (ACTION_DISCHARGE_HOME, ACTION_DISCHARGE_ANY) and soc_kwh <= 1e-8:
@@ -1235,11 +1113,10 @@ class HouseholdEnvironment(gym.Env):
 
 
 class CommunityEnvironment(gym.Env):
-    """Wrapper that runs multiple HouseholdEnvironment instances together.
-
-    This class intentionally keeps each household independent (no VPP/community
-    optimization coupling yet). It provides grouped stepping, per-household flow
-    history tracking, and invoice views (separate + group aggregate).
+    """Runs multiple HouseholdEnvironment instances together, uncoupled.
+    
+    Grouped stepping, per-household flow history, separate and aggregate
+    invoice views.
     """
 
     metadata = {"render_modes": []}

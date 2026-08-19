@@ -33,7 +33,7 @@ def _dataset_dir_map() -> dict[str, Path]:
 
 
 def available_input_datasets() -> List[str]:
-    """List accepted dataset names based on folders in Input data plus single-file datasets."""
+    """Dataset names: the folders under Input data, plus the single-file ones."""
     dataset_names = sorted(path.name for path in INPUT_DATA_DIR.iterdir() if path.is_dir())
     if (INPUT_DATA_DIR / "GreekSmartHome.csv").exists():
         dataset_names.append("GreekSmartHome")
@@ -109,7 +109,7 @@ def load_household_data(
     dataset: str = "Ausgrid",
     print_column_names: bool = False,
 ) -> pd.DataFrame:
-    """Load one household profile and optionally print its original column names."""
+    """Load one household profile."""
     dataset_source = _resolve_dataset_source(dataset)
 
     if dataset_source.is_dir():
