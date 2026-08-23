@@ -51,7 +51,6 @@ moc_za_mesec = _MOC.moc_za_mesec
 # fallback -- so every path settles against the same agreed-power tables.
 dogovorjena_moc_operaterja = _MOC.dogovorjena_moc_operaterja
 administrativna_moc = _MOC.administrativna_moc
-minimalna_dogovorjena_moc = _MOC.minimalna_dogovorjena_moc
 referencno_okno = _MOC.referencno_okno
 zaokrozi_moc = _MOC.zaokrozi_moc
 PRIKLJUCNE_MOCI_KW = _MOC.PRIKLJUCNE_MOCI_KW
@@ -79,24 +78,29 @@ BILL_PARTS = _INVOICE.BILL_PARTS
 INVOICE_DECIMALS = _INVOICE.INVOICE_DECIMALS
 
 # --- Bills for the real meter exports in `Input data/Poraba doma/` ---------
-# Loaded last on purpose: `si_poraba_doma` does `from Pricing_Functions import
-# ...`, which resolves to THIS module while it is still executing, so every name
-# it needs has to be bound above this line.
-_HOME = _load("_household_profile_impl", "si_poraba_doma.py")
+# Loaded on first use rather than at import: `si_poraba_doma` registers its ET
+# reading of the GEN-I redni cenik into `PAKETI`, and the catalogue sweeps in
+# `Horizon_Comparison` would otherwise pick it up as one more price list --
+# duplicating the `GENI_REDNI@1T` option they already derive for themselves.
+_HOME = None
+_HOME_NAMES = frozenset({
+    "Household", "HOUSEHOLDS", "RACUNI_MOCI", "household_names",
+    "get_household", "unconfigured_folders", "opis_prikljucka",
+    "load_profile", "verify_blocks", "konice_v_oknu",
+    "agreed_power_by_year", "agreed_power_schedule", "validate_agreed_power",
+    "AgreedPower", "invoice_household", "InvoiceResult",
+})
 
-Household = _HOME.Household
-HOUSEHOLDS = _HOME.HOUSEHOLDS
-RACUNI_MOCI = _HOME.RACUNI_MOCI
-household_names = _HOME.household_names
-get_household = _HOME.get_household
-unconfigured_folders = _HOME.unconfigured_folders
-opis_prikljucka = _HOME.opis_prikljucka
-load_profile = _HOME.load_profile
-verify_blocks = _HOME.verify_blocks
-konice_v_oknu = _HOME.konice_v_oknu
-agreed_power_by_year = _HOME.agreed_power_by_year
-agreed_power_schedule = _HOME.agreed_power_schedule
-validate_agreed_power = _HOME.validate_agreed_power
-AgreedPower = _HOME.AgreedPower
-invoice_household = _HOME.invoice_household
-InvoiceResult = _HOME.InvoiceResult
+
+def __getattr__(name):
+    """Resolve the `si_poraba_doma` surface on first access (PEP 562)."""
+    global _HOME
+    if name in _HOME_NAMES:
+        if _HOME is None:
+            _HOME = _load("_household_profile_impl", "si_poraba_doma.py")
+        return getattr(_HOME, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(set(globals()) | _HOME_NAMES)
