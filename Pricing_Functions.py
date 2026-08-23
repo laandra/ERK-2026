@@ -1,13 +1,4 @@
-"""Root-level import shim.
-
-`Environment.py`, `MILP_Benchmark.py` and `multi_household_tools.py` import
-pricing functions from the repo root (`from Pricing_Functions import
-calculate_interval_price`), but the actual implementation lives in
-`New pricing functions/Pricing_Functions.py` (a directory name with a space,
-which can't be imported as a normal Python package). This shim loads that file
-directly via `importlib` and re-exports the surface used from outside that
-folder.
-"""
+"""Import shim re-exporting `New pricing functions/` under a package-safe name."""
 import importlib.util
 import sys
 from pathlib import Path
@@ -40,26 +31,19 @@ SUPPORTED_SCHEMES = _PRICING.SUPPORTED_SCHEMES
 SCHEME_SI_DOBAVA = _PRICING.SCHEME_SI_DOBAVA
 SCHEME_SI_SAMOOSKRBA = _PRICING.SCHEME_SI_SAMOOSKRBA
 
-# The price-list catalogue and the VAT rate, so a caller can read a package's
-# own rates (e.g. the NET-metering supplier energy price a MILP has to settle
-# annually) without reaching past this shim into the spaced folder.
 PAKETI = _PRICING.PAKETI
 DDV = _PRICING.DDV
 TipCene = _PRICING.TipCene
 TipOdkupa = _PRICING.TipOdkupa
 
-# --- Agreed billing power (dogovorjena obracunska moc) ---------------------
-# The per-block kW vector both the network power charge and the excess-power
-# charge are measured against; `si_moc` owns the regulatory bounds on it.
+# --- Agreed billing power (dogovorjena obracunska moc), per-block kW -------
 PRIKLJUCNA_MOC_3X16A_KW = _MOC.PRIKLJUCNA_MOC_3X16A_KW
 minimalna_dogovorjena_moc = _MOC.minimalna_dogovorjena_moc
 uskladi_bloke = _MOC.uskladi_bloke
 dogovorjena_moc_iz_konic = _MOC.dogovorjena_moc_iz_konic
 mesecni_razpored_moci = _MOC.mesecni_razpored
 oznaka_razporeda_moci = _MOC.oznaka_razporeda
-# Accepts either shape -- one flat {block: kW} vector or a {month: {block: kW}}
-# schedule -- so every settlement path can take a household that re-sets its
-# agreed power monthly and one that pinned it, without branching.
+# Both shapes are accepted: {block: kW} and {month: {block: kW}}.
 je_mesecni_razpored = _MOC.je_mesecni_razpored
 moc_za_mesec = _MOC.moc_za_mesec
 

@@ -63,7 +63,7 @@ scenariji = [
     ("BREZ_ORGANIZATORJA", "GENI_SAMO_REDNI",  "GENI_REDNI"),
     ("GENI_SOUPORABA",     "GENI_SAMO_REDNI",  "GENI_REDNI"),
     ("GENI_SOUPORABA",     "GENI_SAMO_AKTIVNI","GENI_AKTIVNI"),
-    ("PETROL_SOUPORABA",   "PETROL_SAMOOSKRBA","PETROL_REDNI"),
+    ("PETROL_SOUPORABA",   "PETROL_SAMO_MESECNI","PETROL_REDNI"),
     ("BREZ_ORGANIZATORJA", "BISOL_SAMO_DINAMICNA", "BISOL_DINAMICNI"),
     # Elektro energija samooskrbe ne ponuja -> lahko je le PREJEMNIK, oddajnik
     # pa je pri drugem dobavitelju (souporaba med dobavitelji je dovoljena).

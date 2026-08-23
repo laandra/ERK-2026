@@ -43,31 +43,19 @@ def _dogovorjena_moc(default_kw: float) -> Dict[int, float]:
 
 
 def _mesec_id(ts) -> int:
-    """Absolute calendar-month id (year*12 + month - 1) in Slovenian local time --
-    the key an agreed-power schedule is on."""
+    """Absolute month id (year*12 + month - 1), Slovenian local time."""
     return resolve_reset_window_id(ts, 1)
 
 
 def _moc_ob(dogovorjena, ts) -> Dict[int, float]:
-    """The agreed power in force at `ts`.
-
-    `dogovorjena` is either one flat {block: kW} vector -- a household that
-    pinned its dogovorjena obracunska moc -- or a {month id: {block: kW}}
-    schedule for one that re-sets it every month. Flat vectors are returned
-    unchanged, so both kinds of member settle through the same loop.
-    """
+    """The agreed power in force at `ts`; flat {block: kW} vectors pass through."""
     if not je_mesecni_razpored(dogovorjena):
         return dogovorjena
     return moc_za_mesec(dogovorjena, _mesec_id(ts))
 
 
 def _mean_block_kw(dogovorjena, blok: int) -> float:
-    """One block's agreed power as a single number, for reporting columns.
-
-    A monthly schedule is averaged over its months -- there is no single agreed
-    power to report once the contract changes twelve times a year, and the mean
-    is at least the figure the annual power charge is proportional to.
-    """
+    """One block's agreed power as a single number, averaged over the months."""
     if not dogovorjena:
         return float("nan")
     if not je_mesecni_razpored(dogovorjena):
@@ -77,8 +65,7 @@ def _mean_block_kw(dogovorjena, blok: int) -> float:
 
 
 def _moc_callable(dogovorjena):
-    """InvoiceBuilder-shaped accessor: f(leto, mesec) -> {block: kW}, or the flat
-    vector itself when there is nothing to look up."""
+    """InvoiceBuilder-shaped accessor f(leto, mesec) -> {block: kW}."""
     if not je_mesecni_razpored(dogovorjena):
         return dogovorjena
     return lambda leto, mesec: moc_za_mesec(dogovorjena, leto * 12 + mesec - 1)
@@ -100,23 +87,10 @@ def run_interval_scenario(
     contracted_power_map: Optional[Dict[str, Dict[int, float]]] = None,
     collect_flows: bool = True,
 ) -> Dict[str, Any]:
-    """Run a no-optimization baseline over multiple households.
+    """No-optimization baseline over multiple households, priced per interval.
 
-    Pricing is computed interval-by-interval with the same dispatcher used by
-    the environment. Invoicing is generated separately for each household and
-    then aggregated to a group view.
-
-    `scheme_map`, `paket_id_map` and `contracted_power_map` override the scalar
-    `scheme` / `paket_id` / `contracted_power_kw` per household. A mixed group
-    needs them: a samooskrba price list requires a PV device (`zahteva_pv`), so
-    households without one must be priced on the supplier's plain supply list
-    inside the very same scenario.
-
-    `collect_flows=False` skips the per-interval flow table, which is one row
-    per household per interval and does not fit comfortably in memory for a
-    community of tens of households over a year. The community net-import
-    profile is accumulated either way, so nothing needed for the group peak or
-    the duration curve is lost.
+    The `*_map` arguments override the scalar scheme / paket_id / contracted
+    power per household, which a group mixing PV and non-PV members needs.
     """
     if not household_data:
         raise ValueError("household_data cannot be empty.")
@@ -130,10 +104,8 @@ def run_interval_scenario(
     component_rows = []
     household_line_items: Dict[str, list] = {}
 
-    # Community net position per interval, accumulated across households.
-    # Accumulated POSITIONALLY as numpy arrays, not by adding pandas Series:
-    # the Fluvius files record the DST fall-back hour twice, so the index has
-    # duplicate labels and Series arithmetic would try to align on them.
+    # Accumulated positionally: the Fluvius index has duplicate DST labels, so
+    # Series arithmetic would try to align on them.
     community_index = next(iter(household_data.values())).index
     community_import_kwh = np.zeros(len(community_index), dtype=float)
     community_export_kwh = np.zeros(len(community_index), dtype=float)
@@ -167,15 +139,12 @@ def run_interval_scenario(
         power_eur = 0.0
         fixed_eur = 0.0
         credit_eur = 0.0
-        # VAT-inclusive charge per billing item (energija, omreznina_*, dajatve,
-        # ...), so the bill can also be read by who is paid rather than only by
-        # decision-dependence. Items sum to energy + power + fixed + credit.
+        # VAT-inclusive charge per billing item; items sum to
+        # energy + power + fixed + credit.
         components: Dict[str, float] = {}
         peak_import_kw = 0.0
         hours_per_interval = interval_minutes / 60.0
 
-        # Vectorized once, then iterated -- df.iterrows() re-boxes every row and
-        # dominates the runtime at community scale.
         gen_arr = df[generation_column].to_numpy(dtype=float) * pv_scale
         con_arr = df[consumption_column].to_numpy(dtype=float)
         smp_arr = df["SMP"].to_numpy(dtype=float)
@@ -287,10 +256,8 @@ def run_interval_scenario(
     summary_df = pd.DataFrame(summary_rows)
     flow_df = pd.DataFrame(flow_rows)
 
-    # The group peak is the COINCIDENT peak of the summed net import, not the
-    # sum of the individual peaks -- the households do not peak at the same
-    # instant. The billed power charge still uses the individual peaks; this
-    # figure describes the community's grid connection.
+    # Coincident peak of the summed net import, not the sum of the individual
+    # peaks: it describes the connection, not the billed power charge.
     interval_hours = float(summary_df["interval_minutes"].iloc[0]) / 60.0
     community_profile = pd.DataFrame(
         {
@@ -484,17 +451,8 @@ def _souporaba_participants(
     prejemnik_paket_id: str,
     mesec_id: Optional[int] = None,
 ) -> Dict[str, Dict]:
-    """Build the `udelezenci` mapping `obracun_souporabe` expects.
-
-    Every sender shares with every receiver in equal parts. `delitev` weights
-    are normalized inside `obracun_souporabe`, so equal weights are enough.
-
-    `mesec_id` is the absolute month being settled. A household whose
-    `dogovorjena_map` entry is a monthly schedule gets that month's vector; one
-    that pinned a flat vector gets it unchanged either way. `obracun_souporabe`
-    settles one month at a time, so the participants have to be rebuilt per
-    month rather than once for the period.
-    """
+    """The `udelezenci` mapping for one settled month, every sender to every
+    receiver in equal parts."""
     def _moc(hid):
         entry = dogovorjena_map[hid]
         return entry if mesec_id is None else moc_za_mesec(entry, mesec_id)
@@ -552,15 +510,8 @@ def run_souporaba_period_scenario(
 ) -> Dict[str, Any]:
     """Souporaba settlement over the whole period, month by month.
 
-    `obracun_souporabe` settles one calendar month at a time -- the monthly
-    power charge, the OVE/SPTE contribution and the excess-power penalty all
-    reset monthly, so a year cannot be settled in one call. This runs every
-    (year, month) present in the index and sums the resulting `Racun` objects
-    per household.
-
-    Unlike `run_souporaba_monthly_scenario` this takes *many* senders.
-    `obracun_souporabe` has always supported that; only the wrapper was
-    restrictive.
+    The power charge, the OVE/SPTE contribution and the excess-power penalty all
+    reset monthly, so a year cannot be settled in one call.
     """
     oddajnik_ids = [str(i) for i in oddajnik_ids]
     prejemnik_ids = [str(i) for i in prejemnik_ids]
@@ -591,8 +542,7 @@ def run_souporaba_period_scenario(
     )
 
     def participants_for(year: int, month: int):
-        """The `udelezenci` mapping for one settled month. Rebuilt per month
-        because the agreed billing power changes on the 1st."""
+        """The `udelezenci` mapping for one settled month."""
         return _souporaba_participants(
             oddajnik_ids,
             prejemnik_ids,
@@ -603,8 +553,6 @@ def run_souporaba_period_scenario(
             mesec_id=year * 12 + month - 1,
         )
 
-    # Pull every household's series out once; .loc per timestamp per household
-    # is what makes the naive version unusable at community scale.
     consumption = {
         hid: household_data[hid][consumption_column].to_numpy(dtype=float)
         for hid in all_ids
@@ -622,7 +570,7 @@ def run_souporaba_period_scenario(
         positions[(int(ts.year), int(ts.month))].append(pos)
 
     totals: Dict[str, Dict[str, float]] = {}
-    # VAT-inclusive charge per billing item, same shape as the interval path.
+    # VAT-inclusive charge per billing item.
     component_totals: Dict[str, Dict[str, float]] = {}
     monthly_rows = []
 

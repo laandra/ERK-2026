@@ -82,7 +82,7 @@ for pid in ["GENI_REDNI", "GENI_AKTIVNI", "GENI_DINAMICNI",
 print("\n" + "=" * 70); print("4. SAMOOSKRBA — julij 2026, 6 kWp"); print("=" * 70)
 podatki_pv = profil(2026, 7, kwp=6.0)
 for pid in ["GENI_SAMO_REDNI", "GENI_SAMO_AKTIVNI", "GENI_SAMO_DINAMICNI",
-            "BISOL_SAMO_DINAMICNA", "PETROL_SAMOOSKRBA"]:
+            "BISOL_SAMO_DINAMICNA", "PETROL_SAMO_MESECNI"]:
     p = PAKETI[pid]
     o = MesecniObracun(2026, 7, s_pv, p, strogo=True)
     for ts, kwh, prod, sipx in podatki_pv:

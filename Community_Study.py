@@ -13,31 +13,18 @@ The question is what the community pays as a whole, what its annual peak draw
 is, who the extremes are, and how much of the answer depends on owning a
 battery.
 
-Design notes
-------------
-*Two price lists per scenario, not one.* `si_paketi.preveri_paket` rejects a
-samooskrba list for a household with no PV device (`zahteva_pv`). So each
-scenario runs the self-supply list for the PV owners and the supplier's plain
-supply twin for everyone else. Same supplier, same price family, and every
-combination stays a real offer.
+Each scenario runs the self-supply list for the PV owners and the supplier's
+plain supply twin for everyone else, because `si_paketi.preveri_paket` rejects a
+samooskrba list for a household with no PV device.
 
-*Batteries are dispatched, then settled.* The battery households are optimized
-by the shared perfect-foresight MILP (`MILP_Benchmark.run_milp_benchmark`) and
-the resulting trajectory is handed to the settlement as an equivalent
-(consumption, generation) pair that reproduces its net grid flow exactly. Both
-`si_obracun.samooskrba` and `si_obracun.souporaba_oddajnik` net within the
-interval, so this is exact for the bill -- at the cost of collapsing the
-`lastna_raba_kwh` diagnostic to zero for those members.
+The battery households are dispatched by `MILP_Benchmark.run_milp_benchmark` and
+the trajectory is handed to the settlement as an equivalent (consumption,
+generation) pair reproducing its net grid flow. That is exact for the bill and
+collapses the `lastna_raba_kwh` diagnostic to zero for those members.
 
-*One agreed billing power, two consumers of it.* The dogovorjena obracunska moc
-is not one number but a per-block vector that changes every month, re-set to the
-peak the previous month realized (`agreed_power_schedule`). If the MILP shaved
-against one contract and the settlement billed against another, the excess-power
-charge would be incoherent -- so the dispatch environment is left unpinned,
-which makes it build exactly the schedule the settlement path is handed.
-
-*The solver gap is not re-typed.* It comes from `Horizon_Comparison`, so the
-costs here stay comparable with the horizon study and the battery sizing sweep.
+The agreed billing power is a per-block vector that changes every month, and both
+the dispatch and the settlement read the same schedule. The solver gap comes from
+`Horizon_Comparison` rather than being re-typed.
 """
 
 from __future__ import annotations
@@ -74,17 +61,13 @@ C_RATE = hc.C_RATE
 INVERTER_MAX_KW = hc.INVERTER_MAX_KW
 STEPS_PER_DAY = hc.STEPS_PER_DAY
 
-# A community battery is not modelled yet. The per-member `battery_kwh` field is
-# the hook: give the community one by adding a synthetic member, or by lifting
-# the dispatch to a shared-asset MILP.
+# A community battery is not modelled; the per-member `battery_kwh` field is
+# the hook.
 COMMUNITY_BATTERY_KWH = 0.0
 
-# Agreed billing power (dogovorjena obracunska moc). The same rule the
-# environment uses by default: re-set every month to the peak power the previous
-# month realized in each tariff block, unbounded, leading month bootstrapped from
-# the last complete one. Both the dispatch and the settlement read it, so a
-# member's excess-power charge is minimized against the contract it is billed on.
-# See `agreed_power_schedule`.
+# Agreed billing power: re-set every month to the peak the previous month
+# realized in each block, unbounded, leading month bootstrapped from the last
+# complete one. Both the dispatch and the settlement read it.
 
 # --- Community composition -------------------------------------------------
 # (dataset, household ids, has_pv, ids that get a battery)
@@ -124,8 +107,8 @@ SCENARIOS = {
 SCHEME_PV = "si_samooskrba"
 SCHEME_NONPV = "si_dobava"
 
-# The souporaba scenario reuses the dinamicni dispatch: identical package,
-# identical environment, only the settlement differs.
+# The souporaba scenario reuses the dinamicni dispatch: only the settlement
+# differs.
 DISPATCH_ALIAS = {"souporaba": "dinamicni"}
 
 # --- Souporaba parameters --------------------------------------------------
@@ -133,19 +116,15 @@ SOUPORABA_DELEZ = 0.4
 SOUPORABA_CENA_EUR_KWH = 0.05
 SOUPORABA_SERVICE_ID = "GENI_SOUPORABA"
 
-# Re-exported so the notebook can quote the organizer's monthly fees without
-# reaching into "New pricing functions" itself.
+# Re-exported so the notebook can quote the organizer's monthly fees.
 STORITVE_SOUPORABE = mht.STORITVE_SOUPORABE
 
 # --- Cost categories -------------------------------------------------------
 # Both settlement paths return one VAT-inclusive figure per billing item; this
-# groups the items by WHO is paid. The network share is what a community can
-# argue about with the regulator, the supply share is what it can shop around
-# for, and the levies are neither -- a split the "energy + network / fixed"
-# one cannot show, because the network power charge sits inside "fixed".
+# groups the items by who is paid, which the "energy + network / fixed" split
+# cannot show because the network power charge sits inside "fixed".
 COST_CATEGORIES = {
-    # `energija_souporaba` is energy bought from a neighbour rather than from
-    # the supplier, but it is still energy, not network.
+    # Energy bought from a neighbour is still energy, not network.
     "Supply_EUR": ("energija", "energija_skupnost", "energija_souporaba"),
     "Network_EUR": (
         "omreznina_energija",
@@ -180,7 +159,7 @@ class Member:
     battery_kwh: float
     segment: str
     contracted_power_kw: Dict[int, float] = field(default_factory=dict)
-    # {month id: {block: kW}} -- what actually prices. See agreed_power_schedule.
+    # {month id: {block: kW}} -- what actually prices.
     agreed_power_schedule: Dict[int, Dict[int, float]] = field(default_factory=dict)
 
     @property
@@ -234,14 +213,9 @@ def _mean_agreed_power(schedule: Dict[int, Dict[int, float]]) -> Dict[int, float
 
 def agreed_power_schedule(data: pd.DataFrame) -> Dict[int, Dict[int, float]]:
     """The member's dogovorjena obracunska moc, month by month and block by block.
-
-    Exactly the schedule `HouseholdEnvironment` builds for the same profile --
-    each month agrees the peak the previous month realized in that block, with
-    no floor and no connection-power ceiling, and the leading month bootstrapped
-    from the last complete one. Built here as well so the *settlement* path bills
-    against the identical contract the *dispatch* was optimized under; if the two
-    ever diverged, a member's excess-power charge would be measured against one
-    agreed power and minimized against another.
+    
+    Exactly the schedule `HouseholdEnvironment` builds for the same profile, so
+    the settlement bills against the contract the dispatch was optimized under.
     """
     return agreed_power_schedule_for_profile(
         data,
@@ -253,11 +227,8 @@ def agreed_power_schedule(data: pd.DataFrame) -> Dict[int, Dict[int, float]]:
 
 
 def contracted_power_kw(data: pd.DataFrame) -> Dict[int, float]:
-    """Mean agreed power per block over the year. REPORTING ONLY.
-
-    A single flat vector cannot price anything now that the contract changes
-    monthly -- it exists so the summary table keeps one comparable kW number per
-    household. Everything that bills reads `agreed_power_schedule`.
+    """Mean agreed power per block over the year. Reporting only -- everything that
+    bills reads `agreed_power_schedule`.
     """
     schedule = agreed_power_schedule(data)
     if not schedule:
@@ -284,9 +255,9 @@ def load_community(members=None, verbose=False):
 # ---------------------------------------------------------------------------
 def solver():
     """The whole-period solver, with the study's relative gap and time limit.
-
-    Taken from `Horizon_Comparison` rather than re-typed, so a change there
-    applies here too and the two studies stay comparable.
+    
+    Taken from `Horizon_Comparison` rather than re-typed, so the two studies
+    stay comparable.
     """
     return pulp.PULP_CBC_CMD(
         msg=False,
@@ -317,8 +288,8 @@ def build_env(data, member: Member, scenario: str):
         pricing_scheme=scenario_scheme(member),
         pricing_reference_year=PRICING_REFERENCE_YEAR,
         pricing_options={"paket_id": scenario_paket(scenario, member)},
-        # Deliberately NOT pinned: left to itself the environment builds exactly
-        # the monthly schedule `agreed_power_schedule` hands the settlement path.
+        # Not pinned: left to itself the environment builds exactly the schedule
+        # `agreed_power_schedule` hands the settlement path.
         peak_reset_months=PEAK_RESET_MONTHS,
     )
 
@@ -329,13 +300,12 @@ def dispatch_path(scenario: str, key: str) -> Path:
 
 def effective_profile(df_milp: pd.DataFrame, index) -> pd.DataFrame:
     """MILP trajectory -> the (consumption, generation) pair the settlement sees.
-
-    The result frame does not carry P_buy/P_sell, but the energy balance
-    constraint makes the net grid flow exact:
-
+    
+    The energy balance makes the net grid flow exact:
+    
         gen + P_buy + P_dis == con + P_sell + P_ch + P_spill
         =>  P_buy - P_sell  == con + P_ch + P_spill - gen - P_dis
-
+    
     A positive net is billed as consumption, a negative one as generation. Both
     settlement paths net within the interval, so the bill is unchanged.
     """
@@ -446,12 +416,9 @@ def run_batch_dispatch(members=None, scenarios=None, n_workers=10, force=False):
 
 def align_profiles(profiles):
     """Truncate every member to the shortest history in the group.
-
-    `build_env` follows the repo convention `episode_length = len(data) - 1`, so
-    a dispatched trajectory is one interval shorter than the raw profile it came
-    from. Left alone, battery members would be settled over a different period
-    than everyone else -- a small but real bias, and one that would also corrupt
-    the battery counterfactual. Every member is cut to the common horizon.
+    
+    `episode_length = len(data) - 1`, so a dispatched trajectory is one interval
+    shorter than the raw profile and every member is cut to the common horizon.
     """
     n = min(len(df) for df in profiles.values())
     return {key: (df if len(df) == n else df.iloc[:n]) for key, df in profiles.items()}
@@ -459,9 +426,9 @@ def align_profiles(profiles):
 
 def scenario_profiles(members, data, scenario: str):
     """Per-member profiles as the settlement should see them for this scenario.
-
+    
     Battery members are replaced by their dispatched equivalent; everyone else
-    passes through untouched. All members are then aligned to a common horizon.
+    passes through untouched, and all are aligned to a common horizon.
     """
     dispatch_scenario = DISPATCH_ALIAS.get(scenario, scenario)
     profiles = {}
@@ -483,12 +450,53 @@ def scenario_profiles(members, data, scenario: str):
     return align_profiles(profiles)
 
 
+def dispatch_horizon(members, data, scenario: str) -> int:
+    """How many intervals the battery members were actually dispatched over.
+    
+    Anything that has to be comparable with a dispatched run must be settled over
+    exactly this many intervals; read off the cached files directly.
+    """
+    dispatch_scenario = DISPATCH_ALIAS.get(scenario, scenario)
+    lengths = [len(data[m.key]) for m in members]
+    for member in members:
+        if not member.has_battery:
+            continue
+        path = dispatch_path(dispatch_scenario, member.key)
+        if not path.exists():
+            raise FileNotFoundError(
+                f"No cached dispatch for {member.key} under {dispatch_scenario!r}. "
+                f"Run Community_Study.run_batch_dispatch() first."
+            )
+        with path.open() as handle:
+            lengths.append(sum(1 for _ in handle) - 1)  # minus the header row
+    return min(lengths)
+
+
+def no_battery_profiles(members, data, scenario: str):
+    """The same community with every battery taken out -- the baseline.
+    
+    Same households, load, PV yield, price list and contracted power, cut to
+    `dispatch_horizon` so the two runs are subtractable interval by interval.
+    """
+    horizon = dispatch_horizon(members, data, scenario)
+    return {m.key: data[m.key].iloc[:horizon] for m in members}
+
+
 # ---------------------------------------------------------------------------
 # Settlement
 # ---------------------------------------------------------------------------
-def run_scenario(members, data, scenario: str, collect_flows=False, verbose=True):
-    """Settle the whole community under one scenario."""
-    profiles = scenario_profiles(members, data, scenario)
+def run_scenario(members, data, scenario: str, collect_flows=False, verbose=True,
+                 no_battery=False):
+    """Settle the whole community under one scenario.
+    
+    `no_battery=True` settles the same community with the batteries removed, so
+    the difference between the two runs is the batteries and nothing else.
+    """
+    profiles = (
+        no_battery_profiles(members, data, scenario)
+        if no_battery
+        else scenario_profiles(members, data, scenario)
+    )
     by_key = {m.key: m for m in members}
 
     if scenario == "souporaba":
@@ -549,9 +557,9 @@ def run_scenario(members, data, scenario: str, collect_flows=False, verbose=True
 
 def _community_profile(profiles) -> pd.DataFrame:
     """Community net import/export per interval, summed over members.
-
-    Summed positionally: the Fluvius files record the DST fall-back hour twice,
-    so the index carries duplicate labels and pandas alignment would refuse.
+    
+    Summed positionally: the index carries duplicate DST labels, so pandas
+    alignment would refuse.
     """
     index = next(iter(profiles.values())).index
     imp = np.zeros(len(index), dtype=float)
@@ -579,13 +587,10 @@ def _community_profile(profiles) -> pd.DataFrame:
 
 def _attach_member_columns(summary: pd.DataFrame, by_key, profiles, data=None) -> pd.DataFrame:
     """Add roster attributes so every table can slice by segment/battery.
-
-    Also attaches the household's *actual* load and PV yield, taken from the raw
-    profile rather than the settled one. For a battery member the settled
-    "consumption" is its post-battery net grid import, which differs per
-    scenario -- a fine thing to bill on, but the wrong denominator for a unit
-    price and misleading in a drill-down. `Actual_Load_kWh` is the physical load
-    and is identical across scenarios; `total_consumption_kwh` stays as billed.
+    
+    `Actual_Load_kWh` is the physical load from the raw profile, identical across
+    scenarios -- for a battery member the settled consumption is post-battery net
+    import and is the wrong denominator for a unit price.
     """
     summary = summary.copy()
     interval_hours = 24.0 / STEPS_PER_DAY
@@ -605,8 +610,7 @@ def _attach_member_columns(summary: pd.DataFrame, by_key, profiles, data=None) -
             for h in summary["household_id"]
         ]
 
-    # The souporaba path settles month by month and never sees a peak in kW;
-    # derive it from the same profiles it was settled from.
+    # The souporaba path never sees a peak in kW; derive it from the profiles.
     if "peak_import_kw" not in summary.columns:
         peaks = {}
         for key, df in profiles.items():
@@ -644,14 +648,15 @@ def _attach_member_columns(summary: pd.DataFrame, by_key, profiles, data=None) -
     return summary
 
 
-def run_all_scenarios(members, data, scenarios=None, verbose=True):
+def run_all_scenarios(members, data, scenarios=None, verbose=True, no_battery=False):
     scenarios = scenarios or list(SCENARIOS)
     results = {}
     for scenario in scenarios:
         if verbose:
-            print(f"--- {scenario} ---", flush=True)
+            print(f"--- {scenario}{' (no battery)' if no_battery else ''} ---", flush=True)
         t0 = time.time()
-        results[scenario] = run_scenario(members, data, scenario, verbose=verbose)
+        results[scenario] = run_scenario(members, data, scenario, verbose=verbose,
+                                         no_battery=no_battery)
         if verbose:
             print(f"    settled in {time.time() - t0:.1f}s", flush=True)
     return results
@@ -662,10 +667,9 @@ def run_all_scenarios(members, data, scenarios=None, verbose=True):
 # ---------------------------------------------------------------------------
 def cost_categories(out) -> Dict[str, float]:
     """The community's gross bill grouped by who is paid, VAT included.
-
-    The per-item figures come out of the settlement engines themselves, so an
-    item nobody has mapped yet raises rather than quietly vanishing from the
-    total -- the sum of the categories has to reproduce the gross bill.
+    
+    Per-item figures come out of the settlement engines, so an unmapped item
+    raises rather than vanishing from the total.
     """
     components = out.get("components")
     if components is None or not len(components):
@@ -698,18 +702,10 @@ def community_totals(results) -> pd.DataFrame:
         peak_kw = float(out["community_peak_kw"])
         sum_peaks = float(out["sum_of_individual_peaks_kw"])
 
-        # The two settlement paths report the credit differently, so the split
-        # is normalized to a common "gross bill minus export credit" basis.
-        #
-        #   interval path: samooskrba nets the export WITHIN the interval, so
-        #     the credit is already inside energy_eur and
-        #     energy + power + fixed == total exactly. Gross is total + credit.
-        #   souporaba path: a Racun deducts the credit after VAT, so
-        #     za_placilo == (fiksni + spremenljivi) * 1.22 - dobropis, and the
-        #     parts are ex-VAT and must be grossed up.
-        #
-        # Either way Variable_Gross + Fixed - Credit == Total, which is asserted
-        # by Split_Residual_EUR below.
+        # The two paths report the credit differently -- the interval path nets
+        # it inside energy_eur, a Racun deducts it after VAT -- so both are
+        # normalized to "gross bill minus export credit". Split_Residual_EUR
+        # asserts Variable_Gross + Fixed - Credit == Total.
         if "energy_eur" in group.columns:
             energy = float(group["energy_eur"].iloc[0])
             power = float(group["power_eur"].iloc[0])
@@ -804,9 +800,8 @@ def by_segment(results) -> pd.DataFrame:
 
 def battery_value(results) -> pd.DataFrame:
     """What the battery members pay vs the no-battery members of the same dataset.
-
-    This is a peer comparison, not a counterfactual -- the true counterfactual
-    is `battery_counterfactual`, which re-settles the same households at 0 kWh.
+    
+    A peer comparison; the counterfactual is `battery_counterfactual`.
     """
     df = per_household(results)
     df = df[df["segment"].isin({m.dataset for m in build_community() if m.battery_kwh > 0})]
@@ -822,10 +817,9 @@ def battery_value(results) -> pd.DataFrame:
 
 def battery_counterfactual(members, data, results, scenarios=None) -> pd.DataFrame:
     """Re-settle the battery households with no battery, same everything else.
-
-    This is verification check 4 as well as a result: a 30 kWh battery must
-    never make a household's bill worse. If it does, the contracted-power dicts
-    used by the MILP and by the settlement have diverged.
+    
+    Also verification check 4: a battery must never make a household's bill
+    worse, and if it does the two contracted-power dicts have diverged.
     """
     scenarios = scenarios or [s for s in SCENARIOS if s != "souporaba"]
     battery_members = [m for m in members if m.has_battery]
@@ -834,11 +828,9 @@ def battery_counterfactual(members, data, results, scenarios=None) -> pd.DataFra
 
     rows = []
     for scenario in scenarios:
-        # Cut the no-battery profiles to exactly the horizon the battery run was
-        # settled over, or the counterfactual would be priced over one interval
-        # more than the thing it is compared against.
-        horizon = len(next(iter(scenario_profiles(members, data, scenario).values())))
-        profiles = {m.key: data[m.key].iloc[:horizon] for m in battery_members}
+        # Settled over exactly the horizon the battery run was.
+        baseline = no_battery_profiles(members, data, scenario)
+        profiles = {m.key: baseline[m.key] for m in battery_members}
         out = mht.run_interval_scenario(
             profiles,
             scenario_name=f"{scenario}_nobattery",
@@ -873,10 +865,9 @@ def battery_counterfactual(members, data, results, scenarios=None) -> pd.DataFra
 
 def extremes(results, n=1) -> pd.DataFrame:
     """The cheapest and dearest household in each scenario, with the why.
-
-    The drill-down columns are what makes the answer readable: annual load, PV
-    yield, battery, how far the realized peak sits above the contracted power,
-    and the average price actually paid.
+    
+    Annual load, PV yield, battery, how far the realized peak sits above the
+    contracted power, and the average price actually paid.
     """
     df = per_household(results)
     rows = []
@@ -930,16 +921,11 @@ def peak_day(profiles, key: str, timestamp) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 def check_dispatch_balance(scenario=None, tol=1e-4) -> pd.DataFrame:
     """Sanity-check every cached MILP trajectory.
-
-    The result frame carries no P_buy/P_sell column, so the energy balance
-    cannot be re-derived from it independently -- the net flow is *defined* by
-    that balance in `effective_profile`. What can be checked, and is:
-
-      * the SOC recursion  E[t+1] == E[t] + ch*eta_ch - dis/eta_dis
-      * SOC stays inside [0, capacity]
-      * curtailment never exceeds that interval's own generation
-      * charge and discharge are never simultaneously active
-      * the year closes at the SOC it opened with
+    
+    The net flow is defined by the energy balance in `effective_profile`, so what
+    is checked is the SOC recursion, that SOC stays inside [0, capacity], that
+    curtailment never exceeds the interval's generation, that charge and
+    discharge are never simultaneous, and that the year closes where it opened.
     """
     scenarios = [scenario] if scenario else [s for s in SCENARIOS if s not in DISPATCH_ALIAS]
     rows = []
@@ -972,14 +958,11 @@ def check_dispatch_balance(scenario=None, tol=1e-4) -> pd.DataFrame:
 
 
 def check_souporaba_conservation(out) -> pd.DataFrame:
-    """Shared energy is conserved: what senders transfer, receivers either use
-    or forfeit. Nothing is created and nothing carries forward.
-
-    The tolerance is set by the data, not chosen: `MesecniObracun.zakljuci`
-    rounds every diagnostic to 2 decimals (`round(self._deljeno, 2)`), so each
-    household contributes up to 0.005 kWh of rounding to its side of the
-    balance. The bound is therefore 0.005 x (households on the larger side),
-    plus float slack. A residual above that is a real leak.
+    """Shared energy is conserved: what senders transfer, receivers use or forfeit.
+    
+    `MesecniObracun.zakljuci` rounds every diagnostic to 2 decimals, so each
+    household contributes up to 0.005 kWh of rounding to its side of the balance.
+    A residual above 0.005 x (households on the larger side) is a real leak.
     """
     monthly = out["monthly"]
     rows = []
@@ -1007,16 +990,14 @@ def check_souporaba_conservation(out) -> pd.DataFrame:
 
 
 def check_community_peak(results) -> pd.DataFrame:
-    """The coincident peak can never exceed the sum of the individual peaks,
-    and the reported timestamp must reproduce it."""
+    """The coincident peak can never exceed the sum of the individual peaks."""
     rows = []
     for scenario, out in results.items():
         profile = out["community_profile"]
         series = profile["community_import_kw"]
         peak = float(out["community_peak_kw"])
         at = out["community_peak_at"]
-        # Positional: the DST fall-back hour appears twice in the index, so
-        # .loc[timestamp] can return two rows rather than a scalar.
+        # Positional: the DST fall-back hour appears twice in the index.
         pos = int(np.argmax(series.to_numpy(dtype=float)))
         rows.append(
             {

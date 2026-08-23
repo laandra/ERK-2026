@@ -27,6 +27,13 @@ VIRI (preverjeno 22. 7. 2026):
  [P1] https://www.petrol.si/binaries/content/assets/www/2025/dokumenti-in-obrazci/ee/go/cenik_go-odjem_marec-2025_f1.pdf
  [P2] https://www.petrol.si/binaries/content/assets/www/2026/dokumenti/ee/akcijski-cenik-elektricne-energije-za-gospodinjske-odjemalce-fiks-2026-9.-05.-2026.pdf
  [P3] https://www.petrol.si/za-dom/energenti/samooskrba
+ [P4] https://www.petrol.si/binaries/content/assets/www/2025/dokumenti-in-obrazci/samooskrba/go_cenik_samooskrba_2025.pdf
+      (CENIK ZA SAMOOSKRBO ZA GOSPODINJSKE ODJEMALCE, Ljubljana 6. 3. 2025 —
+       vsebuje OBA samooskrbna cenika: ZSROVE/mesečni in EZ-1/letni)
+ [P5] https://www.petrol.si/binaries/content/assets/www/2024/dokumenti-in-obrazci/ee/samooskrba/spp-individualna-samooskrba-po-zsrove---mesecni-obracun.pdf
+      (SPP individualna samooskrba po ZSROVE, veljavnost od 1. 1. 2025)
+ [P6] https://www.petrol.si/binaries/content/assets/www/2024/dokumenti-in-obrazci/ee/samooskrba/spp-skupnostna-samooskrba-po-zsrove---mesecni-obracun.pdf
+      (SPP SKUPNOSTNA samooskrba po ZSROVE, št. 1.4.0, veljavnost od 15. 11. 2024)
  [E1] https://www.elektro-energija.si/za-dom/dokumenti-in-ceniki
       (redni cenik ZANESLJIVA OSKRBA, DINAMIČNA OSKRBA, ZANESLJIVA OSKRBA –
        FIKSNI, E-popust, dodatek za izbiro vira energije) — preverjeno 29. 7. 2026
@@ -371,15 +378,53 @@ _reg(Paket(
     opombe="12 mesecev zagotovljene cene.",
 ))
 
+# ------------------------------------------------------- PETROL: samooskrba
+# En sam cenik [P4] vsebuje DVA ločena samooskrbna cenika, ki se razlikujeta v
+# prav vsaki postavki. Zato sta tu dva paketa, ne eden:
+#
+#                        ZSROVE / mesečni [P4,P5,P6]   EZ-1 / letni [P4]
+#   shema                Shema.NOVA                    Shema.NET_METERING
+#   velja od             1. 1. 2025                    1. 3. 2025
+#   manki (ET)           0,11995 EUR/kWh               0,12995 EUR/kWh
+#   viški (ET)           0,02995 EUR/kWh               "--" (brez vrednosti)
+#   mes. nadomestilo     0,00 EUR                      1,98 EUR
+#   obračunsko obdobje   koledarski mesec              koledarsko leto
+#   nova soglasja        da                            ne (zaprta shema)
+#
+# Skupno obema: "V samooskrbi se vsa električna energija obračuna samo po ET -
+# enotni tarifi, ki jo števec beleži vsak dan od 0. do 24. ure." [P4] — zato pri
+# NOBENEM od obeh ni VT/MT. Prejšnja različica tega kataloga je pod id
+# PETROL_SAMOOSKRBA nosila cene REDNEGA cenika [P1] (vt/mt/et 0,12795/0,10795/
+# 0,11795) in tip_odkupa=NI, kar ni ustrezalo nobenemu od obeh cenikov.
 _reg(Paket(
-    id="PETROL_SAMOOSKRBA", dobavitelj="Petrol", ime="Samooskrba (brez odkupa presežkov)",
-    vir="[P3]", velja_od=dt.date(2025, 3, 1),
-    tip_cene=TipCene.TARIFNI, tip_odkupa=TipOdkupa.NI,
-    vt=0.12795, mt=0.10795, et=0.11795, mesecno_nadomestilo=1.98,
+    id="PETROL_SAMO_MESECNI", dobavitelj="Petrol",
+    ime="Samooskrba po ZSROVE – mesečni obračun",
+    vir="[P4]", velja_od=dt.date(2025, 1, 1),
+    tip_cene=TipCene.TARIFNI, tip_odkupa=TipOdkupa.FIKSNI,
+    et=0.11995, odkup_fiksni=0.02995,
+    mesecno_nadomestilo=0.0,
     zahteva_pv=True, dovoljuje_pv=True,
-    dovoljene_sheme=(Shema.NOVA, Shema.NET_METERING), dovoljuje_skupnostno=True,
-    opombe="Petrol viškov NE odkupuje in ne omogoča prenosa — oddana energija "
-           "je za odjemalca brez vrednosti.",
+    dovoljene_sheme=(Shema.NOVA,), dovoljuje_skupnostno=True,
+    opombe="Vse po ET; mesečnega nadomestila ni. Za viške se izda dobroimetje, "
+           "ki se odšteje od stroška mankov, ob presežku pa od CELOTNEGA računa "
+           "istega obračunskega obdobja [P5]. Kar ostane, se prenese v naslednje "
+           "mesece, dokler ni poračunano — izplačilo ni mogoče. Velja tudi za "
+           "skupnostno samooskrbo po ZSROVE [P6]: isti cenik in isti dobropis, "
+           "le da se pred netiranjem prevzeti energiji odšteje pripadajoča "
+           "energija po ključu delitve, prav tako v 15-minutnem intervalu.",
+))
+
+_reg(Paket(
+    id="PETROL_SAMO_LETNI", dobavitelj="Petrol",
+    ime="Samooskrba po EZ-1 – letni obračun (NET metering)",
+    vir="[P4]", velja_od=dt.date(2025, 3, 1),
+    tip_cene=TipCene.TARIFNI, tip_odkupa=TipOdkupa.NET_METERING,
+    et=0.12995, mesecno_nadomestilo=1.98,
+    zahteva_pv=True, dovoljuje_pv=True,
+    dovoljene_sheme=(Shema.NET_METERING,), dovoljuje_skupnostno=True,
+    opombe="Zaprto za nova soglasja (soglasja do 31. 12. 2023). Cenik za "
+           "presežno energijo navaja '--': viški se netirajo letno, dobropisa "
+           "zanje ni. Dražji ET od mesečnega cenika in 1,98 EUR nadomestila.",
 ))
 
 # ---------------------------------------------------------- ELEKTRO ENERGIJA
