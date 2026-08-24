@@ -57,6 +57,20 @@ from Pricing_Functions import (
     moc_za_mesec,
 )
 
+# The household half of this model -- the battery, the balance and the ratchet --
+# is the same one `MILP_Household.solve_household` builds; only the settlement
+# below is this module's own.
+from MILP_Household import (
+    HouseholdNames,
+    add_battery_exclusivity,
+    add_excess_power_ratchet,
+    add_grid_exclusivity,
+    add_household_physics,
+    agreed_power_by_month,
+    floor_export_rates,
+    month_calendar,
+)
+
 # The community settlement primitives live in the spaced folder.
 _SI_DIR = Path(__file__).resolve().parent / "New pricing functions"
 if str(_SI_DIR) not in sys.path:
@@ -271,10 +285,7 @@ def solve_community_milp(
     smp = env0.arr_price[horizon]
 
     # Calendar bookkeeping, shared by every member.
-    local_times = [v_lokalni_cas(dates[t]) for t in range(n_steps)]
-    month_key_t = [(lt.year, lt.month) for lt in local_times]
-    months_sorted = sorted(set(month_key_t))
-    month_idx_t = [months_sorted.index(k) for k in month_key_t]
+    _, _, months_sorted, month_idx_t = month_calendar(dates)
 
     senders = [m for m in members if m.is_sender]
     receivers = [m for m in members if not m.is_sender]
@@ -296,16 +307,14 @@ def solve_community_milp(
     for m in members:
         table = paket_rate_table(m.paket_id, dates, smp, interval_minutes, ref_year)
         r_net_full, r_net_shared = network_rate_tables(table["blocks"], ref_year, m.znacilni_primer)
-        # The delivered cost of one imported kWh, VAT included.
+        # The delivered cost of one imported kWh, VAT included. A buyback worth
+        # more than that is an unbounded loop, hence the floor.
         delivered = VAT_FACTOR * (table["energy"] + r_net_full + LEVIES_EUR_PER_KWH)
-        # A buyback worth more than an import costs is an unbounded loop.
-        # Flooring makes the round trip exactly neutral, and curtailment is
-        # free, so the optimum never exports there anyway.
+        r_export, n_floored = floor_export_rates(delivered, table["export"])
         rates[m.member_id] = dict(
             r_energy=table["energy"], blocks=table["blocks"],
             r_net_full=r_net_full, r_net_shared=r_net_shared, delivered=delivered,
-            r_export=np.minimum(table["export"], delivered),
-            n_floored=int(np.sum(table["export"] > delivered)),
+            r_export=r_export, n_floored=n_floored,
         )
 
     # What one shared kWh displaces at the best-placed receiver, ex VAT: under
@@ -337,44 +346,22 @@ def solve_community_milp(
         delivered, r_export, n_floored = rt["delivered"], rt["r_export"], rt["n_floored"]
 
         cap = float(env.battery_capacity_kwh)
-        max_ch = env.max_charge_kwh / env.charge_efficiency
-        max_dis = env.max_discharge_kwh * env.discharge_efficiency
+        soc_target = soc_fraction * cap
+        # `exclusivity="inverter"` keeps the build a pure LP: charging and
+        # discharging at once is bounded by the inverter rating here and
+        # forbidden outright only where the solve turns out to have done it,
+        # in the lazy loop below.
+        hh = add_household_physics(
+            prob, env, n_steps=n_steps, gen=gen, con=con,
+            names=HouseholdNames.for_member(m.member_id),
+            initial_soc_kwh=soc_target, final_soc_kwh=soc_target,
+            exclusivity="inverter", metering_bounds=True,
+        )
+        buy, sell, spill = hh.buy, hh.sell, hh.spill
+        ch, dis, soc = hh.charge, hh.discharge, hh.soc
+        max_ch, max_dis = hh.max_charge_ac, hh.max_discharge_ac
 
-        buy = [pulp.LpVariable(f"buy_{m.member_id}_{t}", lowBound=0) for t in range(n_steps)]
-        sell = [pulp.LpVariable(f"sell_{m.member_id}_{t}", lowBound=0) for t in range(n_steps)]
-        spill = [pulp.LpVariable(f"spill_{m.member_id}_{t}", lowBound=0, upBound=float(gen[t]))
-                 for t in range(n_steps)]
-        if cap > 0:
-            ch = [pulp.LpVariable(f"ch_{m.member_id}_{t}", lowBound=0, upBound=max_ch)
-                  for t in range(n_steps)]
-            dis = [pulp.LpVariable(f"dis_{m.member_id}_{t}", lowBound=0, upBound=max_dis)
-                   for t in range(n_steps)]
-            soc = [pulp.LpVariable(f"soc_{m.member_id}_{t}", lowBound=0, upBound=cap)
-                   for t in range(n_steps + 1)]
-            prob += soc[0] == soc_fraction * cap
-            prob += soc[n_steps] >= soc_fraction * cap
-            inverter_kwh = max(max_ch, max_dis)
-            for t in range(n_steps):
-                prob += soc[t + 1] == soc[t] + ch[t] * env.charge_efficiency - dis[t] / env.discharge_efficiency
-                # One inverter, one rating: charging and discharging cannot sum
-                # to more than the unit can pass. The rest is caught after the
-                # solve.
-                prob += ch[t] + dis[t] <= inverter_kwh
-        else:
-            ch = [0.0] * n_steps
-            dis = [0.0] * n_steps
-            soc = None
-
-        for t in range(n_steps):
-            prob += gen[t] + buy[t] + dis[t] == con[t] + sell[t] + ch[t] + spill[t]
-            # A meter nets import against export inside the interval. These two
-            # inequalities hold at every physical operating point and bound the
-            # LP, which the energy balance alone does not: `buy` and `sell` can
-            # otherwise run away together.
-            prob += sell[t] <= max(gen[t] - con[t], 0.0) + dis[t]
-            prob += buy[t] <= max(con[t] - gen[t], 0.0) + ch[t] + spill[t]
-
-        # Where those two inequalities are not enough. Importing and exporting
+        # Where the metering bounds are not enough. Importing and exporting
         # the same kWh in one interval is normally self-punishing, but a shared
         # kWh can be worth more at the receiver than a bought one costs at the
         # producer -- under community self-supply, with mismatched price lists
@@ -387,59 +374,26 @@ def solve_community_milp(
              + (VAT_FACTOR - 1.0) * p_int < 0.0) & (gen > 0.0))
             if (sharing and m.is_sender) else np.array([], dtype=int))
         for t in exposed:
-            z = pulp.LpVariable(f"bgrid0_{m.member_id}_{t}", cat="Binary")
-            prob += sell[t] <= (float(gen[t]) + max_dis) * z
-            prob += buy[t] <= (float(con[t]) + max_ch + float(gen[t])) * (1 - z)
+            add_grid_exclusivity(
+                prob, buy_t=buy[t], sell_t=sell[t], gen_t=gen[t], con_t=con[t],
+                max_charge_ac=max_ch, max_discharge_ac=max_dis,
+                flag=pulp.LpVariable(f"bgrid0_{m.member_id}_{t}", cat="Binary"),
+            )
         n_upfront_binaries += len(exposed)
 
         # ---- the ratchet excess-power charge, one variable per (block, month).
         # The peak is measured on the METERED import `buy`, which no billing
         # overlay can move.
-        agreed_by_month = {
-            i: moc_za_mesec(env.agreed_power_for_run(start_idx), y * 12 + mo - 1)
-            for i, (y, mo) in enumerate(months_sorted)
-        }
-        seed_peak = env.compute_seed_peak_kw(start_idx)
-        window_ids = env.reset_window_ids[horizon]
-        seed_window = int(window_ids[0])
-        month_window = {}
-        for t in range(n_steps):
-            month_window.setdefault(month_idx_t[t], int(window_ids[t]))
-
-        occurring = sorted({(int(blocks[t]), month_idx_t[t]) for t in range(n_steps)})
-        peak_var = {bm: pulp.LpVariable(f"peak_{m.member_id}_b{bm[0]}_m{bm[1]}", lowBound=0)
-                    for bm in occurring}
-        excess_var = {bm: pulp.LpVariable(f"exc_{m.member_id}_b{bm[0]}_m{bm[1]}", lowBound=0)
-                      for bm in occurring}
-        for t in range(n_steps):
-            prob += peak_var[(int(blocks[t]), month_idx_t[t])] >= buy[t] / hours
-
-        last_var, last_window = {}, {}
-        for (b, mi) in occurring:
-            w = month_window[mi]
-            if b in last_var and last_window[b] == w:
-                prob += peak_var[(b, mi)] >= last_var[b]
-            elif w == seed_window:
-                prob += peak_var[(b, mi)] >= seed_peak.get(b, 0.0)
-            last_var[b] = peak_var[(b, mi)]
-            last_window[b] = w
-            prob += excess_var[(b, mi)] >= peak_var[(b, mi)] - agreed_by_month[mi].get(b, 0.0)
-
-        prev_exc, prev_win = {}, {}
-        for (b, mi) in occurring:
-            y, mo = months_sorted[mi]
-            w = month_window[mi]
-            rate_bm = pravila.omreznina.postavka_moc(b, je_visja_sezona(date(y, mo, 1)))
-            faktor = pravila.omreznina.faktor_presezne_moci
-            if b in prev_exc and prev_win[b] == w:
-                prev_term = prev_exc[b]
-            elif w == seed_window:
-                prev_term = max(0.0, seed_peak.get(b, 0.0) - agreed_by_month[mi].get(b, 0.0))
-            else:
-                prev_term = 0.0
-            obj_terms.append((excess_var[(b, mi)] - prev_term) * rate_bm * faktor)
-            prev_exc[b] = excess_var[(b, mi)]
-            prev_win[b] = w
+        agreed_by_month = agreed_power_by_month(env, start_idx, months_sorted)
+        _, _, ratchet_terms = add_excess_power_ratchet(
+            prob, env, buy,
+            blocks=blocks, month_idx_t=month_idx_t, months_sorted=months_sorted,
+            agreed_by_month=agreed_by_month, start_idx=start_idx, n_steps=n_steps,
+            hours=hours, pravila=pravila,
+            peak_name=f"peak_{m.member_id}_b{{b}}_m{{m}}",
+            excess_name=f"exc_{m.member_id}_b{{b}}_m{{m}}",
+        )
+        obj_terms.extend(ratchet_terms)
 
         # ---- the decision-independent fixed monthly charge, prorated.
         fixed_by_month = {}
@@ -631,13 +585,17 @@ def solve_community_milp(
             st = state[mid]
             z = pulp.LpVariable(f"b{kind}_{mid}_{t}", cat="Binary")
             if kind == "grid":
-                prob += st["sell"][t] <= (float(st["gen"][t]) + st["max_dis"]) * z
-                prob += st["buy"][t] <= (float(st["con"][t]) + st["max_ch"]
-                                         + float(st["gen"][t])) * (1 - z)
+                add_grid_exclusivity(
+                    prob, buy_t=st["buy"][t], sell_t=st["sell"][t],
+                    gen_t=st["gen"][t], con_t=st["con"][t],
+                    max_charge_ac=st["max_ch"], max_discharge_ac=st["max_dis"], flag=z,
+                )
                 st["n_grid_binaries"] += 1
             else:
-                prob += st["ch"][t] <= st["max_ch"] * z
-                prob += st["dis"][t] <= st["max_dis"] * (1 - z)
+                add_battery_exclusivity(
+                    prob, charge_t=st["ch"][t], discharge_t=st["dis"][t],
+                    max_charge_ac=st["max_ch"], max_discharge_ac=st["max_dis"], flag=z,
+                )
                 st["n_battery_binaries"] += 1
             n_binaries += 1
         rounds += 1

@@ -17,7 +17,7 @@ Each scenario runs the self-supply list for the PV owners and the supplier's
 plain supply twin for everyone else, because `si_paketi.preveri_paket` rejects a
 samooskrba list for a household with no PV device.
 
-The battery households are dispatched by `MILP_Benchmark.run_milp_benchmark` and
+The battery households are dispatched by `MILP_Household.solve_household` and
 the trajectory is handed to the settlement as an equivalent (consumption,
 generation) pair reproducing its net grid flow. That is exact for the bill and
 collapses the `lastna_raba_kwh` diagnostic to zero for those members.
@@ -37,12 +37,16 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
-import pulp
 
 import Horizon_Comparison as hc
 import multi_household_tools as mht
-from Environment import HouseholdEnvironment, agreed_power_schedule_for_profile
-from MILP_Benchmark import run_milp_benchmark
+from Environment import agreed_power_schedule_for_profile
+from MILP_Household import (
+    build_household_env,
+    effective_profile as _effective_profile,
+    full_period_solver,
+    solve_household,
+)
 
 # --- Study configuration ---------------------------------------------------
 SMP_COUNTRY_ID = hc.SMP_COUNTRY_ID
@@ -256,41 +260,28 @@ def load_community(members=None, verbose=False):
 def solver():
     """The whole-period solver, with the study's relative gap and time limit.
     
-    Taken from `Horizon_Comparison` rather than re-typed, so the two studies
-    stay comparable.
+    Shared with every other study rather than re-typed, so they stay comparable.
     """
-    return pulp.PULP_CBC_CMD(
-        msg=False,
-        gapRel=hc.FULL_PERIOD_GAP_REL,
-        timeLimit=hc.FULL_PERIOD_TIME_LIMIT_S,
-    )
+    return full_period_solver()
 
 
 def build_env(data, member: Member, scenario: str):
-    capacity_kwh = member.battery_kwh
-    power_kw = min(C_RATE * capacity_kwh, INVERTER_MAX_KW)
-    step_kwh = power_kw * 24.0 / STEPS_PER_DAY
-    return HouseholdEnvironment(
-        dataset=data,
+    """This study's household environment: one member, one scenario.
+
+    The agreed power is deliberately not pinned -- left to itself the
+    environment builds exactly the schedule `agreed_power_schedule` hands the
+    settlement path.
+    """
+    return build_household_env(
+        data,
+        capacity_kwh=member.battery_kwh,
+        scheme=scenario_scheme(member),
+        paket_id=scenario_paket(scenario, member),
+        pricing_reference_year=PRICING_REFERENCE_YEAR,
+        peak_reset_months=PEAK_RESET_MONTHS,
         price_column=PRICE_COLUMN,
         generation_column=GENERATION_COLUMN,
         consumption_column=CONSUMPTION_COLUMN,
-        action_mode="continuous",
-        allow_curtailment=True,
-        reset_mode="deterministic",
-        episode_length=len(data) - 1,
-        steps_per_day=STEPS_PER_DAY,
-        battery_capacity_kwh=capacity_kwh,
-        charge_efficiency=CHARGE_EFFICIENCY,
-        discharge_efficiency=DISCHARGE_EFFICIENCY,
-        max_charge_kwh=step_kwh,
-        max_discharge_kwh=step_kwh,
-        pricing_scheme=scenario_scheme(member),
-        pricing_reference_year=PRICING_REFERENCE_YEAR,
-        pricing_options={"paket_id": scenario_paket(scenario, member)},
-        # Not pinned: left to itself the environment builds exactly the schedule
-        # `agreed_power_schedule` hands the settlement path.
-        peak_reset_months=PEAK_RESET_MONTHS,
     )
 
 
@@ -299,30 +290,11 @@ def dispatch_path(scenario: str, key: str) -> Path:
 
 
 def effective_profile(df_milp: pd.DataFrame, index) -> pd.DataFrame:
-    """MILP trajectory -> the (consumption, generation) pair the settlement sees.
-    
-    The energy balance makes the net grid flow exact:
-    
-        gen + P_buy + P_dis == con + P_sell + P_ch + P_spill
-        =>  P_buy - P_sell  == con + P_ch + P_spill - gen - P_dis
-    
-    A positive net is billed as consumption, a negative one as generation. Both
-    settlement paths net within the interval, so the bill is unchanged.
-    """
-    net = (
-        df_milp["Consumption"].to_numpy(dtype=float)
-        + df_milp["Charge_kW"].to_numpy(dtype=float)
-        + df_milp["Spill_kW"].to_numpy(dtype=float)
-        - df_milp["Generation"].to_numpy(dtype=float)
-        - df_milp["Discharge_kW"].to_numpy(dtype=float)
-    )
-    n = len(net)
-    return pd.DataFrame(
-        {
-            CONSUMPTION_COLUMN: np.maximum(net, 0.0),
-            GENERATION_COLUMN: np.maximum(-net, 0.0),
-        },
-        index=index[:n],
+    """MILP trajectory -> the (consumption, generation) pair the settlement sees."""
+    return _effective_profile(
+        df_milp, index,
+        consumption_column=CONSUMPTION_COLUMN,
+        generation_column=GENERATION_COLUMN,
     )
 
 
@@ -341,7 +313,7 @@ def dispatch_member(member: Member, scenario: str, data=None, force=False, verbo
     env = build_env(data, member, scenario)
     soc = SOC_FRACTION * member.battery_kwh
     t0 = time.time()
-    df_milp = run_milp_benchmark(
+    df_milp = solve_household(
         env,
         initial_soc_kwh=soc,
         final_soc_kwh=soc,

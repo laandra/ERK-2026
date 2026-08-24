@@ -47,8 +47,22 @@ import pandas as pd
 import pulp
 
 import Data_Loader as dl
-from Environment import HouseholdEnvironment
-from MILP_Benchmark import run_milp_benchmark
+# The battery/solver constants are imported to be RE-EXPORTED: Community_Study
+# and both sizing notebooks read them as `hc.<NAME>`, which is the convention
+# that keeps every study solving the same battery to the same gap.
+from MILP_Household import (  # noqa: F401
+    C_RATE,
+    CHARGE_EFFICIENCY,
+    DISCHARGE_EFFICIENCY,
+    FULL_PERIOD_GAP_REL,
+    FULL_PERIOD_TIME_LIMIT_S,
+    INVERTER_MAX_KW,
+    SOC_FRACTION,
+    STEPS_PER_DAY,
+    build_household_env,
+    full_period_solver,
+    solve_household,
+)
 from Pricing_Functions import calculate_interval_price, oznaka_razporeda_moci
 
 # --- Study configuration ---------------------------------------------------
@@ -143,15 +157,11 @@ AGREED_POWER_TAG = oznaka_razporeda_moci(
 LEGACY_AGREED_POWER_TAG = "flat_peak_over_1.5"
 
 BATTERY_CAPACITY_KWH = 30.0
-SOC_FRACTION = 0.5
-CHARGE_EFFICIENCY = 0.95
-DISCHARGE_EFFICIENCY = 0.95
-C_RATE = 0.5
-INVERTER_MAX_KW = 11.0
-
-STEPS_PER_DAY = 96
-FULL_PERIOD_GAP_REL = 0.001
-FULL_PERIOD_TIME_LIMIT_S = 900
+# The battery, horizon and solver settings are `MILP_Household`'s, imported
+# above rather than re-typed: SOC_FRACTION, CHARGE_EFFICIENCY,
+# DISCHARGE_EFFICIENCY, C_RATE, INVERTER_MAX_KW, STEPS_PER_DAY,
+# FULL_PERIOD_GAP_REL and FULL_PERIOD_TIME_LIMIT_S. They are re-exported from
+# here, which is where the other studies read them from.
 
 RESULTS_DIR = Path(__file__).resolve().parent / "Results" / "Horizon_Comparison_Groups"
 
@@ -237,34 +247,30 @@ def load_user(household_id, dataset, country=SMP_COUNTRY_ID):
 
 
 def build_env(data, capacity_kwh=BATTERY_CAPACITY_KWH, tariff=DEFAULT_TARIFF):
+    """This study's household environment: one price list, one capacity.
+
+    The only thing it adds to the shared factory is the agreed-power rule above,
+    which the other studies leave at the environment's own defaults.
+    """
     if tariff not in TARIFFS:
         raise ValueError(f"Unknown tariff {tariff!r}. Known: {', '.join(TARIFF_ORDER)}")
     spec = TARIFFS[tariff]
-    power_kw = min(C_RATE * capacity_kwh, INVERTER_MAX_KW)
-    step_kwh = power_kw * 24.0 / STEPS_PER_DAY
-    return HouseholdEnvironment(
-        dataset=data,
+    return build_household_env(
+        data,
+        capacity_kwh=capacity_kwh,
+        scheme=spec["scheme"],
+        paket_id=spec["paket_id"],
+        pricing_reference_year=PRICING_REFERENCE_YEAR,
+        peak_reset_months=PEAK_RESET_MONTHS,
         price_column=PRICE_COLUMN,
         generation_column=GENERATION_COLUMN,
         consumption_column=CONSUMPTION_COLUMN,
-        action_mode="continuous",
-        allow_curtailment=True,
-        reset_mode="deterministic",
-        episode_length=len(data) - 1,
-        steps_per_day=STEPS_PER_DAY,
-        battery_capacity_kwh=capacity_kwh,
-        charge_efficiency=CHARGE_EFFICIENCY,
-        discharge_efficiency=DISCHARGE_EFFICIENCY,
-        max_charge_kwh=step_kwh,
-        max_discharge_kwh=step_kwh,
-        pricing_scheme=spec["scheme"],
-        pricing_reference_year=PRICING_REFERENCE_YEAR,
-        pricing_options={"paket_id": spec["paket_id"]},
-        peak_reset_months=PEAK_RESET_MONTHS,
-        connection_power_kw=CONNECTION_POWER_KW,
-        min_agreed_power_kw=MIN_AGREED_POWER_KW,
-        agreed_power_lag_months=AGREED_POWER_LAG_MONTHS,
-        agreed_power_bootstrap=AGREED_POWER_BOOTSTRAP,
+        agreed_power=dict(
+            connection_power_kw=CONNECTION_POWER_KW,
+            min_agreed_power_kw=MIN_AGREED_POWER_KW,
+            agreed_power_lag_months=AGREED_POWER_LAG_MONTHS,
+            agreed_power_bootstrap=AGREED_POWER_BOOTSTRAP,
+        ),
     )
 
 
@@ -414,9 +420,8 @@ def run_strategy(env, horizon_kind, execution, soc_mode="fixed50", n_steps=None,
         peak_state = _drop_peak_on_window_start(peak_state, windows, t)
         view.set_peak_state(peak_state)
 
-        plan = run_milp_benchmark(
+        plan = solve_household(
             view,
-            use_discrete_actions=False,
             start_idx=t,
             n_steps=span,
             initial_soc_kwh=soc,
@@ -518,11 +523,8 @@ def run_user(household_id, dataset, tariff=DEFAULT_TARIFF, n_steps=None, strateg
 
     for name in strategies:
         horizon_kind, execution, soc_mode = STRATEGIES[name]
-        solver = (
-            pulp.PULP_CBC_CMD(msg=False, gapRel=FULL_PERIOD_GAP_REL,
-                              timeLimit=FULL_PERIOD_TIME_LIMIT_S)
-            if horizon_kind == "period" else pulp.PULP_CBC_CMD(msg=False)
-        )
+        solver = (full_period_solver() if horizon_kind == "period"
+                  else pulp.PULP_CBC_CMD(msg=False))
         out = run_strategy(env, horizon_kind, execution, soc_mode=soc_mode,
                            n_steps=n_steps, solver=solver)
         traces[name] = (out.pop("_soc_trace"), out.pop("_cost_trace"))
