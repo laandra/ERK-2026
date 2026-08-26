@@ -21,22 +21,28 @@ WORKSPACE_ROOT = _find_workspace_root()
 INPUT_DATA_DIR = WORKSPACE_ROOT / "Input data"
 
 
+def _single_file_datasets() -> dict[str, Path]:
+    """One-profile datasets: the CSVs sitting directly under Input data."""
+    return {path.stem: path for path in sorted(INPUT_DATA_DIR.glob("*.csv"))}
+
+
 def _dataset_dir_map() -> dict[str, Path]:
     dataset_dirs = {
         path.name.lower(): path
         for path in INPUT_DATA_DIR.iterdir()
         if path.is_dir()
     }
+    dataset_dirs.update(
+        {name.lower(): path for name, path in _single_file_datasets().items()}
+    )
     dataset_dirs["greek"] = INPUT_DATA_DIR / "GreekSmartHome.csv"
-    dataset_dirs["greeksmarthome"] = INPUT_DATA_DIR / "GreekSmartHome.csv"
     return dataset_dirs
 
 
 def available_input_datasets() -> List[str]:
     """Dataset names: the folders under Input data, plus the single-file ones."""
     dataset_names = sorted(path.name for path in INPUT_DATA_DIR.iterdir() if path.is_dir())
-    if (INPUT_DATA_DIR / "GreekSmartHome.csv").exists():
-        dataset_names.append("GreekSmartHome")
+    dataset_names.extend(_single_file_datasets())
     return dataset_names
 
 
