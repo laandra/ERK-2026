@@ -67,6 +67,7 @@ from MILP_Household import (
     add_grid_exclusivity,
     add_household_physics,
     agreed_power_by_month,
+    day_calendar,
     floor_export_rates,
     month_calendar,
 )
@@ -330,6 +331,13 @@ def solve_community_milp(
     else:
         displaced = np.zeros(n_steps)
 
+    # Only the daily cycle cap needs it, and walking every stamp through
+    # `v_lokalni_cas` is not free, so it is built once for the whole community
+    # and only when some member actually caps.
+    day_idx_t = None
+    if any(getattr(m.env, "max_daily_cycles", None) is not None for m in members):
+        _, _, day_idx_t = day_calendar(dates)
+
     prob = pulp.LpProblem("Community_Sharing_MILP", pulp.LpMinimize)
     obj_terms = []
     n_upfront_binaries = 0
@@ -355,11 +363,28 @@ def solve_community_milp(
             prob, env, n_steps=n_steps, gen=gen, con=con,
             names=HouseholdNames.for_member(m.member_id),
             initial_soc_kwh=soc_target, final_soc_kwh=soc_target,
-            exclusivity="inverter", metering_bounds=True,
+            exclusivity="inverter", metering_bounds=True, day_idx_t=day_idx_t,
         )
         buy, sell, spill = hh.buy, hh.sell, hh.spill
         ch, dis, soc = hh.charge, hh.discharge, hh.soc
         max_ch, max_dis = hh.max_charge_ac, hh.max_discharge_ac
+
+        # ---- battery wear, a SHADOW PRICE and not a bill item. Same term the
+        # household model carries, kept here so the two models stay comparable:
+        # the validation in Skupnostna_Samooskrba_vs_Souporaba asserts they agree
+        # to < 1e-6 EUR, which only means anything if both price wear alike.
+        # `member_bill` rebuilds every euro from the solved flows, so nothing
+        # here reaches a settlement.
+        rate_efc = getattr(env, "cycle_cost_eur_per_efc", None)
+        nominal_kwh = hh.nominal_capacity_kwh
+        if rate_efc and soc is not None and nominal_kwh > 0:
+            per_stored_kwh = float(rate_efc) / (2.0 * nominal_kwh)
+            obj_terms.extend(
+                per_stored_kwh * (
+                    ch[t] * env.charge_efficiency + dis[t] / env.discharge_efficiency
+                )
+                for t in range(n_steps)
+            )
 
         # Where the metering bounds are not enough. Importing and exporting
         # the same kWh in one interval is normally self-punishing, but a shared

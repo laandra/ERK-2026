@@ -57,7 +57,10 @@ from MILP_Household import (  # noqa: F401
     FULL_PERIOD_GAP_REL,
     FULL_PERIOD_TIME_LIMIT_S,
     INVERTER_MAX_KW,
+    MAX_DAILY_CYCLES,
     SOC_FRACTION,
+    SOC_MAX_FRAC,
+    SOC_MIN_FRAC,
     STEPS_PER_DAY,
     build_household_env,
     full_period_solver,
@@ -160,6 +163,7 @@ BATTERY_CAPACITY_KWH = 30.0
 # The battery, horizon and solver settings are `MILP_Household`'s, imported
 # above rather than re-typed: SOC_FRACTION, CHARGE_EFFICIENCY,
 # DISCHARGE_EFFICIENCY, C_RATE, INVERTER_MAX_KW, STEPS_PER_DAY,
+# MAX_DAILY_CYCLES, SOC_MIN_FRAC, SOC_MAX_FRAC,
 # FULL_PERIOD_GAP_REL and FULL_PERIOD_TIME_LIMIT_S. They are re-exported from
 # here, which is where the other studies read them from.
 
@@ -183,6 +187,12 @@ STRATEGIES = {
     #"full_period_carry": ("period", "block", "carry"),
 }
 
+# The whole-period solve is the benchmark every rolling horizon is scored
+# against, because it is the cheapest bill any of them could reach. That holds
+# only while the objective IS the bill: switch a wear price on
+# (`cycle_cost_eur_per_efc`) and the full-period solve minimises bill + wear
+# instead, so a shorter horizon can post a lower `Cum_Cost` and the regret goes
+# negative. Enable it here only after deciding what the reference should be.
 REFERENCE_STRATEGY = "full_period"
 # Below this the whole-year optimum is not an achievable saving any percentage
 # should be taken of.
@@ -479,7 +489,12 @@ def run_strategy(env, horizon_kind, execution, soc_mode="fixed50", n_steps=None,
         "Import_kWh": import_kwh,
         "Export_kWh": export_kwh,
         "Peak_Import_kW": peak_import_kw,
-        "Equivalent_Full_Cycles": discharged / env.battery_capacity_kwh,
+        # AC-side discharge only, against the NAMEPLATE pack -- the same
+        # denominator `summarize_trajectory` uses for its `EFC_AC_Legacy`, so a
+        # SOC window does not quietly switch this figure to the usable window.
+        "Equivalent_Full_Cycles": discharged / getattr(
+            env, "nominal_capacity_kwh", env.battery_capacity_kwh
+        ),
         "N_Solves": n_solves,
         "SOC_Drift_kWh": soc_drift,
         "Runtime_s": time.time() - t_start,

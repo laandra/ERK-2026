@@ -188,6 +188,11 @@ class HouseholdEnvironment(gym.Env):
         episode_length=None,
         steps_per_day=96,
         battery_capacity_kwh=20.0,
+        nominal_capacity_kwh=None,
+        soc_min_frac=0.0,
+        soc_max_frac=1.0,
+        max_daily_cycles=None,
+        cycle_cost_eur_per_efc=None,
         charge_efficiency=0.95,
         discharge_efficiency=0.95,
         max_charge_kwh=1.5,
@@ -258,7 +263,34 @@ class HouseholdEnvironment(gym.Env):
             raise ValueError("steps_per_day must be > 0")
         self.interval_minutes = 1440.0 / self.steps_per_day
 
+        # `battery_capacity_kwh` is the capacity the PHYSICS sees -- the usable
+        # window. `nominal_capacity_kwh` is the pack on the invoice, which the
+        # two differ by exactly when a SOC window is set. Everything that clamps,
+        # bounds or balances energy reads the usable figure, so a derated pack
+        # needs no further change anywhere; only the economics and the cycle
+        # count against the nameplate care about the difference.
         self.battery_capacity_kwh = float(battery_capacity_kwh)
+        self.nominal_capacity_kwh = (
+            self.battery_capacity_kwh if nominal_capacity_kwh is None
+            else float(nominal_capacity_kwh)
+        )
+        self.soc_min_frac = float(soc_min_frac)
+        self.soc_max_frac = float(soc_max_frac)
+        if not 0.0 <= self.soc_min_frac < self.soc_max_frac <= 1.0:
+            raise ValueError(
+                f"need 0 <= soc_min_frac < soc_max_frac <= 1, got "
+                f"{self.soc_min_frac} / {self.soc_max_frac}"
+            )
+        # Usable-window cycles per local day, and the EUR a full nameplate cycle
+        # costs the MILP objective. Both None means "no envelope, no wear price".
+        self.max_daily_cycles = None if max_daily_cycles is None else float(max_daily_cycles)
+        if self.max_daily_cycles is not None and self.max_daily_cycles <= 0:
+            raise ValueError("max_daily_cycles must be > 0 or None")
+        self.cycle_cost_eur_per_efc = (
+            None if cycle_cost_eur_per_efc is None else float(cycle_cost_eur_per_efc)
+        )
+        if self.cycle_cost_eur_per_efc is not None and self.cycle_cost_eur_per_efc < 0:
+            raise ValueError("cycle_cost_eur_per_efc must be >= 0 or None")
         self.charge_efficiency = float(charge_efficiency)
         self.discharge_efficiency = float(discharge_efficiency)
         for name, eff in (

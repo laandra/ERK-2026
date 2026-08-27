@@ -68,6 +68,24 @@ DISCHARGE_EFFICIENCY = 0.95
 C_RATE = 0.5
 INVERTER_MAX_KW = 11.0
 
+# Operating envelope and wear price. Every default is "no envelope, no wear
+# price", so a study that sets none of them solves exactly what it solved before.
+#
+# The two cycle figures below do NOT share a denominator, deliberately:
+#
+#   MAX_DAILY_CYCLES        counts against the USABLE window. Set it to 2 and the
+#                           pack may be swept soc_min -> soc_max -> soc_min twice,
+#                           after which it neither charges nor discharges again
+#                           that day. It is an operating envelope.
+#   Equivalent_Full_Cycles  counts against the NAMEPLATE pack, so reserving SOC
+#                           headroom reads as a longer life -- the real physics of
+#                           shallow cycling -- and the 6000-EFC rating keeps
+#                           meaning what it has always meant.
+MAX_DAILY_CYCLES = None      # usable-window cycles per LOCAL day; 2.0 is the
+                             # recommended residential Li-ion value
+SOC_MIN_FRAC = 0.0           # unusable reserve at the bottom of the pack
+SOC_MAX_FRAC = 1.0           # unusable headroom at the top
+
 # A whole year at 15-minute resolution is a large MIP; closing the last 0.1 % of
 # the gap costs hours and moves a bill in the hundreds by cents.
 FULL_PERIOD_GAP_REL = 0.001
@@ -112,6 +130,10 @@ def build_household_env(
     episode_length=None,
     contracted_power_kw=None,
     agreed_power=None,
+    soc_min_frac=SOC_MIN_FRAC,
+    soc_max_frac=SOC_MAX_FRAC,
+    max_daily_cycles=MAX_DAILY_CYCLES,
+    cycle_cost_eur_per_efc=None,
 ):
     """The `HouseholdEnvironment` every study solves on.
 
@@ -122,8 +144,20 @@ def build_household_env(
     `connection_power_kw` / `min_agreed_power_kw` / `agreed_power_lag_months` /
     `agreed_power_bootstrap`. Left out, the environment's own defaults apply --
     which is what every study except `Horizon_Comparison` relies on.
+
+    `capacity_kwh` is the NAMEPLATE pack -- what the invoice is for. The SOC
+    window derates it to the usable capacity the physics actually sees, and that
+    is what goes into the environment. The power rating stays on the nameplate:
+    reserving headroom in the cells does not shrink the inverter.
     """
-    step_kwh = step_energy_kwh(capacity_kwh, c_rate, inverter_max_kw, steps_per_day)
+    nominal_kwh = float(capacity_kwh)
+    if not 0.0 <= float(soc_min_frac) < float(soc_max_frac) <= 1.0:
+        raise ValueError(
+            f"need 0 <= soc_min_frac < soc_max_frac <= 1, got "
+            f"{soc_min_frac!r} / {soc_max_frac!r}"
+        )
+    usable_kwh = (float(soc_max_frac) - float(soc_min_frac)) * nominal_kwh
+    step_kwh = step_energy_kwh(nominal_kwh, c_rate, inverter_max_kw, steps_per_day)
     kwargs = dict(
         dataset=data,
         price_column=price_column,
@@ -134,7 +168,12 @@ def build_household_env(
         reset_mode="deterministic",
         episode_length=(len(data) - 1) if episode_length is None else int(episode_length),
         steps_per_day=steps_per_day,
-        battery_capacity_kwh=float(capacity_kwh),
+        battery_capacity_kwh=usable_kwh,
+        nominal_capacity_kwh=nominal_kwh,
+        soc_min_frac=float(soc_min_frac),
+        soc_max_frac=float(soc_max_frac),
+        max_daily_cycles=max_daily_cycles,
+        cycle_cost_eur_per_efc=cycle_cost_eur_per_efc,
         charge_efficiency=charge_efficiency,
         discharge_efficiency=discharge_efficiency,
         max_charge_kwh=step_kwh,
@@ -166,6 +205,40 @@ def month_calendar(dates):
     months_sorted = sorted(set(month_key_t))
     month_idx_t = [months_sorted.index(k) for k in month_key_t]
     return local_times, month_key_t, months_sorted, month_idx_t
+
+
+def day_calendar(dates):
+    """Local-time day bookkeeping for one horizon.
+
+    Returns `(day_key_t, days_sorted, day_idx_t)`, the daily twin of
+    `month_calendar` and for the same reason: the Fluvius stamps carry a `Z`
+    suffix but are Brussels-local, so the day has to be read off `v_lokalni_cas`
+    rather than off the raw index.
+
+    A fixed 96-step stride would be wrong besides. On a calendar year of Fluvius
+    profiles the local days come out 96 intervals long except four: the two DST
+    days (88 on the spring forward, 104 on the autumn back, the hour of the shift
+    compounding with the hour the mislabelled stamps are already off by), and the
+    two horizon edges, where the shift leaves a part-day at each end. A daily
+    budget sliced on a fixed stride would let those borrow from their neighbours.
+    """
+    local_times = [v_lokalni_cas(ts) for ts in dates]
+    day_key_t = [lt.date() for lt in local_times]
+    days_sorted = sorted(set(day_key_t))
+    # A dict, not `list.index`: a full year is 35 040 stamps over 366 days, and
+    # the linear scan `month_calendar` can afford over 12 months is quadratic here.
+    order = {k: i for i, k in enumerate(days_sorted)}
+    day_idx_t = [order[k] for k in day_key_t]
+    return day_key_t, days_sorted, day_idx_t
+
+
+def steps_by_day(day_idx_t, n_days=None):
+    """`day_idx_t` inverted: a list of the step indices belonging to each day."""
+    n_days = (max(day_idx_t) + 1) if n_days is None else int(n_days)
+    groups = [[] for _ in range(n_days)]
+    for t, d in enumerate(day_idx_t):
+        groups[d].append(t)
+    return groups
 
 
 def agreed_power_by_month(env, start_idx, months_sorted, do_not_use_previous_month=False):
@@ -246,7 +319,8 @@ class HouseholdBlock:
     soc: Optional[list]
     max_charge_ac: float
     max_discharge_ac: float
-    capacity_kwh: float
+    capacity_kwh: float          # the usable window, what the physics sees
+    nominal_capacity_kwh: float  # the pack on the invoice
 
 
 def add_household_physics(
@@ -261,6 +335,7 @@ def add_household_physics(
     final_soc_kwh=None,
     exclusivity="binary",
     metering_bounds=False,
+    day_idx_t=None,
 ):
     """Declare one household's variables and physical constraints on `prob`.
 
@@ -278,6 +353,11 @@ def add_household_physics(
     `metering_bounds` adds the two inequalities that hold at every physical
     operating point and bound `buy`/`sell` from running away together. The
     binary branch does not need them; the inverter branch does.
+
+    `day_idx_t` is the per-step local day index from `day_calendar`, and is what
+    `env.max_daily_cycles` is enforced over. It is passed in rather than derived
+    here, the way `month_idx_t` already is for the ratchet, so the physics
+    builder stays free of calendar logic.
 
     The SOC recursion and the energy balance are emitted in ONE loop, so the
     rows interleave per interval. That is arbitrary mathematically and not
@@ -364,10 +444,47 @@ def add_household_physics(
             prob += charge[t] <= max_charge_ac * flags[t]
             prob += discharge[t] <= max_discharge_ac * (1 - flags[t])
 
+    # --- daily cycle cap -----------------------------------------------------
+    # Appended here, after every per-interval row, and never inside the loop
+    # above: the row order decides which of several equally optimal vertices CBC
+    # returns (see the note in this function's docstring), so new rows go at the
+    # end where they cannot reshuffle the existing ones.
+    #
+    # `capacity` is the USABLE window. A cap of 2 therefore buys two sweeps of
+    # soc_min -> soc_max -> soc_min, after which the pack idles for the rest of
+    # the local day. The factor 2 is because one sweep moves `capacity` kWh
+    # through the store in each direction.
+    #
+    # This is store throughput, not a count of round trips -- many shallow cycles
+    # summing to the same energy are equally allowed. That is the standard
+    # formulation and the only one that stays linear; a literal "at most two
+    # round trips" would need per-day binaries on top of the 35 040 already here.
+    max_daily_cycles = getattr(env, "max_daily_cycles", None)
+    if max_daily_cycles is not None and soc is not None and capacity > 0:
+        if day_idx_t is None:
+            raise ValueError(
+                "env.max_daily_cycles is set but day_idx_t was not passed; "
+                "build it with MILP_Household.day_calendar(dates)"
+            )
+        if len(day_idx_t) != n_steps:
+            raise ValueError(
+                f"day_idx_t covers {len(day_idx_t)} steps, the block has {n_steps}"
+            )
+        budget = float(max_daily_cycles) * 2.0 * capacity
+        for steps in steps_by_day(day_idx_t):
+            if not steps:
+                continue
+            prob += pulp.lpSum(
+                charge[t] * env.charge_efficiency
+                + discharge[t] / env.discharge_efficiency
+                for t in steps
+            ) <= budget
+
     return HouseholdBlock(
         buy=buy, sell=sell, spill=spill, charge=charge, discharge=discharge, soc=soc,
         max_charge_ac=max_charge_ac, max_discharge_ac=max_discharge_ac,
         capacity_kwh=capacity,
+        nominal_capacity_kwh=float(getattr(env, "nominal_capacity_kwh", capacity)),
     )
 
 
@@ -526,6 +643,11 @@ def solve_household(
     INTERVAL_MINS = int(round(env.interval_minutes))
 
     _, _, months_sorted, month_idx_t = month_calendar(dates)
+    # Only needed by the daily cycle cap, and walking 35 040 stamps through
+    # `v_lokalni_cas` is not free, so it is built only when the cap is on.
+    day_idx_t = None
+    if getattr(env, "max_daily_cycles", None) is not None:
+        _, _, day_idx_t = day_calendar(dates)
     agreed_by_month = agreed_power_by_month(
         env, start_idx, months_sorted, do_not_use_previous_month=do_not_use_previous_month
     )
@@ -590,7 +712,7 @@ def solve_household(
     block = add_household_physics(
         prob, env, n_steps=N_STEPS, gen=gen, con=con,
         initial_soc_kwh=initial_soc_kwh, final_soc_kwh=final_soc_kwh,
-        exclusivity="binary",
+        exclusivity="binary", day_idx_t=day_idx_t,
     )
     P_buy, P_sell, P_spill = block.buy, block.sell, block.spill
     P_ch, P_dis, E = block.charge, block.discharge, block.soc
@@ -615,6 +737,30 @@ def solve_household(
         prob += E_netted <= pulp.lpSum(P_sell)
         netting_objective_terms.append(-rate_net * E_netted)
 
+    # --- 2b'') Battery wear --------------------------------------------------
+    # A SHADOW PRICE, not a bill item. It exists so the solver weighs degradation
+    # when it decides to cycle, and it must never reach an invoice: `Cum_Cost`
+    # below is rebuilt from the solved flows through `calculate_interval_price`,
+    # so nothing here can leak into it.
+    #
+    # `cycle_cost_eur_per_efc` is what one equivalent full cycle costs -- the
+    # pack price over its rated cycle life (Battery_Economics). One EFC is
+    # `2 * nominal` kWh through the store, hence the divisor.
+    #
+    # Consequence worth knowing: with this on, the objective is no longer the
+    # reported bill, so a full-period solve no longer minimises `Cum_Cost`.
+    cycle_objective_terms = []
+    rate_efc = getattr(env, "cycle_cost_eur_per_efc", None)
+    nominal_kwh = float(getattr(env, "nominal_capacity_kwh", env.battery_capacity_kwh))
+    if rate_efc and E is not None and nominal_kwh > 0:
+        per_stored_kwh = float(rate_efc) / (2.0 * nominal_kwh)
+        cycle_objective_terms = [
+            per_stored_kwh * (
+                P_ch[t] * env.charge_efficiency + P_dis[t] / env.discharge_efficiency
+            )
+            for t in range(N_STEPS)
+        ]
+
     # --- 2c) Objective -------------------------------------------------------
     # `constant_costs` is not here: `fixed_monthly_costs` already carries the
     # same prorated fixed charge, and adding both double-counts it.
@@ -622,7 +768,8 @@ def solve_household(
         P_buy[t] * import_rates[t] - P_sell[t] * export_rates[t]
         + fixed_monthly_costs[t]
         for t in range(N_STEPS)
-    ) + pulp.lpSum(peak_objective_terms) + pulp.lpSum(netting_objective_terms)
+    ) + pulp.lpSum(peak_objective_terms) + pulp.lpSum(netting_objective_terms) \
+      + pulp.lpSum(cycle_objective_terms)
 
     # --- 3) Solve ------------------------------------------------------------
     if verbose:
@@ -711,6 +858,20 @@ def solve_household(
     df_results.attrs["solver_status"] = pulp.LpStatus[prob.status]
     df_results.attrs["export_rate_floored_intervals"] = int(n_export_floored)
 
+    # The envelope this trajectory was solved under, so a cached row can say what
+    # physics produced it rather than leaving it to be inferred from the config
+    # that happens to be loaded when the row is read back.
+    df_results.attrs["nominal_capacity_kwh"] = nominal_kwh
+    df_results.attrs["usable_capacity_kwh"] = float(env.battery_capacity_kwh)
+    df_results.attrs["soc_min_frac"] = float(getattr(env, "soc_min_frac", 0.0))
+    df_results.attrs["soc_max_frac"] = float(getattr(env, "soc_max_frac", 1.0))
+    df_results.attrs["max_daily_cycles"] = getattr(env, "max_daily_cycles", None)
+    df_results.attrs["cycle_cost_eur_per_efc"] = rate_efc
+    # What the shadow price charged, reported so it can be read but never billed.
+    df_results.attrs["cycle_cost_eur"] = (
+        float(pulp.value(pulp.lpSum(cycle_objective_terms))) if cycle_objective_terms else 0.0
+    )
+
     # Booked once on the closing interval, so Cum_Cost.iloc[-1] is the bill for
     # the whole horizon.
     df_results["Netting_Credit_EUR"] = 0.0
@@ -790,6 +951,7 @@ def summarize_trajectory(
     blocks=None,
     tariff_blocks=None,
     efc_convention="store",
+    nominal_capacity_kwh=None,
 ):
     """Per-run energy and power metrics from one solved trajectory.
 
@@ -801,6 +963,16 @@ def summarize_trajectory(
     `Equivalent_Full_Cycles` counts is `efc_convention`: "store" measures energy
     through the store, charge and discharge averaged with the efficiencies
     applied, and "ac" repeats the legacy AC-side figure.
+
+    `capacity_kwh` is the USABLE window and `nominal_capacity_kwh` the pack on
+    the invoice; they differ only when a SOC window is set, and default to being
+    the same. The two cycle figures divide by different ones on purpose:
+
+        Equivalent_Full_Cycles   nameplate -- what the 6000-EFC rating and the
+                                 service life are quoted against, so a narrower
+                                 window reads as a longer life
+        EFC_Usable               the usable window -- what `max_daily_cycles`
+                                 constrains, so a cap can be checked from here
     """
     if efc_convention not in ("store", "ac"):
         raise ValueError(f"efc_convention must be 'store' or 'ac', got {efc_convention!r}")
@@ -812,13 +984,20 @@ def summarize_trajectory(
     )
     grid_charged = np.maximum(df["Charge_kW"].to_numpy(dtype=float) - pv_surplus, 0.0)
 
+    usable_kwh = float(capacity_kwh)
+    nominal_kwh = usable_kwh if nominal_capacity_kwh is None else float(nominal_capacity_kwh)
+
     # Energy moved through the STORE, not through the inverter.
     stored_in_kwh = charged * charge_efficiency
     stored_out_kwh = discharged / discharge_efficiency
-    efc = (stored_in_kwh + stored_out_kwh) / (2.0 * capacity_kwh) if capacity_kwh > 0 else 0.0
+    stored_kwh = stored_in_kwh + stored_out_kwh
+    efc = stored_kwh / (2.0 * nominal_kwh) if nominal_kwh > 0 else 0.0
+    efc_usable = stored_kwh / (2.0 * usable_kwh) if usable_kwh > 0 else 0.0
 
     out = {
-        "Capacity_kWh": float(capacity_kwh),
+        "Capacity_kWh": float(nominal_kwh),
+        "Usable_Capacity_kWh": usable_kwh,
+        "EFC_Usable": efc_usable * annualize,
         "Cost_EUR": float(df["Cum_Cost"].iloc[-1]) * annualize,
         "Charged_kWh": charged * annualize,
         "Discharged_kWh": discharged * annualize,
@@ -828,7 +1007,7 @@ def summarize_trajectory(
         "Export_kWh": float((-net).clip(min=0).sum()) * annualize,
         "Curtailed_kWh": float(df["Spill_kW"].sum()) * annualize,
         "Peak_Import_kW": float(net.max()) / hours_per_step,
-        "EFC_AC_Legacy": (discharged * annualize / capacity_kwh) if capacity_kwh > 0 else 0.0,
+        "EFC_AC_Legacy": (discharged * annualize / nominal_kwh) if nominal_kwh > 0 else 0.0,
     }
     out["Equivalent_Full_Cycles"] = (
         efc * annualize if efc_convention == "store" else out["EFC_AC_Legacy"]

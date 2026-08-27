@@ -7,4 +7,6 @@ Ausgrid_2010_2013_Orange_Combined.csv
 
 # Python bytecode
 __pycache__/
+New pricing functions/__pycache__/
+
 *.pyc
