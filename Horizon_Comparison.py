@@ -27,10 +27,14 @@ trajectory has actually set.
 The excess-power peak and the agreed billing power both reset every calendar
 month (`PEAK_RESET_MONTHS`, `AGREED_POWER_TAG`). The agreed power is unbounded --
 the regulatory floor and the connection-power ceiling both need a connection
-agreement the profiles do not carry -- and is derived from the NO-BATTERY profile
-so it stays exogenous to the dispatch. The first month has no predecessor and
-`AGREED_POWER_BOOTSTRAP = "cyclic"` gives it the last complete month of the same
-dataset.
+agreement the profiles do not carry -- and is derived from the profile the
+DISPATCH achieved, not from the no-battery one: a household whose battery
+flattens its peaks re-agrees its dogovorjena moc down to the flattened figure and
+is then billed against the line it made. `full_period` decides that contract
+inside its own LP, the rolling strategies converge to it, and the no-battery
+reference keeps the no-battery contract, which is its own. The first month has no
+predecessor and `AGREED_POWER_BOOTSTRAP = "cyclic"` gives it the last complete
+month of the same dataset.
 
 The year is always closed: both SOC modes start at 50 % and the final period must
 end at 50 %, so a free-terminal strategy cannot sell off its opening charge and
@@ -47,6 +51,7 @@ import pandas as pd
 import pulp
 
 import Data_Loader as dl
+from Environment import converge_agreed_power
 # The battery/solver constants are imported to be RE-EXPORTED: Community_Study
 # and both sizing notebooks read them as `hc.<NAME>`, which is the convention
 # that keeps every study solving the same battery to the same gap.
@@ -66,7 +71,12 @@ from MILP_Household import (  # noqa: F401
     full_period_solver,
     solve_household,
 )
-from Pricing_Functions import calculate_interval_price, oznaka_razporeda_moci
+from Pricing_Functions import (
+    InvoiceBuilder,
+    calculate_interval_price,
+    invoice_total,
+    oznaka_razporeda_moci,
+)
 
 # --- Study configuration ---------------------------------------------------
 DATASET_GROUPS = [
@@ -136,8 +146,12 @@ PEAK_RESET_TAG = "never" if not PEAK_RESET_MONTHS else f"{PEAK_RESET_MONTHS}m"
 # --- Dogovorjena obracunska moc (agreed billing power) ----------------------
 # The per-block kW vector both the network power charge and the excess-power
 # charge are measured against, re-set every month to the peak power the previous
-# month realized in each block. `Environment._build_agreed_power_schedule` builds
-# it from the no-battery profile, so it stays exogenous to the dispatch.
+# month realized in each block -- measured on the profile the DISPATCH achieved,
+# not on the no-battery one. A household whose battery flattens its peaks
+# re-agrees its dogovorjena moc down to the flattened figure, and the shaver is
+# then billed against the line it created, so the contract is a fixed point of
+# the dispatch rather than an input to it. `Environment.converge_agreed_power`
+# iterates it; `AGREED_POWER_FROM_DISPATCH = False` restores the exogenous rule.
 #
 # No floor and no ceiling: both need a connection agreement the Fluvius profiles
 # do not carry, and assuming one only manufactures excess charges that measure
@@ -148,13 +162,38 @@ AGREED_POWER_LAG_MONTHS = 1       # month M is set from month M-1's peaks
 # How the first month gets a contract, having no predecessor in the data.
 # "cyclic" reads the last complete month of the same dataset.
 AGREED_POWER_BOOTSTRAP = "cyclic"
+# The contract is rolled from the peaks the dispatch achieves, not from the
+# no-battery profile. Every solve costs an outer iteration; see above.
+AGREED_POWER_FROM_DISPATCH = True
+# The operator's statistic: the agreed power is the MEAN of the five highest
+# 15-minute peaks per block, not the single highest [Akt, 12. clen]. Averaging
+# five stops one spike from setting a whole month's power charge, and it puts
+# the realized peak above the contract by construction -- so the excess-power
+# charge gains a floor a repeating profile still pays.
+AGREED_POWER_N_PEAKS = 5
+# How many months back from the lag those peaks are pooled over. 1 reads a
+# single month, which lets the contract chase a dispatch down every month; 12 is
+# the rolling form of the Akt's own Oct(y-2)..Sep(y-1) window. This is the
+# dominant lever on what a shaved peak is worth -- at 1 it buys one month of a
+# lower charge, at 12 a year -- so it is worth running both.
+AGREED_POWER_N_MONTHS_WINDOW = 1
+# `full_period` puts the contract in the LP and solves it exactly at every
+# window setting: the sum-of-k-largest epigraph is one continuous variable per
+# pooled interval and no new binaries, and a full year measured FASTER than the
+# single-peak form it replaced (555 s against 1361 s), so no fallback to the
+# outer fixed-point loop is needed and `full_period` stays a valid lower bound
+# for the rule-based controllers scored against it.
 # Stamped on every result row, like PEAK_RESET_TAG, and derived by the same
-# function the environment uses so the tag cannot drift from the rule.
+# function the environment uses so the tag cannot drift from the rule. Rows
+# priced under the exogenous contract carry a different tag and are dropped.
 AGREED_POWER_TAG = oznaka_razporeda_moci(
     minimalna_moc_kw=MIN_AGREED_POWER_KW,
     prikljucna_moc_kw=CONNECTION_POWER_KW,
     zamik_mesecev=AGREED_POWER_LAG_MONTHS,
     zacetek=AGREED_POWER_BOOTSTRAP,
+    iz_dispecinga=AGREED_POWER_FROM_DISPATCH,
+    st_konic=AGREED_POWER_N_PEAKS,
+    n_months_window=AGREED_POWER_N_MONTHS_WINDOW,
 )
 # What rows without the column were priced under.
 LEGACY_AGREED_POWER_TAG = "flat_peak_over_1.5"
@@ -280,6 +319,9 @@ def build_env(data, capacity_kwh=BATTERY_CAPACITY_KWH, tariff=DEFAULT_TARIFF):
             min_agreed_power_kw=MIN_AGREED_POWER_KW,
             agreed_power_lag_months=AGREED_POWER_LAG_MONTHS,
             agreed_power_bootstrap=AGREED_POWER_BOOTSTRAP,
+            agreed_power_from_dispatch=AGREED_POWER_FROM_DISPATCH,
+            agreed_power_n_peaks=AGREED_POWER_N_PEAKS,
+            agreed_power_n_months_window=AGREED_POWER_N_MONTHS_WINDOW,
         ),
     )
 
@@ -347,16 +389,30 @@ def _drop_peak_on_window_start(peak_state, windows, idx):
 
 
 def no_battery_cost(env, n_steps):
-    """Reference cost of the same household with no battery and no curtailment."""
+    """Reference cost of the same household with no battery and no curtailment.
+
+    Returns `(cost EUR, net grid kWh per interval)`. The trajectory comes back
+    so the baseline can be settled through `settle_statutory` on exactly the
+    same footing as a strategy -- an invoice-based saving has to difference two
+    invoices, not an invoice against a per-interval price.
+
+    Clears any contract a previous dispatch converged onto first: with the agreed
+    power endogenous, the no-battery household is precisely the one whose
+    contract IS the no-battery profile, and billing it under a battery's flatter
+    line would charge it excess power it never caused.
+    """
+    env.clear_achieved_power()
     windows = reset_windows(env, n_steps)
     peak_state = {b: 0.0 for b in _BLOCKS}
     total = 0.0
+    net_trace = np.zeros(n_steps, dtype=float)
     for idx in range(n_steps):
         peak_state = _drop_peak_on_window_start(peak_state, windows, idx)
         net = float(env.arr_consumption[idx] - env.arr_generation[idx])
         cost, _, _, peak_state = price_interval(env, idx, net, peak_state)
         total += cost
-    return total
+        net_trace[idx] = net
+    return total, net_trace
 
 
 # ---------------------------------------------------------------------------
@@ -375,12 +431,72 @@ def _horizon_steps(kind, n_steps):
 def run_strategy(env, horizon_kind, execution, soc_mode="fixed50", n_steps=None,
                  solver=None, verbose=False):
     """Roll one strategy over the horizon and return its executed trajectory.
-    
+
     horizon_kind : "day" | "week" | "month" | "period"
     execution    : "block" (execute everything planned) or "receding" (execute
                    the first interval, then re-plan)
     soc_mode     : "fixed50" (every solve ends at 50 % of capacity) or "carry"
                    (only the final period is pinned)
+
+    With `env.agreed_power_from_dispatch` set, the dogovorjena moc is the one the
+    strategy's own peaks agree to rather than the one its no-battery profile
+    would have. `full_period` gets that exactly: it is a single solve over whole
+    months, so the contract goes into the LP as a variable and comes out optimal
+    (`MILP_Household.add_endogenous_agreed_power`). A rolling strategy cannot --
+    a one-day sub-solve sees one day of a contract that is re-agreed monthly --
+    so the whole roll is repeated instead until the contract it is billed under
+    is the one it sets. That converges but does not optimize, which is the right
+    way round: the rolling horizons are the constrained strategies and
+    `full_period` is the bound they are measured against.
+    """
+    endogenous = bool(getattr(env, "agreed_power_from_dispatch", False))
+    in_lp = (endogenous and horizon_kind == "period" and execution == "block"
+             and env.connection_power_kw is None
+             and bool(getattr(env, "agreed_power_lag_months", None)))
+
+    if in_lp:
+        env.clear_achieved_power()
+        out = _run_strategy_once(env, horizon_kind, execution, soc_mode=soc_mode,
+                                 n_steps=n_steps, solver=solver, verbose=verbose,
+                                 endogenous_agreed_power=True)
+        out["Agreed_Power_Iters"] = 1
+        out["Agreed_Power_Converged"] = True
+        return out
+
+    if endogenous:
+        hours = env.interval_minutes / 60.0
+        spent = {"solves": 0, "seconds": 0.0}
+
+        def _dispatch():
+            out = _run_strategy_once(env, horizon_kind, execution, soc_mode=soc_mode,
+                                     n_steps=n_steps, solver=solver, verbose=verbose)
+            spent["solves"] += out["N_Solves"]
+            spent["seconds"] += out["Runtime_s"]
+            return out, np.maximum(out["_net_trace"], 0.0) / hours
+
+        out, info = converge_agreed_power(env, _dispatch, verbose=verbose)
+        # Every iteration was work done to find this contract, so the cost of the
+        # strategy is all of them and not just the pass that happened to be last.
+        out["N_Solves"] = spent["solves"]
+        out["Runtime_s"] = spent["seconds"]
+        out["Agreed_Power_Iters"] = info["iterations"]
+        out["Agreed_Power_Converged"] = info["converged"]
+        return out
+
+    out = _run_strategy_once(env, horizon_kind, execution, soc_mode=soc_mode,
+                             n_steps=n_steps, solver=solver, verbose=verbose)
+    out["Agreed_Power_Iters"] = 1
+    out["Agreed_Power_Converged"] = True
+    return out
+
+
+def _run_strategy_once(env, horizon_kind, execution, soc_mode="fixed50", n_steps=None,
+                       solver=None, verbose=False, endogenous_agreed_power=False):
+    """One roll of the strategy under the contract currently in force.
+
+    `endogenous_agreed_power` hands the contract to the solve itself, which only
+    a single whole-horizon block can do; every other roll leaves it False and is
+    converged from outside.
     """
     n_steps = int(env.episode_length if n_steps is None else n_steps)
     soc_target = SOC_FRACTION * env.battery_capacity_kwh
@@ -410,6 +526,9 @@ def run_strategy(env, horizon_kind, execution, soc_mode="fixed50", n_steps=None,
     hours = env.interval_minutes / 60.0
     soc_trace = np.empty(n_steps, dtype=float)
     cost_trace = np.empty(n_steps, dtype=float)
+    # The draw this trajectory actually presents to the meter: what the contract
+    # is re-rolled from when the agreed power is endogenous.
+    net_trace = np.zeros(n_steps, dtype=float)
 
     t = 0
     t_start = time.time()
@@ -438,6 +557,7 @@ def run_strategy(env, horizon_kind, execution, soc_mode="fixed50", n_steps=None,
             final_soc_kwh=final_soc,
             solver=solver,
             verbose=False,
+            endogenous_agreed_power=endogenous_agreed_power,
         )
         n_solves += 1
 
@@ -457,6 +577,7 @@ def run_strategy(env, horizon_kind, execution, soc_mode="fixed50", n_steps=None,
 
             soc_trace[idx] = soc
             cost_trace[idx] = cost
+            net_trace[idx] = net
             soc += ch * env.charge_efficiency - dis / env.discharge_efficiency
             # A solve that ended non-optimal would silently drift the state.
             clipped = min(max(soc, 0.0), env.battery_capacity_kwh)
@@ -500,6 +621,7 @@ def run_strategy(env, horizon_kind, execution, soc_mode="fixed50", n_steps=None,
         "Runtime_s": time.time() - t_start,
         "_soc_trace": soc_trace,
         "_cost_trace": cost_trace,
+        "_net_trace": net_trace,
     }
 
 
@@ -529,12 +651,17 @@ def run_user(household_id, dataset, tariff=DEFAULT_TARIFF, n_steps=None, strateg
                   f"peak reset {sorted(peak_reset_tag(done))} / agreed power "
                   f"{sorted(agreed_power_tag(done))} != {PEAK_RESET_TAG} / "
                   f"{AGREED_POWER_TAG}; recomputing from scratch", flush=True)
+    baseline_invoice = float("nan")
     if resumable is not None:
         rows = resumable.to_dict("records")
         baseline = float(resumable["No_Battery_EUR"].iloc[0])
+        if "No_Battery_Invoice_EUR" in resumable:
+            baseline_invoice = float(resumable["No_Battery_Invoice_EUR"].iloc[0])
         strategies = [s for s in strategies if s not in set(resumable["Strategy"])]
     else:
-        baseline = no_battery_cost(env, n_steps)
+        baseline, baseline_net = no_battery_cost(env, n_steps)
+        # Still under the no-battery contract `no_battery_cost` just restored.
+        baseline_invoice, _ = settle_statutory(env, baseline_net, n_steps)
 
     for name in strategies:
         horizon_kind, execution, soc_mode = STRATEGIES[name]
@@ -543,6 +670,15 @@ def run_user(household_id, dataset, tariff=DEFAULT_TARIFF, n_steps=None, strateg
         out = run_strategy(env, horizon_kind, execution, soc_mode=soc_mode,
                            n_steps=n_steps, solver=solver)
         traces[name] = (out.pop("_soc_trace"), out.pop("_cost_trace"))
+        net_trace = out.pop("_net_trace", None)
+        # The contract left in force on `env` is the one this strategy settled
+        # on, so the statutory bill is written against the same line the solve
+        # was billed under.
+        invoice_eur = statutory_excess = float("nan")
+        if net_trace is not None:
+            invoice_eur, statutory_excess = settle_statutory(
+                env, net_trace, len(net_trace)
+            )
         out.update(
             Dataset=str(dataset),
             Household=int(household_id),
@@ -553,9 +689,21 @@ def run_user(household_id, dataset, tariff=DEFAULT_TARIFF, n_steps=None, strateg
             Execution=execution,
             SOC_Mode=soc_mode,
             No_Battery_EUR=baseline,
+            # Each side pays its own bill under its own contract: with the agreed
+            # power endogenous the no-battery household keeps the no-battery
+            # line, and the strategy is billed against the flatter one its own
+            # peaks agreed to.
             Savings_EUR=baseline - out["Cost_EUR"],
             Peak_Reset=PEAK_RESET_TAG,
             Agreed_Power=AGREED_POWER_TAG,
+            # What the household pays, under the statutory excess-power formula.
+            Invoice_EUR=invoice_eur,
+            No_Battery_Invoice_EUR=baseline_invoice,
+            Invoice_Savings_EUR=baseline_invoice - invoice_eur,
+            Excess_Statutory_EUR=statutory_excess,
+            # What the optimizer priced: si_konica's linear ratchet.
+            Excess_Linear_EUR=out["Power_EUR"],
+            Excess_Gap_EUR=statutory_excess - out["Power_EUR"],
         )
         rows.append(out)
         if verbose:
@@ -1070,6 +1218,61 @@ def _consumer_fixed_and_excess(env, option_id, n_steps, import_kwh,
             excess += float(result["power_component_eur"])
             peak_state = dict(result["new_peak_kw"])
     return fixed, excess
+
+
+def settle_statutory(env, net_trace, n_steps):
+    """Bill an executed trajectory the way the INVOICE does, not the way the
+    optimizer prices it. Returns `(za_placilo EUR, presezna moc EUR)`.
+
+    The optimizer's excess-power charge is `si_konica`'s linear
+    `max(0, running peak - agreed)`, because a linear form is the only one a MILP
+    can minimize. The statute is `sqrt(sum of squared exceedances)` per
+    block-month (`si_obracun`), which is never smaller -- the square root of a
+    sum of squares dominates its largest term -- and which grows with the NUMBER
+    of exceedances, not only their size. Under the top-5 rule the realized peak
+    sits above the contract by construction, so exceedances are routine and the
+    gap stops being the rounding error it used to be.
+
+    Both numbers are therefore reported: `Cost_EUR` stays the objective the MILP
+    actually minimized (and the only one the "no rule beats the optimum"
+    invariant may be checked against), while `Invoice_EUR` is what the household
+    pays. `si_invoice.InvoiceBuilder` is the repo's single settlement path, so
+    this bills exactly as the real meter profiles do.
+    """
+    excess = {"eur": 0.0}
+
+    def _on_month(_key, _rows, racun):
+        excess["eur"] += float(racun.postavke.get("omreznina_presezna_moc", 0.0))
+
+    builder = InvoiceBuilder(
+        dogovorjena_moc=lambda leto, mesec: env.agreed_power_kw(leto * 12 + mesec - 1),
+        pricing_scheme=env.pricing_scheme,
+        interval_minutes=env.interval_minutes,
+        run_label="statutory",
+        pricing_reference_year=PRICING_REFERENCE_YEAR,
+        obracunaj_presezno_moc=True,
+        on_month=_on_month,
+    )
+    peak_state = {b: 0.0 for b in _BLOCKS}
+    windows = reset_windows(env, n_steps)
+    for idx in range(n_steps):
+        peak_state = _drop_peak_on_window_start(peak_state, windows, idx)
+        result = calculate_interval_price(
+            smp_market_price_kwh=env.arr_price[idx],
+            total_consumed_kwh=float(net_trace[idx]),
+            utc_date=env.dataset.index[idx],
+            interval_minutes=env.interval_minutes,
+            scheme=env.pricing_scheme,
+            dogovorjena_moc=env.agreed_power_at(idx),
+            prev_peak_kw=peak_state,
+            include_raw=True,
+            **env.pricing_options,
+        )
+        peak_state = dict(result["new_peak_kw"])
+        builder.add_interval(result)
+    builder.finalize()
+    return (sum(invoice_total(rows) for rows in builder.by_month.values()),
+            excess["eur"])
 
 
 def no_pv_tariff_comparison(groups=None, per_group=HOUSEHOLDS_PER_GROUP,

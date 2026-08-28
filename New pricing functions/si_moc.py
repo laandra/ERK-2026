@@ -63,6 +63,8 @@ import math
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, Iterable, Mapping, Optional, Tuple
 
+from si_cas import bloki_v_mesecu, razpored_za_datum
+
 BLOKI = (1, 2, 3, 4, 5)
 
 #: Agreed power is stated to 0.1 kW, on the bill and in the operator's proposal.
@@ -212,6 +214,19 @@ def dogovorjena_moc_operaterja(
     )
 
 
+def povprecje_najvecjih(vrednosti: Iterable[float], st_konic: int = ST_KONIC) -> float:
+    """Mean of the `st_konic` largest values -- the operator's peak statistic. [1]
+
+    Fewer values than `st_konic` averages all of them, which is what a partial
+    reference window gives the operator too. An empty pool is 0.0 kW.
+    """
+    vals = sorted((float(v) for v in vrednosti), reverse=True)
+    if not vals:
+        return 0.0
+    k = min(int(st_konic), len(vals))
+    return sum(vals[:k]) / k
+
+
 def _je_omejen(meja: Optional[float]) -> bool:
     """True if `meja` is a real bound rather than "no limit" (None / inf)."""
     return meja is not None and math.isfinite(float(meja))
@@ -258,6 +273,7 @@ def dogovorjena_moc_iz_konic(
     *,
     minimalna_moc_kw: float = 0.0,
     prikljucna_moc_kw: Optional[float] = None,
+    bloki: Iterable[int] = BLOKI,
 ) -> Dict[int, float]:
     """Agreed power a household would sign given per-block realized peaks [kW].
 
@@ -266,76 +282,147 @@ def dogovorjena_moc_iz_konic(
     floor, the ceiling and the monotonicity rule are applied.
     """
     return uskladi_bloke(konice_kw, minimalna_moc_kw=minimalna_moc_kw,
-                         prikljucna_moc_kw=prikljucna_moc_kw)
+                         prikljucna_moc_kw=prikljucna_moc_kw, bloki=bloki)
 
 
 def mesecni_razpored(
-    konice_po_mesecih: Mapping[int, Mapping[int, float]],
+    konice_po_mesecih: Mapping[int, Mapping[int, Iterable[float]]],
     *,
     minimalna_moc_kw: float = 0.0,
     prikljucna_moc_kw: Optional[float] = None,
     zamik_mesecev: int = 1,
     prenesi_manjkajoce_bloke: bool = True,
-    zacetne_konice: Optional[Mapping[int, float]] = None,
+    zacetne_konice: Optional[Mapping[int, Iterable[float]]] = None,
+    st_konic: int = ST_KONIC,
+    n_months_window: int = 1,
+    razpored: Optional[str] = None,
 ) -> Dict[int, Dict[int, float]]:
-    """Month-by-month agreed power, each month set from an earlier month's peaks.
+    """Month-by-month agreed power, each month set from earlier months' peaks.
 
     `konice_po_mesecih` maps an absolute month id (year*12 + month - 1, the same
-    id `si_konica.reset_window_id(..., 1)` produces) to the per-block peak power
-    realized in that month. Blocks that never occurred in a month are simply
-    absent from its dict — blocks 1 and 5 are seasonal, so every month is
-    missing one of them.
+    id `si_konica.reset_window_id(..., 1)` produces) to the per-block LIST of the
+    highest 15-minute powers realized in that month, largest first. It is a list
+    and not a single peak because the operator's statistic is the mean of the
+    `st_konic` highest [1], and the mean of the five highest over a twelve-month
+    window is NOT the mean of twelve per-month means -- the raw values have to
+    survive per month, be pooled across the window, and be re-topped. Each list
+    must hold at least `st_konic` entries wherever the month has that many
+    intervals in the block; `Environment.monthly_top_peaks_by_block` builds them.
+
+    Only `KONICNI_BLOKI` (1-4) are measured. Block 5 is not read from its own
+    peaks -- the Akt names blocks 1 to 4 -- it comes out of the monotonicity rule
+    in `uskladi_bloke`, which is why a real bill shows P5 == P4. [1]
+
+    EACH MONTH IS CONTRACTED ONLY FOR THE BLOCKS IT IS BILLED FOR. The power
+    charge is `sum over the blocks that occur in the month(agreed kW x rate)`
+    (`si_cas.bloki_v_mesecu`), so a block outside that set carries no charge --
+    and must carry no agreed power either, or the monotonicity rule propagates it
+    into blocks that ARE billed. Blocks 1 and 5 are seasonal, so without this a
+    February block-1 peak, carried forward by `prenesi_manjkajoce_bloke`, would
+    raise the block-2 contract of every low-season month after it -- a winter
+    peak inflating a summer bill. Months therefore map to only their own blocks.
 
     `zamik_mesecev=1` is the rule this study runs: the agreed power in force in
-    month M is the peak of month M-1. The regulation lets a household change the
+    month M is read from month M-1. The regulation lets a household change the
     figure by the 8th with effect from the following month, so a strictly
     implementable version of the same idea is `zamik_mesecev=2`; at 1 the
     household is assumed to act on the previous month's meter reading in the
     same month it closes.
 
+    `n_months_window` is how many months back from the lag the peaks are pooled
+    over. At 1 the contract is read from a single month, which lets it chase a
+    dispatch down every month. At 12 it is the rolling form of what the operator
+    actually does -- the Akt reads a FIXED Oct(y-2)..Sep(y-1) window once a year,
+    so 12 matches its statistic and window length but not its yearly cadence, and
+    a household on the operator's own figure would additionally be exempt from
+    the excess-power charge [3]. The window is the dominant lever on what a
+    shaved peak is worth: at 1 it buys one month of a lower charge, at 12 a year.
+
     `prenesi_manjkajoce_bloke=True` carries the last month in which a block did
-    occur into months where it did not. Without it every November would set its
-    block 1 — the single most expensive block, 3.82301 EUR/kW/month — from an
+    occur into windows where it did not. Without it every November would set its
+    block 1 -- the single most expensive block, 3.82301 EUR/kW/month -- from an
     October in which block 1 does not exist, i.e. to the bare regulatory floor,
     and would then pay an excess charge on nearly every winter peak. The real
-    rule sidesteps this by looking back a full 12 months (Oct..Sep) [1].
+    rule sidesteps this by looking back a full 12 months (Oct..Sep) [1], which is
+    what `n_months_window=12` does directly.
 
     The first `zamik_mesecev` months have no history inside the dataset to read.
-    `zacetne_konice` is the per-block peak vector they use instead -- the meter
-    history the household walked in with. Passing None makes them fall back to
-    their OWN month's peaks, which is the one non-causal choice available: it
-    sets January's contract from January's own outcome, so the leading month can
-    never pay an excess charge and the peak-shaving signal is missing from it.
-    Prefer supplying a real predecessor; `Environment._bootstrap_peak_kw` builds
-    one from the last complete month of the same dataset.
+    `zacetne_konice` is the per-block peak LIST they use instead -- the meter
+    history the household walked in with. It is also pooled into any window that
+    reaches back past the start of the data, so an early month of a rolling
+    twelve-month run is seeded rather than read off a two-month sample. Passing
+    None makes the leading months fall back to their OWN month's peaks, which is
+    the one non-causal choice available: it sets January's contract from
+    January's own outcome, so the leading month can never pay an excess charge
+    and the peak-shaving signal is missing from it. Prefer supplying a real
+    predecessor; `Environment._bootstrap_peak_kw` builds one from the last
+    complete month of the same dataset.
     """
     if int(zamik_mesecev) < 0:
         raise ValueError("zamik_mesecev must be >= 0")
+    if int(n_months_window) < 1:
+        raise ValueError("n_months_window must be >= 1")
+    if int(st_konic) < 1:
+        raise ValueError("st_konic must be >= 1")
 
     meseci = sorted(konice_po_mesecih)
-    zamik = int(zamik_mesecev)
-    razpored: Dict[int, Dict[int, float]] = {}
-    # Seeding the carry-forward history with the bootstrap vector matters once
-    # the floor is removed: a block first billed in month 2 with no observation
-    # behind it would otherwise be agreed at 0 kW and charge every kW as excess.
-    zgodovina: Dict[int, float] = dict(zacetne_konice or {})
-    vkljuceno = 0
+    zamik, okno = int(zamik_mesecev), int(n_months_window)
+    zacetne = {int(b): list(v) for b, v in (zacetne_konice or {}).items()}
+    out: Dict[int, Dict[int, float]] = {}
+
+    def _konice(j: int, b: int) -> list:
+        """The block's peak list in the j-th month of the data, or empty."""
+        return list(konice_po_mesecih[meseci[j]].get(b, ()))
+
+    def _bloki(mesec_id: int) -> Tuple[int, ...]:
+        """The blocks the month is billed for, and so contracted for."""
+        d = _dt.date(int(mesec_id) // 12, int(mesec_id) % 12 + 1, 1)
+        r = razpored_za_datum(d) if razpored is None else razpored
+        return tuple(sorted(bloki_v_mesecu(d.year, d.month, r)))
 
     for i, mesec in enumerate(meseci):
-        ref = i - zamik
-        if ref < 0:
-            vir: Mapping[int, float] = (
-                zacetne_konice if zacetne_konice is not None else konice_po_mesecih[mesec]
-            )
-        else:
-            while vkljuceno <= ref:
-                zgodovina.update(konice_po_mesecih[meseci[vkljuceno]])
-                vkljuceno += 1
-            vir = zgodovina if prenesi_manjkajoce_bloke else konice_po_mesecih[meseci[ref]]
-        razpored[mesec] = dogovorjena_moc_iz_konic(
-            vir, minimalna_moc_kw=minimalna_moc_kw, prikljucna_moc_kw=prikljucna_moc_kw
-        )
-    return razpored
+        zadnji = i - zamik                  # newest month the contract may read
+        prvi = zadnji - okno + 1            # oldest month in the window
+
+        bloki = _bloki(mesec)
+
+        if zadnji < 0:
+            # No in-data predecessor at all: the walked-in meter history is the
+            # whole source, and with none of it the month reads itself.
+            vir = zacetne if zacetne_konice is not None else konice_po_mesecih[mesec]
+            konice = {b: povprecje_najvecjih(vir.get(b, ()), st_konic)
+                      for b in KONICNI_BLOKI if b in bloki}
+            out[mesec] = dogovorjena_moc_iz_konic(
+                konice, minimalna_moc_kw=minimalna_moc_kw,
+                prikljucna_moc_kw=prikljucna_moc_kw, bloki=bloki)
+            continue
+
+        konice: Dict[int, float] = {}
+        for b in KONICNI_BLOKI:
+            if b not in bloki:
+                continue
+            bazen: list = []
+            for j in range(max(prvi, 0), zadnji + 1):
+                bazen.extend(_konice(j, b))
+            if prvi < 0:
+                # The window reaches past the start of the data; the meter
+                # history fills the months that are not there.
+                bazen.extend(zacetne.get(b, ()))
+            if not bazen and prenesi_manjkajoce_bloke:
+                # Seasonal block absent from the whole window: carry the last
+                # month it did occur in, however far back that is.
+                for j in range(zadnji, -1, -1):
+                    bazen = _konice(j, b)
+                    if bazen:
+                        break
+                else:
+                    bazen = list(zacetne.get(b, ()))
+            konice[b] = povprecje_najvecjih(bazen, st_konic)
+
+        out[mesec] = dogovorjena_moc_iz_konic(
+            konice, minimalna_moc_kw=minimalna_moc_kw,
+            prikljucna_moc_kw=prikljucna_moc_kw, bloki=bloki)
+    return out
 
 
 def je_mesecni_razpored(dogovorjena) -> bool:
@@ -385,13 +472,23 @@ def oznaka_razporeda(
     prikljucna_moc_kw: Optional[float],
     zamik_mesecev: Optional[int],
     zacetek: str = "own",
+    iz_dispecinga: bool = False,
+    st_konic: int = ST_KONIC,
+    n_months_window: int = 1,
 ) -> str:
     """Short tag identifying the agreed-power rule a result was priced under.
 
     Stamped onto result rows: a bill computed against a different agreed power
     is a different number, not an older one.
+
+    `iz_dispecinga` marks a contract rolled from the peaks the DISPATCH achieved
+    rather than from the no-battery profile -- a different rule, and one whose
+    bills are not comparable with the exogenous ones.
     """
     meje = oznaka_mej(minimalna_moc_kw, prikljucna_moc_kw)
     if zamik_mesecev is None:
         return f"fixed_{meje}"
-    return f"prev{int(zamik_mesecev)}m_{zacetek}_{meje}"
+    okno = f"{int(n_months_window)}m" if int(n_months_window) != 1 else ""
+    tag = (f"prev{int(zamik_mesecev)}m_top{int(st_konic)}{okno}"
+           f"_{zacetek}_{meje}")
+    return f"{tag}_dispatch" if iz_dispecinga else tag

@@ -212,7 +212,15 @@ def _mean_agreed_power(schedule: Dict[int, Dict[int, float]]) -> Dict[int, float
     """Mean agreed power per block over a schedule. Reporting only."""
     if not schedule:
         return {b: 0.0 for b in _BLOCKS}
-    return {b: sum(v[b] for v in schedule.values()) / len(schedule) for b in _BLOCKS}
+    # A month carries no agreed power in a block it is not billed for, and
+    # counting those months as 0 kW would drag the seasonal blocks (1 and 5)
+    # far below what is ever actually contracted. So the mean is taken over
+    # the months that contract the block, and is 0.0 only if none do.
+    out = {}
+    for b in _BLOCKS:
+        vals = [v[b] for v in schedule.values() if b in v]
+        out[b] = sum(vals) / len(vals) if vals else 0.0
+    return out
 
 
 def agreed_power_schedule(data: pd.DataFrame) -> Dict[int, Dict[int, float]]:
@@ -220,6 +228,11 @@ def agreed_power_schedule(data: pd.DataFrame) -> Dict[int, Dict[int, float]]:
     
     Exactly the schedule `HouseholdEnvironment` builds for the same profile, so
     the settlement bills against the contract the dispatch was optimized under.
+
+    Which profile matters: passed the raw one it is the no-battery contract, and
+    passed the profile a dispatch achieved it is the contract that dispatch
+    re-agreed to. `contracted_power_map` below always passes the achieved one,
+    because that is the household the bill is written for.
     """
     return agreed_power_schedule_for_profile(
         data,
@@ -227,7 +240,21 @@ def agreed_power_schedule(data: pd.DataFrame) -> Dict[int, Dict[int, float]]:
         generation_column=GENERATION_COLUMN,
         steps_per_day=STEPS_PER_DAY,
         pricing_reference_year=PRICING_REFERENCE_YEAR,
+        n_peaks=hc.AGREED_POWER_N_PEAKS,
+        n_months_window=hc.AGREED_POWER_N_MONTHS_WINDOW,
     )
+
+
+def contracted_power_map(profiles) -> Dict[str, Dict[int, Dict[int, float]]]:
+    """Each member's contract, rolled from the profile it actually presents.
+
+    A battery household re-agrees its dogovorjena moc down to the peaks its
+    dispatch leaves at the meter, so the settlement has to read the effective
+    profile, not the raw load behind the inverter. For a member with no battery
+    -- and for every member of a no-battery scenario -- the two are the same
+    profile and this is the no-battery contract, unchanged.
+    """
+    return {key: agreed_power_schedule(df) for key, df in profiles.items()}
 
 
 def contracted_power_kw(data: pd.DataFrame) -> Dict[int, float]:
@@ -237,7 +264,15 @@ def contracted_power_kw(data: pd.DataFrame) -> Dict[int, float]:
     schedule = agreed_power_schedule(data)
     if not schedule:
         return {b: 0.0 for b in _BLOCKS}
-    return {b: sum(v[b] for v in schedule.values()) / len(schedule) for b in _BLOCKS}
+    # A month carries no agreed power in a block it is not billed for, and
+    # counting those months as 0 kW would drag the seasonal blocks (1 and 5)
+    # far below what is ever actually contracted. So the mean is taken over
+    # the months that contract the block, and is 0.0 only if none do.
+    out = {}
+    for b in _BLOCKS:
+        vals = [v[b] for v in schedule.values() if b in v]
+        out[b] = sum(vals) / len(vals) if vals else 0.0
+    return out
 
 
 def load_community(members=None, verbose=False):
@@ -490,7 +525,7 @@ def run_scenario(members, data, scenario: str, collect_flows=False, verbose=True
             organizer_service_id=SOUPORABA_SERVICE_ID,
             oddajnik_paket_id=SCENARIOS[scenario]["pv_paket"],
             prejemnik_paket_id=SCENARIOS[scenario]["nonpv_paket"],
-            contracted_power_map={m.key: m.agreed_power_schedule for m in members},
+            contracted_power_map=contracted_power_map(profiles),
             generation_column=GENERATION_COLUMN,
             consumption_column=CONSUMPTION_COLUMN,
             pricing_reference_year=PRICING_REFERENCE_YEAR,
@@ -517,7 +552,7 @@ def run_scenario(members, data, scenario: str, collect_flows=False, verbose=True
         paket_id=SCENARIOS[scenario]["nonpv_paket"],
         scheme_map={m.key: scenario_scheme(m) for m in members},
         paket_id_map={m.key: scenario_paket(scenario, m) for m in members},
-        contracted_power_map={m.key: m.agreed_power_schedule for m in members},
+        contracted_power_map=contracted_power_map(profiles),
         pricing_reference_year=PRICING_REFERENCE_YEAR,
         generation_column=GENERATION_COLUMN,
         consumption_column=CONSUMPTION_COLUMN,
@@ -810,7 +845,7 @@ def battery_counterfactual(members, data, results, scenarios=None) -> pd.DataFra
             paket_id=SCENARIOS[scenario]["nonpv_paket"],
             scheme_map={m.key: scenario_scheme(m) for m in battery_members},
             paket_id_map={m.key: scenario_paket(scenario, m) for m in battery_members},
-            contracted_power_map={m.key: m.agreed_power_schedule for m in battery_members},
+            contracted_power_map=contracted_power_map(profiles),
             pricing_reference_year=PRICING_REFERENCE_YEAR,
             generation_column=GENERATION_COLUMN,
             consumption_column=CONSUMPTION_COLUMN,

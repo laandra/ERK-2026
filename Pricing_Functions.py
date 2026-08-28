@@ -56,6 +56,7 @@ zaokrozi_moc = _MOC.zaokrozi_moc
 PRIKLJUCNE_MOCI_KW = _MOC.PRIKLJUCNE_MOCI_KW
 ST_KONIC = _MOC.ST_KONIC
 KONICNI_BLOKI = _MOC.KONICNI_BLOKI
+povprecje_najvecjih = _MOC.povprecje_najvecjih
 
 # --- Invoice generation ----------------------------------------------------
 # `si_invoice` is the ONLY invoice generator: every path (RL environment, MILP

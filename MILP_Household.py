@@ -39,13 +39,15 @@ import numpy as np
 import pandas as pd
 import pulp
 
-from Environment import HouseholdEnvironment
+from Environment import HouseholdEnvironment, converge_agreed_power
 from Pricing_Functions import (
     InvoiceBuilder,
     PRIVZETO_REFERENCNO_LETO,
     calculate_interval_price,
     compute_prorated_fixed_charge_eur,
     moc_za_mesec,
+    KONICNI_BLOKI,
+    ST_KONIC,
 )
 
 # The SI tariff primitives live in the spaced folder.
@@ -53,7 +55,7 @@ _SI_DIR = Path(__file__).resolve().parent / "New pricing functions"
 if str(_SI_DIR) not in sys.path:
     sys.path.append(str(_SI_DIR))
 
-from si_cas import je_visja_sezona, v_lokalni_cas  # noqa: E402
+from si_cas import bloki_v_mesecu, je_visja_sezona, v_lokalni_cas  # noqa: E402
 from si_obracun import Pravila  # noqa: E402
 
 
@@ -562,6 +564,7 @@ def add_excess_power_ratchet(
     n_steps,
     hours,
     pravila,
+    agreed_vars=None,
     peak_name="P_peak_b{b}_m{m}",
     excess_name="Excess_b{b}_m{m}",
 ):
@@ -572,8 +575,18 @@ def add_excess_power_ratchet(
     resets to zero. It is measured on the METERED import `buy`, which no billing
     overlay can move.
 
+    `agreed_vars` is `{(block, month): kW}` where the kW may be an LpVariable --
+    the endogenous contract, where the line this month is billed against is set
+    by the peaks the solve itself achieved last month. Left None, the constant
+    `agreed_by_month` is billed against, which is the exogenous rule.
+
     Returns `(peak_vars, excess_vars, objective_terms)`.
     """
+    def agreed(b, m):
+        if agreed_vars is None:
+            return agreed_by_month[m].get(b, 0.0)
+        return agreed_vars[(b, m)]
+
     window_id_arr = env.reset_window_ids[start_idx:start_idx + n_steps]
     seed_peak_kw = env.compute_seed_peak_kw(start_idx)
     seed_window = int(window_id_arr[0])
@@ -613,7 +626,7 @@ def add_excess_power_ratchet(
         last_var_by_block[b] = peak_var[(b, m)]
         last_window_by_block[b] = w
 
-        prob += excess_var[(b, m)] >= peak_var[(b, m)] - agreed_by_month[m].get(b, 0.0)
+        prob += excess_var[(b, m)] >= peak_var[(b, m)] - agreed(b, m)
 
     # Telescoping contribution per (block, month), at each month's own rate.
     objective_terms = []
@@ -628,7 +641,16 @@ def add_excess_power_ratchet(
         if b in prev_excess_by_block and prev_window_by_block[b] == w:
             prev_term = prev_excess_by_block[b]
         elif w == seed_window:
-            prev_term = max(0.0, seed_peak_kw.get(b, 0.0) - agreed_by_month[m].get(b, 0.0))
+            # A max() over a variable would be nonlinear. It never is one: the
+            # seed window is the horizon's first, and the first `lag` months of
+            # an endogenous contract are the constant bootstrap by construction.
+            agreed_seed = agreed(b, m)
+            if isinstance(agreed_seed, pulp.LpVariable):
+                raise ValueError(
+                    "the seed window's agreed power must be a constant; the "
+                    "contract of the horizon's leading month is not a decision."
+                )
+            prev_term = max(0.0, seed_peak_kw.get(b, 0.0) - float(agreed_seed))
         else:
             prev_term = 0.0          # a fresh window pays its own excess in full
 
@@ -637,6 +659,220 @@ def add_excess_power_ratchet(
         prev_window_by_block[b] = w
 
     return peak_var, excess_var, objective_terms
+
+
+# ---------------------------------------------------------------------------
+# The contract as a decision, not an input
+# ---------------------------------------------------------------------------
+_AGREED_BLOCKS = (1, 2, 3, 4, 5)
+
+
+def fixed_charge_coefficients(dates, month_idx_t, months_sorted, interval_minutes,
+                              scheme, pricing_options):
+    """`({(block, month): EUR per agreed kW}, EUR constant)` over the horizon.
+
+    The prorated fixed charge is linear in the agreed power -- a per-block
+    network power rate plus the OVE/SPTE levy on the reference block -- and is
+    the same number for every interval of a month. So it is read off
+    `compute_prorated_fixed_charge_eur` by differencing a unit contract against
+    a zero one, once per month, rather than reimplemented here: whatever the
+    tariff act does to the rates, this follows it.
+    """
+    first_t, counts = {}, {}
+    for t, m in enumerate(month_idx_t):
+        first_t.setdefault(m, t)
+        counts[m] = counts.get(m, 0) + 1
+
+    def fixed(t, moc):
+        return compute_prorated_fixed_charge_eur(
+            dates[t], interval_minutes, scheme=scheme, dogovorjena_moc=moc,
+            **pricing_options,
+        )
+
+    coefficients, constant = {}, 0.0
+    for m, t in first_t.items():
+        zero = fixed(t, {b: 0.0 for b in _AGREED_BLOCKS})
+        constant += zero * counts[m]
+        for b in _AGREED_BLOCKS:
+            unit = fixed(t, {bb: (1.0 if bb == b else 0.0) for bb in _AGREED_BLOCKS})
+            coefficients[(b, m)] = (unit - zero) * counts[m]
+    return coefficients, constant
+
+
+def add_endogenous_agreed_power(
+    prob, env, *, buy, hours, months_sorted, month_idx_t, blocks, dates,
+    interval_minutes, pricing_options, agreed_by_month, n_steps,
+    name="A_agreed_b{b}_m{m}", tau_name="tau_b{b}_m{m}",
+    slack_name="sk_b{b}_m{m}_i{i}",
+):
+    """Make the dogovorjena moc a variable set by the solve's OWN peaks.
+
+    The contract is not exogenous. A household that flattens its profile
+    re-agrees its billing power down the following month, and is then billed --
+    both the network power charge and the excess charge -- against the line it
+    created. Priced as a constant, that feedback is invisible and the solver has
+    no reason to shave anything it is not already paying excess power on.
+
+    So the contract enters the LP as one variable per (block, month), tied to the
+    draw by exactly the rule `si_moc.mesecni_razpored` applies to a measured
+    profile. The operator's statistic is the MEAN OF THE `k` HIGHEST 15-minute
+    peaks per block [Akt, 12. clen], pooled over `n_months_window` months back
+    from the lag, so the binding constraint is
+
+        A[b, m] >= mean of the k largest of {import kW in block b over the
+                                             months m's contract is read from}
+        A[b, m] >= A[b - 1, m]             the Akt's monotonicity across blocks
+        A[b, m] >= min_agreed_power_kw     the regulatory floor
+
+    Only blocks 1-4 are read; block 5 has no peak source and comes out of the
+    monotonicity rule, which is why a real bill shows P5 == P4.
+
+    The mean of the k largest is convex, so `A >= it` is an exact LP:
+
+        sum of k largest of {x_i} == min over tau of [k*tau + sum_i max(0, x_i - tau)]
+
+    which enters as one free `tau` per (block, month) and one non-negative slack
+    per pooled value. `A` carries a positive objective coefficient, so
+    minimizing performs that inner minimization too and the bound is tight -- the
+    solve is still one solve and still the exact optimum, which matters because
+    every rule-based controller is scored against it as a lower bound.
+    See Ogryczak & Tamir, "Minimizing the sum of the k largest functions in
+    linear time", Inf. Proc. Letters 85(3):117-122 (2003); the same construction
+    is better known as Rockafellar & Uryasev's CVaR linearization (2000).
+
+    The leading `lag` months have no in-horizon predecessor and keep the constant
+    bootstrap contract. Returns `(agreed_vars, objective_terms)`; `agreed_vars`
+    maps every (block, month) to a variable or a float and goes on to
+    `add_excess_power_ratchet`.
+    """
+    lag = getattr(env, "agreed_power_lag_months", None)
+    if not lag:
+        raise ValueError("an endogenous contract needs a rolling agreed power "
+                         "(agreed_power_lag_months), not a signed constant.")
+    if env.connection_power_kw is not None:
+        # uskladi_bloke clips at the connection power; as a constraint that is
+        # an upper bound colliding with a lower one, i.e. an infeasible model
+        # for any household that exceeds its own connection.
+        raise ValueError("an endogenous contract with a connection-power ceiling "
+                         "is not modelled; converge it from the outside instead.")
+
+    n_months = len(months_sorted)
+    floor_kw = float(env.min_agreed_power_kw)
+    bootstrap = {int(b): [float(v) for v in vals]
+                 for b, vals in (env.agreed_power_bootstrap_kw or {}).items()}
+    carry = bool(env.agreed_power_carry_missing_blocks)
+    k_peaks = int(getattr(env, "agreed_power_n_peaks", ST_KONIC))
+    window = int(getattr(env, "agreed_power_n_months_window", 1))
+
+    # The intervals of each (block, month), which are the pool the contract is
+    # read from. A block absent from a month has no entry, and the carry rule is
+    # what fills the gap.
+    group_ts = {}
+    for t in range(n_steps):
+        group_ts.setdefault((int(blocks[t]), month_idx_t[t]), []).append(t)
+    months_with_block = {b: sorted(m for (bb, m) in group_ts if bb == b)
+                         for b in _AGREED_BLOCKS}
+
+    # A month is billed `agreed kW x block rate` only for the blocks that occur
+    # in it -- blocks 1 and 5 are seasonal, so every month is missing one. A
+    # block outside that set carries no charge and no excess term, so its
+    # contract variable would be free: unpriced from above, unbounded by
+    # anything that costs money, and able to drag the block above it up through
+    # the monotonicity rule. It is not part of the month's contract, so it is
+    # not a decision either.
+    pravila_moc = Pravila.za_leto(int(pricing_options.get(
+        "pricing_reference_year", PRIVZETO_REFERENCNO_LETO)))
+    billed = {m: set(bloki_v_mesecu(y, mo, pravila_moc.razpored))
+              for m, (y, mo) in enumerate(months_sorted)}
+
+    agreed_vars, variable_months = {}, []
+    for m in range(n_months):
+        if m < lag:
+            for b in _AGREED_BLOCKS:
+                agreed_vars[(b, m)] = float(agreed_by_month[m].get(b, 0.0))
+            continue
+        variable_months.append(m)
+        for b in _AGREED_BLOCKS:
+            agreed_vars[(b, m)] = (
+                pulp.LpVariable(name.format(b=b, m=m), lowBound=floor_kw)
+                if b in billed[m] else 0.0
+            )
+
+    # Monotonicity: block 1 is the most expensive and the agreed power may not
+    # fall as the block index rises. This is also the ONLY thing that sets
+    # block 5, exactly as `uskladi_bloke` does it. The chain runs over the
+    # blocks the month is billed for; a block it is not billed for is not in
+    # its contract and cannot push the others up.
+    for m in variable_months:
+        chain = [b for b in _AGREED_BLOCKS if b in billed[m]]
+        for lower, upper in zip(chain, chain[1:]):
+            prob += agreed_vars[(upper, m)] >= agreed_vars[(lower, m)]
+
+    for m in variable_months:
+        newest = m - lag                    # newest month the contract may read
+        oldest = newest - window + 1        # oldest month in the window
+        for b in KONICNI_BLOKI:
+            if b not in billed[m]:
+                continue
+            pool_ts, pool_const = [], []
+            for j in range(max(oldest, 0), newest + 1):
+                pool_ts.extend(group_ts.get((b, j), ()))
+            if oldest < 0:
+                # The window reaches past the start of the horizon; the meter
+                # history the household walked in with fills the rest.
+                pool_const.extend(bootstrap.get(b, ()))
+            if not pool_ts and not pool_const and carry:
+                # Seasonal block absent from the whole window: carry the last
+                # month it did occur in. Blocks 1 and 5 are seasonal, and
+                # reading November's block 1 off an October that has none would
+                # agree it to the floor and charge every winter peak as excess.
+                for j in range(newest, -1, -1):
+                    if group_ts.get((b, j)):
+                        pool_ts = list(group_ts[(b, j)])
+                        break
+                else:
+                    pool_const = list(bootstrap.get(b, ()))
+
+            size = len(pool_ts) + len(pool_const)
+            if size == 0:
+                continue                    # never measured: floor only
+            k = min(k_peaks, size)
+            terms = [buy[t] * (1.0 / hours) for t in pool_ts] + list(pool_const)
+
+            if k == size:
+                # The whole pool is the top k, so the mean is already linear --
+                # no epigraph, no slacks. Also the only shape in which the
+                # epigraph would be unbounded below (tau -> -inf).
+                prob += k * agreed_vars[(b, m)] >= pulp.lpSum(terms)
+                continue
+
+            tau = pulp.LpVariable(tau_name.format(b=b, m=m), lowBound=None)
+            slacks = []
+            for i, term in enumerate(terms):
+                s = pulp.LpVariable(slack_name.format(b=b, m=m, i=i), lowBound=0)
+                prob += s >= term - tau
+                slacks.append(s)
+            prob += (k * agreed_vars[(b, m)]
+                     >= k * tau + pulp.lpSum(slacks))
+
+    coefficients, constant = fixed_charge_coefficients(
+        dates, month_idx_t, months_sorted, interval_minutes,
+        env.pricing_scheme, pricing_options,
+    )
+    objective_terms = [constant]
+    objective_terms += [coefficients[(b, m)] * agreed_vars[(b, m)]
+                        for m in range(n_months) for b in _AGREED_BLOCKS]
+    return agreed_vars, objective_terms
+
+
+def solved_agreed_power_schedule(env, agreed_vars, months_sorted):
+    """`{month id: {block: kW}}` for the contract the solve settled on."""
+    return {
+        y * 12 + mo - 1: {
+            b: float(_value(agreed_vars[(b, m)])) for b in _AGREED_BLOCKS
+        }
+        for m, (y, mo) in enumerate(months_sorted)
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -656,13 +892,63 @@ def solve_household(
     invoice_output_dir=None,
     invoice_run_label="milp_eval",
     do_not_use_previous_month=False,
+    endogenous_agreed_power=None,
 ):
     """Cost-minimal battery dispatch over one episode, as a per-step DataFrame.
 
     `initial_soc_kwh` / `final_soc_kwh` pin the stored energy at the horizon
     ends; `annual_netting_rate_eur_per_kwh` adds the NET-metering settlement
     credit = rate * min(sum P_buy, sum P_sell) to the objective.
+
+    `endogenous_agreed_power` rolls the dogovorjena moc from the peaks THIS
+    dispatch achieves rather than from the household's no-battery profile. Left
+    at None it follows `env.agreed_power_from_dispatch`, which the study
+    factories set.
+
+    The contract then becomes part of the decision: it enters the LP as one
+    variable per (block, month), tied to the peak variables of the month it is
+    read from (`add_endogenous_agreed_power`), so the solve is still one solve
+    and still the exact optimum -- which matters, because every rule-based
+    controller is scored against it as a lower bound. A household that cannot be
+    modelled that way (a connection-power ceiling) falls back to iterating whole
+    solves to a fixed point instead, which converges but does not optimize.
+
+    The settled contract is left in force on `env`, so a caller that prices the
+    trajectory afterwards bills it against the same line the solve did.
     """
+    if endogenous_agreed_power is None:
+        endogenous_agreed_power = bool(getattr(env, "agreed_power_from_dispatch", False))
+    if endogenous_agreed_power and env.connection_power_kw is not None:
+        # No in-LP form: converge whole solves instead.
+        hours = env.interval_minutes / 60.0
+        kwargs = dict(
+            start_idx=start_idx, n_steps=n_steps, initial_soc_kwh=initial_soc_kwh,
+            final_soc_kwh=final_soc_kwh, problem_name=problem_name, solver=solver,
+            annual_netting_rate_eur_per_kwh=annual_netting_rate_eur_per_kwh,
+            invoice_output_dir=invoice_output_dir, invoice_run_label=invoice_run_label,
+            do_not_use_previous_month=do_not_use_previous_month,
+            endogenous_agreed_power=False,
+        )
+
+        def _dispatch():
+            # The invoice is written once, from the run that is finally reported.
+            df = solve_household(env, verbose=verbose, generate_invoice=False, **kwargs)
+            return df, np.maximum(net_grid_kwh(df), 0.0) / hours
+
+        df, info = converge_agreed_power(
+            env, _dispatch, start_idx=start_idx, verbose=verbose
+        )
+        if generate_invoice:
+            # Re-run under the settled contract, this time writing the invoice.
+            df = solve_household(env, verbose=verbose, generate_invoice=True, **kwargs)
+        df.attrs["agreed_power_iterations"] = info["iterations"]
+        df.attrs["agreed_power_converged"] = info["converged"]
+        return df
+    # A signed constant is not a decision, whatever the flag says.
+    endogenous_agreed_power = bool(endogenous_agreed_power) and bool(
+        getattr(env, "agreed_power_lag_months", None)
+    )
+
     if verbose:
         print("Building MILP Model...")
 
@@ -744,10 +1030,26 @@ def solve_household(
     # --- 2b) Excess-power ratchet --------------------------------------------
     block_arr = env.tariff_blocks[horizon]
     window_id_arr = env.reset_window_ids[horizon]
-    _, _, peak_objective_terms = add_excess_power_ratchet(
+
+    # --- 2b0) The contract, when the solve gets to set it --------------------
+    agreed_vars = None
+    agreed_objective_terms = None
+    # A horizon no longer than the lag has no month whose contract is set inside
+    # it, so there is nothing for the solve to decide.
+    if endogenous_agreed_power and len(months_sorted) > int(env.agreed_power_lag_months):
+        agreed_vars, agreed_objective_terms = add_endogenous_agreed_power(
+            prob, env, buy=P_buy, hours=INTERVAL_MINS / 60.0,
+            months_sorted=months_sorted, month_idx_t=month_idx_t,
+            blocks=block_arr, dates=dates, interval_minutes=INTERVAL_MINS,
+            pricing_options=pricing_options, agreed_by_month=agreed_by_month,
+            n_steps=N_STEPS,
+        )
+
+    peak_var, _, peak_objective_terms = add_excess_power_ratchet(
         prob, env, P_buy,
         blocks=block_arr, month_idx_t=month_idx_t, months_sorted=months_sorted,
-        agreed_by_month=agreed_by_month, start_idx=start_idx, n_steps=N_STEPS,
+        agreed_by_month=agreed_by_month, agreed_vars=agreed_vars,
+        start_idx=start_idx, n_steps=N_STEPS,
         hours=INTERVAL_MINS / 60.0, pravila=pravila_ref,
     )
 
@@ -786,13 +1088,18 @@ def solve_household(
         ]
 
     # --- 2c) Objective -------------------------------------------------------
-    # `constant_costs` is not here: `fixed_monthly_costs` already carries the
-    # same prorated fixed charge, and adding both double-counts it.
+    # `constant_costs` is not here: the fixed-charge terms already carry the same
+    # prorated fixed charge, and adding both double-counts it. With the contract
+    # endogenous the fixed charge is linear in the agreed-power variables rather
+    # than a per-interval constant; it is the same quantity either way, and
+    # `fixed_charge_coefficients` is read off the same pricing function.
+    fixed_terms = (agreed_objective_terms if agreed_objective_terms is not None
+                   else fixed_monthly_costs)
     prob += pulp.lpSum(
         P_buy[t] * import_rates[t] - P_sell[t] * export_rates[t]
-        + fixed_monthly_costs[t]
         for t in range(N_STEPS)
-    ) + pulp.lpSum(peak_objective_terms) + pulp.lpSum(netting_objective_terms) \
+    ) + pulp.lpSum(fixed_terms) \
+      + pulp.lpSum(peak_objective_terms) + pulp.lpSum(netting_objective_terms) \
       + pulp.lpSum(cycle_objective_terms)
 
     # --- 3) Solve ------------------------------------------------------------
@@ -804,6 +1111,18 @@ def solve_household(
 
     if pulp.LpStatus[prob.status] != "Optimal":
         print(f"Warning: Solver ended with status {pulp.LpStatus[prob.status]}")
+
+    # The contract the solve agreed to is what the trajectory is billed under,
+    # here and in anything that prices it afterwards.
+    if agreed_vars is not None:
+        settled = env.agreed_power_schedule
+        settled.update(solved_agreed_power_schedule(env, agreed_vars, months_sorted))
+        env.apply_agreed_power_schedule(settled)
+        agreed_by_month = agreed_power_by_month(
+            env, start_idx, months_sorted,
+            do_not_use_previous_month=do_not_use_previous_month,
+        )
+        agreed_t = [agreed_by_month[month_idx_t[t]] for t in range(N_STEPS)]
 
     # --- 4) Extract ----------------------------------------------------------
     results = []

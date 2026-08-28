@@ -63,6 +63,7 @@ from Pricing_Functions import (
 from MILP_Household import (
     HouseholdNames,
     add_battery_exclusivity,
+    add_endogenous_agreed_power,
     add_excess_power_ratchet,
     add_grid_exclusivity,
     add_household_physics,
@@ -70,6 +71,7 @@ from MILP_Household import (
     day_calendar,
     floor_export_rates,
     month_calendar,
+    solved_agreed_power_schedule,
 )
 
 # The community settlement primitives live in the spaced folder.
@@ -406,30 +408,67 @@ def solve_community_milp(
             )
         n_upfront_binaries += len(exposed)
 
+        # ---- the contract, when this member's own peaks are what set it.
+        # A member that flattens its profile re-agrees its dogovorjena moc down
+        # to the flattened peak the following month; priced as a constant that
+        # feedback is invisible, and both the fixed power charge and the excess
+        # charge below would be measured against a household that no longer
+        # exists. One member's contract is its own -- the sharing key moves
+        # energy between them, not billing power -- so this is per member.
+        #
+        # The contract in force is whatever the member's environment holds:
+        # `run_community_year` registers each month's achieved draw as it goes,
+        # so month M is billed against month M-1's realized peaks. A caller
+        # solving one slice on its own owns that bookkeeping.
+        agreed_vars = agreed_fixed_terms = None
+        if (getattr(env, "agreed_power_from_dispatch", False)
+                and env.connection_power_kw is None
+                and getattr(env, "agreed_power_lag_months", None)
+                and len(months_sorted) > int(env.agreed_power_lag_months)):
+            agreed_vars, agreed_fixed_terms = add_endogenous_agreed_power(
+                prob, env, buy=buy, hours=hours,
+                months_sorted=months_sorted, month_idx_t=month_idx_t,
+                blocks=blocks, dates=dates, interval_minutes=interval_minutes,
+                pricing_options={"paket_id": m.paket_id,
+                                 "pricing_reference_year": ref_year},
+                agreed_by_month=agreed_power_by_month(env, start_idx, months_sorted),
+                n_steps=n_steps,
+                name=f"agreed_{m.member_id}_b{{b}}_m{{m}}",
+                tau_name=f"tau_{m.member_id}_b{{b}}_m{{m}}",
+                slack_name=f"sk_{m.member_id}_b{{b}}_m{{m}}_i{{i}}",
+            )
+
         # ---- the ratchet excess-power charge, one variable per (block, month).
         # The peak is measured on the METERED import `buy`, which no billing
         # overlay can move.
         agreed_by_month = agreed_power_by_month(env, start_idx, months_sorted)
-        _, _, ratchet_terms = add_excess_power_ratchet(
+        peak_var, _, ratchet_terms = add_excess_power_ratchet(
             prob, env, buy,
             blocks=blocks, month_idx_t=month_idx_t, months_sorted=months_sorted,
-            agreed_by_month=agreed_by_month, start_idx=start_idx, n_steps=n_steps,
+            agreed_by_month=agreed_by_month, agreed_vars=agreed_vars,
+            start_idx=start_idx, n_steps=n_steps,
             hours=hours, pravila=pravila,
             peak_name=f"peak_{m.member_id}_b{{b}}_m{{m}}",
             excess_name=f"exc_{m.member_id}_b{{b}}_m{{m}}",
         )
         obj_terms.extend(ratchet_terms)
 
-        # ---- the decision-independent fixed monthly charge, prorated.
-        fixed_by_month = {}
-        for mi, (y, mo) in enumerate(months_sorted):
-            first_t = month_idx_t.index(mi)
-            fixed_by_month[mi] = compute_prorated_fixed_charge_eur(
-                dates[first_t], interval_minutes, scheme=env.pricing_scheme,
-                dogovorjena_moc=agreed_by_month[mi], paket_id=m.paket_id,
-                pricing_reference_year=ref_year,
-            )
-        fixed_total = sum(fixed_by_month[month_idx_t[t]] for t in range(n_steps))
+        # ---- the fixed monthly charge, prorated. Decision-independent only
+        # while the contract is: with it endogenous the charge is linear in the
+        # agreed-power variables, and `fixed_total` is an expression until the
+        # solve gives it a value.
+        if agreed_vars is not None:
+            fixed_total = pulp.lpSum(agreed_fixed_terms)
+        else:
+            fixed_by_month = {}
+            for mi, (y, mo) in enumerate(months_sorted):
+                first_t = month_idx_t.index(mi)
+                fixed_by_month[mi] = compute_prorated_fixed_charge_eur(
+                    dates[first_t], interval_minutes, scheme=env.pricing_scheme,
+                    dogovorjena_moc=agreed_by_month[mi], paket_id=m.paket_id,
+                    pricing_reference_year=ref_year,
+                )
+            fixed_total = sum(fixed_by_month[month_idx_t[t]] for t in range(n_steps))
 
         # ---- the organizer's monthly fee, souporaba only: a taxable item per
         # metering point per month.
@@ -445,6 +484,7 @@ def solve_community_milp(
             spill=spill, r_energy=r_energy, r_export=r_export, r_net_full=r_net_full,
             r_net_shared=r_net_shared, delivered=delivered, blocks=blocks, cap=cap,
             fixed_total=fixed_total, service_fee=service_fee, n_floored=n_floored,
+            agreed_vars=agreed_vars, months_sorted=months_sorted,
             max_ch=max_ch, max_dis=max_dis, exposed=exposed,
             n_grid_binaries=len(exposed),
             n_battery_binaries=0,
@@ -625,6 +665,19 @@ def solve_community_milp(
             n_binaries += 1
         rounds += 1
 
+    # The contract each member settled on is what its bill is written against,
+    # here and in `_excess_charge_eur`, which reads it back off the environment.
+    for m in members:
+        st = state[m.member_id]
+        if st["agreed_vars"] is None:
+            continue
+        settled = m.env.agreed_power_schedule
+        settled.update(
+            solved_agreed_power_schedule(m.env, st["agreed_vars"], st["months_sorted"])
+        )
+        m.env.apply_agreed_power_schedule(settled)
+        st["fixed_total"] = float(pulp.value(st["fixed_total"]))
+
     result = _extract(
         members=members, state=state, senders=senders, receivers=receivers,
         scheme=scheme, sharing_mode=sharing_mode, alpha=alpha, p_int=p_int,
@@ -692,6 +745,7 @@ def _extract(*, members, state, senders, receivers, scheme, sharing_mode, alpha,
     """
     sharing = scheme != SCHEME_INDIVIDUAL
     rows, flows = [], []
+    import_kw = {}
 
     used_by_member = {
         m.member_id: np.array([_v(u) for u in state[m.member_id]["used"]])
@@ -822,6 +876,8 @@ def _extract(*, members, state, senders, receivers, scheme, sharing_mode, alpha,
             "No_Sharing_Incentive_Intervals": int((no_incentive or {}).get(m.member_id, 0)),
         })
 
+        import_kw[m.member_id] = buy / hours
+
         community["cost"] += total
         community["energy"] += VAT_FACTOR * energy_eur
         community["network"] += VAT_FACTOR * network_eur
@@ -848,6 +904,9 @@ def _extract(*, members, state, senders, receivers, scheme, sharing_mode, alpha,
     per_member = pd.DataFrame(rows)
     return {
         "per_member": per_member,
+        # The draw each member actually presented to its meter, in kW: what a
+        # rolling contract is re-agreed from.
+        "import_kw": import_kw,
         "flows": pd.concat(flows, ignore_index=True),
         "community_cost_eur": community["cost"],
         "community": community,
@@ -947,6 +1006,17 @@ def run_community_year(
     slices = slices if slices is not None else month_slices(members[0].env.dataset.index)
     solver_kwargs = solver_kwargs or dict(msg=False)
 
+    # The contract each member walks in on is its no-battery one; from there each
+    # month's is re-agreed from the peaks the month before actually realized. The
+    # slices run in calendar order, so by the time a month is solved its
+    # predecessor has been metered. Within a month the contract is fixed, which
+    # is the real rule at a one-month lag -- and also the limit of a monthly
+    # solve: it cannot weigh what this month's peaks will cost next month.
+    endogenous = any(getattr(m.env, "agreed_power_from_dispatch", False)
+                     for m in members)
+    for m in members:
+        m.env.clear_achieved_power()
+
     monthly = []
     for (start, length, key) in slices:
         res = solve_community_milp(
@@ -958,6 +1028,11 @@ def run_community_year(
             ref_year=ref_year, strict=strict, verbose=False,
         )
         res["month"] = f"{key[0]:04d}-{key[1]:02d}"
+        if endogenous:
+            for m in members:
+                m.env.set_achieved_power_kw(
+                    res["import_kw"][m.member_id], start_idx=start
+                )
         monthly.append(res)
         if verbose:
             print(f"    {res['month']}: {res['community_cost_eur']:>10,.2f} EUR  "

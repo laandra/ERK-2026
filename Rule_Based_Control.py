@@ -22,6 +22,14 @@ violate the physics even if it asks to; `SOC_Drift_kWh` is 0 by construction
 rather than by trust. `run_policy` returns the same keys `Horizon_Comparison.
 run_strategy` returns, so the two drop into one results frame.
 
+The agreed billing power is endogenous, as it is for the MILP: each month's
+dogovorjena moc is re-agreed from the peaks the controller's own metered profile
+realized the month before, so a rule that shaves its way onto a lower contract is
+then held to it, and a rule that charges at night pays for the peak it made. The
+runner iterates to that fixed point; `Horizon_Comparison.run_strategy` decides it
+inside the LP for the MILP reference, so the reference is still an exact optimum
+and still a lower bound.
+
 Two asymmetries are handled explicitly rather than hidden:
 
     terminal SOC    every MILP strategy starts AND ends at 50 % of capacity, so
@@ -49,6 +57,7 @@ import pandas as pd
 
 import Horizon_Comparison as hc
 from Basic_Functions import max_charge_now, max_discharge_now
+from Environment import converge_agreed_power
 from MILP_Household import (
     SOC_FRACTION,
     day_calendar,
@@ -85,6 +94,11 @@ class Signals:
     Nothing here is a decision variable: these are the load, the roof, the price
     list and the calendar. A rule that wants a quantity not in this bundle is
     asking for something it could not have in the field.
+
+    What the meter recorded is the one thing a rule may also know and cannot find
+    here, because it depends on the rule's own past setpoints. It arrives one
+    interval at a time through `Policy.observe`, which is how a real controller
+    gets it too.
     """
 
     env: object
@@ -197,6 +211,17 @@ class Policy:
 
     def reset(self, sig):
         """Precompute whatever the whole run needs. Called once, before step 0."""
+
+    def observe(self, sig, idx, net_kwh, setpoint_kwh):
+        """The interval just settled: what the METER read, and what was done.
+
+        `net_kwh` is the realized grid flow after the rule's own setpoint -- the
+        quantity the ratchet prices and the only draw a field controller can
+        actually measure. A rule that adapts to the household's peaks has to
+        learn from this rather than from the profile the house would have had
+        with the battery idle, which needs a second meter behind the inverter and
+        is not the profile the bill is written against.
+        """
 
     def setpoint(self, sig, idx, soc_kwh, lo, hi, peak_state):
         raise NotImplementedError
@@ -451,22 +476,33 @@ class PeakShaving(Policy):
 
         the tariff line   `margin * dogovorjena moc` for the interval's block --
                           the point above which the excess-power charge starts
-        the household     a high quantile of the net load over a TRAILING
-                          window -- the top of what this house actually draws
+        the household     a high quantile of the METERED draw over a TRAILING
+                          window -- the top of what this house actually presents
+                          to the grid, battery included
 
-    The second is what makes the rule bite. The agreed power is set from the
-    previous month's peaks, so a stationary household spends most of the year
-    below it and a shaver aimed only at the tariff line never fires. Aiming at
-    the household's own 98th percentile shaves the intervals that set the peak,
-    which is the quantity the ratchet prices.
+    The second is what makes the rule bite, and it is measured on the meter, not
+    on the load behind it. The distinction is the whole rule: a house whose
+    battery already flattens its evenings has a metered 98th percentile far below
+    its no-battery one, so a threshold read off the raw load would sit above
+    everything the meter ever sees and the shaver would never fire. It also cuts
+    the other way -- a night grid refill is a peak the raw load cannot show, and
+    the meter does.
+
+    Aiming at the metered quantile makes the threshold a moving target the rule
+    walks down: shaving to it flattens the distribution, the next window's
+    quantile is lower, and the rule follows until the pack runs out of energy to
+    hold it there. That is the point rather than a defect. With the dogovorjena
+    moc rolled from the same metered peaks (`Environment.set_achieved_power_kw`),
+    every kW walked off the top is a kW off next month's contract.
 
     It is ratchet-aware: once a block's running peak for the month is already
     above this interval's draw, the charge is sunk and shaving buys nothing but
     round-trip losses, so the rule stands down.
 
     Refilling is sized, not greedy. The target is the largest daily shave the
-    trailing window actually demanded, so a 30 kWh pack does not buy 24 kWh
-    every night to shave two. PV surplus is always taken; grid refill happens
+    trailing window demanded -- measured on the meter with the rule's own shaves
+    added back, since what the pack must hold is the excursion it removed, not
+    the flat line it left behind. PV surplus is always taken; grid refill happens
     only in the off-peak window and only up to that target -- which is what
     keeps the rule usable on the four Fluvius groups that have no roof at all.
     """
@@ -484,34 +520,59 @@ class PeakShaving(Policy):
         self.ratchet_aware = ratchet_aware
 
     def reset(self, sig):
-        net_kw = (sig.consumption - sig.generation) / sig.hours
-        window = self.window_days * int(round(24.0 / sig.hours))
-        self._threshold = np.empty(sig.n_steps, dtype=float)
+        self._per_day = int(round(24.0 / sig.hours))
+        self._window = self.window_days * self._per_day
+        # Filled by `observe` as the run goes: the metered draw, and the same
+        # draw with this rule's own shaves added back.
+        self._meter_kw = np.full(sig.n_steps, np.nan, dtype=float)
+        self._unshaved_kw = np.full(sig.n_steps, np.nan, dtype=float)
+        self._shaving = np.zeros(sig.n_steps, dtype=bool)
+
+        self._threshold = np.full(sig.n_steps, np.inf, dtype=float)
         self._target = np.zeros(sig.n_steps, dtype=float)
-
+        # idx -> (first, last) for the first step of each local day. The day's
+        # threshold is set there, from history that by then exists.
+        self._day_opens = {}
         for steps in sig.day_steps:
-            if not steps:
-                continue
-            first, last = steps[0], steps[-1] + 1
-            history = net_kw[max(0, first - window):first]
-            if history.size == 0:
-                history = net_kw[first:last]      # no past: the day itself
-            household_kw = float(np.quantile(history, self.q_peak))
-            tariff_kw = self.margin * float(np.min(sig.agreed_kw[first:last]))
-            threshold = min(household_kw, tariff_kw)
-            self._threshold[first:last] = threshold
+            if steps:
+                self._day_opens[steps[0]] = (steps[0], steps[-1] + 1)
 
-            # What a day of shaving at this threshold would have cost in energy
-            # over the trailing window: the pack only has to hold the worst of
-            # them. Sliced on the nominal day, which is all a maximum needs.
-            over = np.maximum(history - threshold, 0.0) * sig.hours
-            per_day = int(round(24.0 / sig.hours))
-            whole = over[: over.size - over.size % per_day]
-            need = (float(whole.reshape(-1, per_day).sum(axis=1).max())
-                    if whole.size else float(over.sum()))
-            self._target[first:last] = min(
-                sig.capacity_kwh, self.refill_headroom * need
-            )
+    def _open_day(self, sig, first, last):
+        """Set this day's threshold and refill target from the trailing meter."""
+        start = max(0, first - self._window)
+        meter = self._meter_kw[start:first]
+        unshaved = self._unshaved_kw[start:first]
+        if meter.size == 0:
+            # Day one: nothing has been metered yet, so the only draw available
+            # is the load itself. Every later day reads the meter.
+            meter = unshaved = (
+                sig.consumption[first:last] - sig.generation[first:last]
+            ) / sig.hours
+
+        household_kw = float(np.quantile(meter, self.q_peak))
+        tariff_kw = self.margin * float(np.min(sig.agreed_kw[first:last]))
+        threshold = min(household_kw, tariff_kw)
+        self._threshold[first:last] = threshold
+
+        # What a day of shaving at this threshold would have cost in energy over
+        # the trailing window: the pack only has to hold the worst of them.
+        # Measured on the unshaved draw -- the shaves already taken are exactly
+        # the excursions a future day will have to take again. Sliced on the
+        # nominal day, which is all a maximum needs.
+        over = np.maximum(unshaved - threshold, 0.0) * sig.hours
+        whole = over[: over.size - over.size % self._per_day]
+        need = (float(whole.reshape(-1, self._per_day).sum(axis=1).max())
+                if whole.size else float(over.sum()))
+        self._target[first:last] = min(
+            sig.capacity_kwh, self.refill_headroom * need
+        )
+
+    def observe(self, sig, idx, net_kwh, setpoint_kwh):
+        self._meter_kw[idx] = net_kwh / sig.hours
+        # Adding the shave back reconstructs the draw the meter would have
+        # recorded had the rule stood down -- the excursion the pack absorbed.
+        shaved_back = max(-float(setpoint_kwh), 0.0) if self._shaving[idx] else 0.0
+        self._unshaved_kw[idx] = (net_kwh + shaved_back) / sig.hours
 
     def _shave(self, sig, idx, lo, peak_state):
         """Discharge that pulls the draw back to the threshold, or 0."""
@@ -521,9 +582,18 @@ class PeakShaving(Policy):
             return 0.0
         if self.ratchet_aware and float(peak_state.get(int(sig.blocks[idx]), 0.0)) >= net_kw:
             return 0.0
-        return -min((net_kw - threshold_kw) * sig.hours, -lo)
+        shave = -min((net_kw - threshold_kw) * sig.hours, -lo)
+        # Flagged only when it is really a shave: an empty pack returns 0 here
+        # and the rule falls through to whatever else it does, which `observe`
+        # must not then mistake for an excursion the battery absorbed.
+        if shave < -_EPS:
+            self._shaving[idx] = True
+        return shave
 
     def setpoint(self, sig, idx, soc_kwh, lo, hi, peak_state):
+        day = self._day_opens.get(idx)
+        if day is not None:
+            self._open_day(sig, *day)
         shave = self._shave(sig, idx, lo, peak_state)
         if shave < -_EPS:
             return shave
@@ -547,9 +617,12 @@ class SelfConsumptionPeakShaving(PeakShaving):
     without giving up much of the energy bill.
 
     The reserve is the peak-shaving refill target -- the worst daily shave the
-    trailing window demanded -- rather than a flat fraction of the pack, so it
-    scales with the household instead of with the capacity that happens to be
-    installed.
+    trailing METERED window demanded -- rather than a flat fraction of the pack,
+    so it scales with the household instead of with the capacity that happens to
+    be installed. Self-consumption is what makes reading the meter matter here:
+    it is already flattening the profile the shaver then measures, so a reserve
+    sized off the raw load would be sized for peaks this controller no longer
+    presents.
     """
 
     name = "self_consumption_peak_shaving"
@@ -564,6 +637,9 @@ class SelfConsumptionPeakShaving(PeakShaving):
         self.reserve_cap_frac = float(reserve_cap_frac)
 
     def setpoint(self, sig, idx, soc_kwh, lo, hi, peak_state):
+        day = self._day_opens.get(idx)
+        if day is not None:
+            self._open_day(sig, *day)
         # Shaving has first claim and may spend the whole pack.
         shave = self._shave(sig, idx, lo, peak_state)
         if shave < -_EPS:
@@ -675,7 +751,50 @@ def run_policy(env, policy, n_steps=None, signals=None, keep_traces=False):
     `signals` is reusable across every policy on one environment -- building it
     prices the whole year at unit volume -- so a caller running the roster should
     build it once and pass it in.
+
+    With `env.agreed_power_from_dispatch` set the run is repeated until the
+    dogovorjena moc it is billed under is the one its own peaks agree to, exactly
+    as `Horizon_Comparison.run_strategy` does it for the MILP. A rule is cheap,
+    so the loop costs little here -- but it is the same loop, and a controller
+    that shaves its way onto a lower contract is then held to it.
     """
+    if getattr(env, "agreed_power_from_dispatch", False):
+        hours = env.interval_minutes / 60.0
+        base = build_signals(env, n_steps) if signals is None else signals
+        spent = {"seconds": 0.0}
+
+        def _dispatch():
+            # Only the contract moves between iterations, and it enters the
+            # bundle as one array; the rates and the calendar are rebound, not
+            # rebuilt, so converging costs solves and not price vectors.
+            out = _run_policy_once(env, policy, n_steps=n_steps,
+                                   signals=rebind_agreed_power(base, env),
+                                   keep_traces=True)
+            spent["seconds"] += out["Runtime_s"]
+            return out, np.maximum(out["_net_trace"], 0.0) / hours
+
+        out, info = converge_agreed_power(env, _dispatch)
+        # Every pass was work done to find this contract, not just the last.
+        out["Runtime_s"] = spent["seconds"]
+        out["Agreed_Power_Iters"] = info["iterations"]
+        out["Agreed_Power_Converged"] = info["converged"]
+        if not keep_traces:
+            for key in ("_soc_trace", "_cost_trace", "_setpoints", "_net_trace"):
+                out.pop(key, None)
+        else:
+            out.pop("_net_trace", None)
+        return out
+
+    out = _run_policy_once(env, policy, n_steps=n_steps, signals=signals,
+                           keep_traces=keep_traces)
+    out.pop("_net_trace", None)
+    out["Agreed_Power_Iters"] = 1
+    out["Agreed_Power_Converged"] = True
+    return out
+
+
+def _run_policy_once(env, policy, n_steps=None, signals=None, keep_traces=False):
+    """One pass of the rule under the contract currently in force."""
     sig = build_signals(env, n_steps) if signals is None else signals
     n_steps = sig.n_steps
     policy.reset(sig)
@@ -701,6 +820,10 @@ def run_policy(env, policy, n_steps=None, signals=None, keep_traces=False):
     soc_trace = np.empty(n_steps, dtype=float)
     cost_trace = np.empty(n_steps, dtype=float)
     setpoints = np.zeros(n_steps, dtype=float)
+    # The draw the trajectory actually presents to the meter, interval by
+    # interval. The rules that watch the meter read it back through `observe`,
+    # and the endogenous contract is re-rolled from it.
+    net_trace = np.zeros(n_steps, dtype=float)
 
     t_start = time.time()
     for idx in range(n_steps):
@@ -729,6 +852,12 @@ def run_policy(env, policy, n_steps=None, signals=None, keep_traces=False):
         cost += step_cost
         energy_cost += e_part
         power_cost += p_part
+
+        net_trace[idx] = net
+        # What the rule may learn from this interval is what the meter recorded,
+        # which is the draw AFTER its own setpoint -- not the draw the house
+        # would have had with the battery idle.
+        policy.observe(sig, idx, net, p)
 
         soc_trace[idx] = soc
         cost_trace[idx] = cost
@@ -778,6 +907,7 @@ def run_policy(env, policy, n_steps=None, signals=None, keep_traces=False):
         "SOC_Drift_kWh": soc_drift,
         "Runtime_s": time.time() - t_start,
     }
+    out["_net_trace"] = net_trace
     if keep_traces:
         out["_soc_trace"] = soc_trace
         out["_cost_trace"] = cost_trace
@@ -796,8 +926,8 @@ def run_milp_reference(env, n_steps=None):
         env, "period", "block", soc_mode="fixed50", n_steps=n_steps,
         solver=hc.full_period_solver(),
     )
-    out.pop("_soc_trace", None)
-    out.pop("_cost_trace", None)
+    for key in ("_soc_trace", "_cost_trace", "_net_trace"):
+        out.pop(key, None)
     # Pinned to 50 % at both ends by construction, so there is nothing to close.
     out["Terminal_SOC_Adj_EUR"] = 0.0
     out["Cost_EUR_Closed"] = out["Cost_EUR"]
@@ -816,6 +946,26 @@ class _Idle(Policy):
 
     def setpoint(self, sig, idx, soc_kwh, lo, hi, peak_state):
         return 0.0
+
+
+def rebind_agreed_power(sig, env):
+    """The same bundle with the contract re-read from the environment.
+
+    The agreed power is the one signal an endogenous contract moves between
+    convergence iterations, and it is the only one worth rebuilding: the rates,
+    the local-time calendar and the load are unchanged by re-agreeing a kW.
+    """
+    from dataclasses import replace
+
+    blocks = sig.blocks
+    return replace(
+        sig,
+        agreed_kw=np.array(
+            [float(env.agreed_power_at(i).get(int(blocks[i]), 0.0))
+             for i in range(sig.n_steps)],
+            dtype=float,
+        ),
+    )
 
 
 def rebind_signals(sig, env):

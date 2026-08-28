@@ -63,7 +63,7 @@ def check_idle_is_the_baseline(env, sig):
     """
     print("\n1. The idle policy reproduces the no-battery baseline")
     n_steps = sig.n_steps
-    reference = hc.no_battery_cost(env, n_steps)
+    reference, _ = hc.no_battery_cost(env, n_steps)
     idle = rbc.run_policy(env, rbc._Idle(), signals=sig)["Cost_EUR"]
     difference = abs(idle - reference)
     assert difference < 1e-9, (
