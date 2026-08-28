@@ -14,6 +14,8 @@ appended to whatever `pulp.LpProblem` the caller is building:
     month_calendar            the local-time month bookkeeping all of the above index by
     floor_export_rates        the guard that keeps a negative import rate from
                               making the LP unbounded
+    interval_rate_vectors     the per-interval import rate and export credit the
+                              objective is built from
 
 What is NOT here is pricing. `solve_household` prices through
 `Pricing_Functions.calculate_interval_price`, the community model prices through
@@ -270,6 +272,48 @@ def floor_export_rates(import_rates, export_rates):
         return np.minimum(exp, imp), int(np.sum(exp > imp))
     n = sum(1 for e, i in zip(export_rates, import_rates) if e > i)
     return [min(e, i) for e, i in zip(export_rates, import_rates)], n
+
+
+def interval_rate_vectors(env, dates, smp_prices, pricing_options, interval_minutes):
+    """Per-interval delivered import rate and export credit [EUR/kWh].
+
+    Returns `(import_rates, export_rates, constant_costs)`, all EUR per kWh
+    except `constant_costs`, which is the prorated fixed charge the package
+    carries with no agreed power supplied.
+
+    Priced at +-1 kWh without `dogovorjena_moc`/`prev_peak_kw`, so the result
+    stays linear in the traded energy and the peak and fixed charges can enter
+    separately. This is the price signal `solve_household` optimizes against;
+    it is a function of the calendar, the market price and the package only, so
+    a rule-based controller can read the same two vectors instead of rebuilding
+    them and the two cannot end up seeing different prices.
+
+    The export credit is NOT floored here -- `floor_export_rates` is the
+    caller's, because only an optimizer needs the guard.
+    """
+    import_rates, export_rates, constant_costs = [], [], []
+    for t in range(len(dates)):
+        import_res = calculate_interval_price(
+            smp_market_price_kwh=smp_prices[t],
+            total_consumed_kwh=1.0,
+            utc_date=dates[t],
+            interval_minutes=interval_minutes,
+            scheme=env.pricing_scheme,
+            **pricing_options,
+        )
+        import_rates.append(import_res["variable_price_aud"])
+        constant_costs.append(import_res["constant_price_aud"])
+
+        export_res = calculate_interval_price(
+            smp_market_price_kwh=smp_prices[t],
+            total_consumed_kwh=-1.0,
+            utc_date=dates[t],
+            interval_minutes=interval_minutes,
+            scheme=env.pricing_scheme,
+            **pricing_options,
+        )
+        export_rates.append(-export_res["variable_price_aud"])
+    return import_rates, export_rates, constant_costs
 
 
 # ---------------------------------------------------------------------------
@@ -671,38 +715,18 @@ def solve_household(
         )
 
     # --- 1) Tariff rates -----------------------------------------------------
-    # Priced without dogovorjena_moc/prev_peak_kw so the result stays linear in
-    # total_consumed_kwh; peak and fixed charges enter separately below.
-    import_rates, export_rates, constant_costs, fixed_monthly_costs = [], [], [], []
-
-    for t in range(N_STEPS):
-        import_res = calculate_interval_price(
-            smp_market_price_kwh=smp_prices[t],
-            total_consumed_kwh=1.0,
-            utc_date=dates[t],
-            interval_minutes=INTERVAL_MINS,
-            scheme=env.pricing_scheme,
-            **pricing_options,
+    import_rates, export_rates, constant_costs = interval_rate_vectors(
+        env, dates, smp_prices, pricing_options, INTERVAL_MINS
+    )
+    # The fixed charge is the one rate that needs the agreed power, so it is not
+    # part of the shared vectors above.
+    fixed_monthly_costs = [
+        compute_prorated_fixed_charge_eur(
+            dates[t], INTERVAL_MINS, scheme=env.pricing_scheme,
+            dogovorjena_moc=agreed_t[t], **pricing_options,
         )
-        import_rates.append(import_res["variable_price_aud"])
-        constant_costs.append(import_res["constant_price_aud"])
-
-        export_res = calculate_interval_price(
-            smp_market_price_kwh=smp_prices[t],
-            total_consumed_kwh=-1.0,
-            utc_date=dates[t],
-            interval_minutes=INTERVAL_MINS,
-            scheme=env.pricing_scheme,
-            **pricing_options,
-        )
-        export_rates.append(-export_res["variable_price_aud"])
-
-        fixed_monthly_costs.append(
-            compute_prorated_fixed_charge_eur(
-                dates[t], INTERVAL_MINS, scheme=env.pricing_scheme,
-                dogovorjena_moc=agreed_t[t], **pricing_options,
-            )
-        )
+        for t in range(N_STEPS)
+    ]
 
     export_rates, n_export_floored = floor_export_rates(import_rates, export_rates)
 
