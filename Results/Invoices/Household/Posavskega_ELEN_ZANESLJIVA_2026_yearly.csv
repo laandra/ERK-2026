@@ -1,0 +1,30 @@
+obdobje,produkt,kolicina,enota,cena_eur_em,znesek_eur_brez_ddv,kategorija
+2026,Elektro energija – Zanesljiva oskrba (redni cenik),,,,,naslov
+2026,Električna energija MT,1734.0,kWh,0.1029,178.4286,energija
+2026,Električna energija VT,1484.0,kWh,0.1249,185.3516,energija
+2026,Skupaj električna energija,,,,363.7802,skupaj
+2026,Dogovorjena moč za časovni blok 1,5.6,kW,1.711261,9.58306,omreznina
+2026,Dogovorjena moč za časovni blok 2,26.6,kW,1.040854,27.68672,omreznina
+2026,Dogovorjena moč za časovni blok 3,28.0,kW,0.253006,7.08416,omreznina
+2026,Dogovorjena moč za časovni blok 4,28.0,kW,0.018563,0.51976,omreznina
+2026,Prevzeta EE za časovni blok 1,343.0,kWh,0.01998,6.85314,omreznina
+2026,Prevzeta EE za časovni blok 2,1049.0,kWh,0.019282,20.22642,omreznina
+2026,Prevzeta EE za časovni blok 3,1049.0,kWh,0.017458,18.31309,omreznina
+2026,Prevzeta EE za časovni blok 4,635.0,kWh,0.018135,11.51575,omreznina
+2026,Skupaj omrežnina za elektroenergetski sistem,,,,103.68867,skupaj
+2026,Prispevek za delovanje operaterja trga,3218.0,kWh,0.00013,0.41834,prispevki
+2026,Prispevek za energetsko učinkovitost,3218.0,kWh,0.0008,2.5744,prispevki
+2026,Prispevek za SPTE in OVE,24.6,kW,0.687339,16.90854,prispevki
+2026,Skupaj prispevki in ostale dajatve,,,,19.90128,skupaj
+2026,Trošarina,3218.0,kWh,0.00153,4.92354,trosarina
+2026,Skupaj trošarina,,,,4.92354,skupaj
+2026,100% Jedrska energija,7.0,kos,0.0,0.0,poslovanje
+2026,Pavšalni strošek poslovanja,7.0,kos,1.99,13.93,poslovanje
+2026,E-popust,7.0,kos,-0.81,-5.67,poslovanje
+2026,Obračun storitev pogodbenega računa,,,,8.26,skupaj
+2026,Skupaj brez DDV,,,,500.55369,skupaj
+2026,DDV 22%,,,,110.12182,ddv
+2026,Skupaj z DDV,,,,610.67551,skupaj
+2026,ZA PLAČILO,,,,610.67551,za_placilo
+2026,Dogovorjena moč za časovni blok 5,20.0,kW,0.00245,0.049,omreznina
+2026,Prevzeta EE za časovni blok 5,143.0,kWh,0.01299,1.85757,omreznina

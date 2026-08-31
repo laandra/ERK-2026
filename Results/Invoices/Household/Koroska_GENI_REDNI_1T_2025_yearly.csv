@@ -1,0 +1,27 @@
+obdobje,produkt,kolicina,enota,cena_eur_em,znesek_eur_brez_ddv,kategorija
+2025,GEN-I – Redni cenik za gospodinjske odjemalce (enotarifni),,,,,naslov
+2025,Električna energija ET,442.0,kWh,0.1089,48.1338,energija
+2025,Skupaj električna energija,,,,48.1338,skupaj
+2025,Dogovorjena moč za časovni blok 1,7.0,kW,1.71126,11.97882,omreznina
+2025,Dogovorjena moč za časovni blok 2,8.4,kW,0.91224,7.66282,omreznina
+2025,Dogovorjena moč za časovni blok 3,8.4,kW,0.162969,1.36894,omreznina
+2025,Dogovorjena moč za časovni blok 4,8.4,kW,0.004069,0.03418,omreznina
+2025,Prevzeta EE za časovni blok 1,136.0,kWh,0.01998,2.71728,omreznina
+2025,Prevzeta EE za časovni blok 2,137.0,kWh,0.01833,2.51121,omreznina
+2025,Prevzeta EE za časovni blok 3,126.0,kWh,0.01809,2.27934,omreznina
+2025,Prevzeta EE za časovni blok 4,43.0,kWh,0.01855,0.79765,omreznina
+2025,Skupaj omrežnina za elektroenergetski sistem,,,,29.35024,skupaj
+2025,Prispevek za delovanje operaterja trga,442.0,kWh,0.00013,0.05746,prispevki
+2025,Prispevek za energetsko učinkovitost,442.0,kWh,0.0008,0.3536,prispevki
+2025,Prispevek za SPTE in OVE,7.0,kW,0.387809,2.71466,prispevki
+2025,Skupaj prispevki in ostale dajatve,,,,3.12572,skupaj
+2025,Trošarina,442.0,kWh,0.00153,0.67626,trosarina
+2025,Skupaj trošarina,,,,0.67626,skupaj
+2025,100% Jedrska energija,2.0,kos,0.0,0.0,poslovanje
+2025,Pavšalni strošek poslovanja,2.0,kos,1.99,3.98,poslovanje
+2025,E-popust,2.0,kos,-1.0,-2.0,poslovanje
+2025,Obračun storitev pogodbenega računa,,,,1.98,skupaj
+2025,Skupaj brez DDV,,,,83.26602,skupaj
+2025,DDV 22%,,,,18.31853,ddv
+2025,Skupaj z DDV,,,,101.58455,skupaj
+2025,ZA PLAČILO,,,,101.58455,za_placilo

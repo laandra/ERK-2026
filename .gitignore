@@ -1,0 +1,16 @@
+
+# Local large dataset (do not track)
+Ausgrid_2010_2013_Orange_Combined.csv
+
+# Local Claude config
+.claude/
+
+# Python bytecode
+__pycache__/
+New pricing functions/__pycache__/
+
+*.pyc
+
+# macOS Finder metadata (was committed in both histories before the merge)
+.DS_Store
+**/.DS_Store

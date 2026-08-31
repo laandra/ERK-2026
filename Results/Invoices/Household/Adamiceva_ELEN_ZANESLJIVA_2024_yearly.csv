@@ -1,0 +1,42 @@
+obdobje,produkt,kolicina,enota,cena_eur_em,znesek_eur_brez_ddv,kategorija
+2024,Elektro energija – Zanesljiva oskrba (redni cenik),,,,,naslov
+2024,Električna energija MT,612.099,kWh,0.1029,62.985,energija
+2024,Električna energija VT,955.887,kWh,0.1249,119.39027,energija
+2024,Skupaj električna energija,,,,182.37528,skupaj
+2024,Dogovorjena moč za časovni blok 1,11.2,kW,2.676107,29.9724,omreznina
+2024,Dogovorjena moč za časovni blok 2,33.6,kW,1.092286,36.7008,omreznina
+2024,Dogovorjena moč za časovni blok 3,33.6,kW,0.289036,9.7116,omreznina
+2024,Dogovorjena moč za časovni blok 4,33.6,kW,0.024357,0.8184,omreznina
+2024,Prevzeta EE za časovni blok 1,213.582,kWh,0.02217,4.7351,omreznina
+2024,Prevzeta EE za časovni blok 2,660.199,kWh,0.01998,13.19079,omreznina
+2024,Prevzeta EE za časovni blok 3,477.263,kWh,0.01717,8.19461,omreznina
+2024,Prevzeta EE za časovni blok 4,181.976,kWh,0.01805,3.28467,omreznina
+2024,Skupaj omrežnina za elektroenergetski sistem,,,,107.11777,skupaj
+2024,Prispevek za delovanje operaterja trga,1567.986,kWh,0.00013,0.20384,prispevki
+2024,Prispevek za energetsko učinkovitost,1567.986,kWh,0.0008,1.25439,prispevki
+2024,Prispevek za SPTE in OVE,33.6,kW,0.387811,13.03044,prispevki
+2024,Skupaj prispevki in ostale dajatve,,,,14.48866,skupaj
+2024,Trošarina,1567.986,kWh,0.00153,2.39902,trosarina
+2024,Skupaj trošarina,,,,2.39902,skupaj
+2024,100% Jedrska energija,12.0,kos,0.0,0.0,poslovanje
+2024,Pavšalni strošek poslovanja,12.0,kos,1.99,23.88,poslovanje
+2024,E-popust,12.0,kos,-0.81,-9.72,poslovanje
+2024,Obračun storitev pogodbenega računa,,,,14.16,skupaj
+2024,Skupaj brez DDV,,,,320.54047,skupaj
+2024,DDV 22%,,,,70.51891,ddv
+2024,Skupaj z DDV,,,,391.05939,skupaj
+2024,ZA PLAČILO,,,,391.05939,za_placilo
+2024,"Paket 'Zanesljiva oskrba (redni cenik)' velja šele od 2025-03-01, obračunavaš pa 2024-01-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
+2024,"Paket 'Zanesljiva oskrba (redni cenik)' velja šele od 2025-03-01, obračunavaš pa 2024-02-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
+2024,Dogovorjena moč za časovni blok 5,22.4,kW,0.002464,0.0552,omreznina
+2024,Prevzeta EE za časovni blok 5,34.966,kWh,0.01299,0.45421,omreznina
+2024,"Paket 'Zanesljiva oskrba (redni cenik)' velja šele od 2025-03-01, obračunavaš pa 2024-03-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
+2024,"Paket 'Zanesljiva oskrba (redni cenik)' velja šele od 2025-03-01, obračunavaš pa 2024-04-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
+2024,"Paket 'Zanesljiva oskrba (redni cenik)' velja šele od 2025-03-01, obračunavaš pa 2024-05-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
+2024,"Paket 'Zanesljiva oskrba (redni cenik)' velja šele od 2025-03-01, obračunavaš pa 2024-06-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
+2024,"Paket 'Zanesljiva oskrba (redni cenik)' velja šele od 2025-03-01, obračunavaš pa 2024-07-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
+2024,"Paket 'Zanesljiva oskrba (redni cenik)' velja šele od 2025-03-01, obračunavaš pa 2024-08-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
+2024,"Paket 'Zanesljiva oskrba (redni cenik)' velja šele od 2025-03-01, obračunavaš pa 2024-09-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
+2024,"Paket 'Zanesljiva oskrba (redni cenik)' velja šele od 2025-03-01, obračunavaš pa 2024-10-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
+2024,"Paket 'Zanesljiva oskrba (redni cenik)' velja šele od 2025-03-01, obračunavaš pa 2024-11-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
+2024,"Paket 'Zanesljiva oskrba (redni cenik)' velja šele od 2025-03-01, obračunavaš pa 2024-12-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo

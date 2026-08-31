@@ -1,0 +1,516 @@
+obdobje,produkt,kolicina,enota,cena_eur_em,znesek_eur_brez_ddv,kategorija
+01.01.2025–31.01.2025,Elektro energija – Zanesljiva oskrba (redni cenik),,,,,naslov
+01.01.2025–31.01.2025,Električna energija MT,61.0,kWh,0.1029,6.2769,energija
+01.01.2025–31.01.2025,Električna energija VT,79.0,kWh,0.1249,9.8671,energija
+01.01.2025–31.01.2025,Skupaj električna energija,,,,16.144,skupaj
+01.01.2025–31.01.2025,Dogovorjena moč za časovni blok 1,3.5,kW,1.71126,5.98941,omreznina
+01.01.2025–31.01.2025,Dogovorjena moč za časovni blok 2,3.5,kW,0.91224,3.19284,omreznina
+01.01.2025–31.01.2025,Dogovorjena moč za časovni blok 3,3.5,kW,0.16297,0.57039,omreznina
+01.01.2025–31.01.2025,Dogovorjena moč za časovni blok 4,3.5,kW,0.00407,0.01424,omreznina
+01.01.2025–31.01.2025,Prevzeta EE za časovni blok 1,52.0,kWh,0.01998,1.03896,omreznina
+01.01.2025–31.01.2025,Prevzeta EE za časovni blok 2,57.0,kWh,0.01833,1.04481,omreznina
+01.01.2025–31.01.2025,Prevzeta EE za časovni blok 3,27.0,kWh,0.01809,0.48843,omreznina
+01.01.2025–31.01.2025,Prevzeta EE za časovni blok 4,4.0,kWh,0.01855,0.0742,omreznina
+01.01.2025–31.01.2025,Skupaj omrežnina za elektroenergetski sistem,,,,12.41328,skupaj
+01.01.2025–31.01.2025,Prispevek za delovanje operaterja trga,140.0,kWh,0.00013,0.0182,prispevki
+01.01.2025–31.01.2025,Prispevek za energetsko učinkovitost,140.0,kWh,0.0008,0.112,prispevki
+01.01.2025–31.01.2025,Prispevek za SPTE in OVE,3.5,kW,0.0,0.0,prispevki
+01.01.2025–31.01.2025,Skupaj prispevki in ostale dajatve,,,,0.1302,skupaj
+01.01.2025–31.01.2025,Trošarina,140.0,kWh,0.00153,0.2142,trosarina
+01.01.2025–31.01.2025,Skupaj trošarina,,,,0.2142,skupaj
+01.01.2025–31.01.2025,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
+01.01.2025–31.01.2025,Pavšalni strošek poslovanja,1.0,kos,1.99,1.99,poslovanje
+01.01.2025–31.01.2025,E-popust,1.0,kos,-0.81,-0.81,poslovanje
+01.01.2025–31.01.2025,Obračun storitev pogodbenega računa,,,,1.18,skupaj
+01.01.2025–31.01.2025,Skupaj brez DDV,,,,30.08168,skupaj
+01.01.2025–31.01.2025,DDV 22%,,,,6.61797,ddv
+01.01.2025–31.01.2025,Skupaj z DDV,,,,36.69965,skupaj
+01.01.2025–31.01.2025,ZA PLAČILO,,,,36.69965,za_placilo
+01.01.2025–31.01.2025,"Paket 'Zanesljiva oskrba (redni cenik)' velja šele od 2025-03-01, obračunavaš pa 2025-01-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
+01.02.2025–28.02.2025,Elektro energija – Zanesljiva oskrba (redni cenik),,,,,naslov
+01.02.2025–28.02.2025,Električna energija MT,36.0,kWh,0.1029,3.7044,energija
+01.02.2025–28.02.2025,Električna energija VT,93.0,kWh,0.1249,11.6157,energija
+01.02.2025–28.02.2025,Skupaj električna energija,,,,15.3201,skupaj
+01.02.2025–28.02.2025,Dogovorjena moč za časovni blok 1,3.5,kW,1.71126,5.98941,omreznina
+01.02.2025–28.02.2025,Dogovorjena moč za časovni blok 2,3.5,kW,0.91224,3.19284,omreznina
+01.02.2025–28.02.2025,Dogovorjena moč za časovni blok 3,3.5,kW,0.16297,0.57039,omreznina
+01.02.2025–28.02.2025,Dogovorjena moč za časovni blok 4,3.5,kW,0.00407,0.01424,omreznina
+01.02.2025–28.02.2025,Prevzeta EE za časovni blok 1,64.0,kWh,0.01998,1.27872,omreznina
+01.02.2025–28.02.2025,Prevzeta EE za časovni blok 2,45.0,kWh,0.01833,0.82485,omreznina
+01.02.2025–28.02.2025,Prevzeta EE za časovni blok 3,16.0,kWh,0.01809,0.28944,omreznina
+01.02.2025–28.02.2025,Prevzeta EE za časovni blok 4,3.0,kWh,0.01855,0.05565,omreznina
+01.02.2025–28.02.2025,Skupaj omrežnina za elektroenergetski sistem,,,,12.21554,skupaj
+01.02.2025–28.02.2025,Prispevek za delovanje operaterja trga,129.0,kWh,0.00013,0.01677,prispevki
+01.02.2025–28.02.2025,Prispevek za energetsko učinkovitost,129.0,kWh,0.0008,0.1032,prispevki
+01.02.2025–28.02.2025,Prispevek za SPTE in OVE,3.5,kW,0.0,0.0,prispevki
+01.02.2025–28.02.2025,Skupaj prispevki in ostale dajatve,,,,0.11997,skupaj
+01.02.2025–28.02.2025,Trošarina,129.0,kWh,0.00153,0.19737,trosarina
+01.02.2025–28.02.2025,Skupaj trošarina,,,,0.19737,skupaj
+01.02.2025–28.02.2025,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
+01.02.2025–28.02.2025,Pavšalni strošek poslovanja,1.0,kos,1.99,1.99,poslovanje
+01.02.2025–28.02.2025,E-popust,1.0,kos,-0.81,-0.81,poslovanje
+01.02.2025–28.02.2025,Obračun storitev pogodbenega računa,,,,1.18,skupaj
+01.02.2025–28.02.2025,Skupaj brez DDV,,,,29.03298,skupaj
+01.02.2025–28.02.2025,DDV 22%,,,,6.38726,ddv
+01.02.2025–28.02.2025,Skupaj z DDV,,,,35.42024,skupaj
+01.02.2025–28.02.2025,ZA PLAČILO,,,,35.42024,za_placilo
+01.02.2025–28.02.2025,"Paket 'Zanesljiva oskrba (redni cenik)' velja šele od 2025-03-01, obračunavaš pa 2025-02-01 — cene so ekstrapolirane nazaj.",,,,,opozorilo
+01.03.2025–31.03.2025,Elektro energija – Zanesljiva oskrba (redni cenik),,,,,naslov
+01.03.2025–31.03.2025,Električna energija MT,50.0,kWh,0.1029,5.145,energija
+01.03.2025–31.03.2025,Električna energija VT,87.0,kWh,0.1249,10.8663,energija
+01.03.2025–31.03.2025,Skupaj električna energija,,,,16.0113,skupaj
+01.03.2025–31.03.2025,Dogovorjena moč za časovni blok 2,3.5,kW,0.91224,3.19284,omreznina
+01.03.2025–31.03.2025,Dogovorjena moč za časovni blok 3,3.5,kW,0.16297,0.57039,omreznina
+01.03.2025–31.03.2025,Dogovorjena moč za časovni blok 4,3.5,kW,0.00407,0.01424,omreznina
+01.03.2025–31.03.2025,Dogovorjena moč za časovni blok 5,3.5,kW,0.0,0.0,omreznina
+01.03.2025–31.03.2025,Prevzeta EE za časovni blok 2,57.0,kWh,0.01833,1.04481,omreznina
+01.03.2025–31.03.2025,Prevzeta EE za časovni blok 3,54.0,kWh,0.01809,0.97686,omreznina
+01.03.2025–31.03.2025,Prevzeta EE za časovni blok 4,21.0,kWh,0.01855,0.38955,omreznina
+01.03.2025–31.03.2025,Prevzeta EE za časovni blok 5,4.0,kWh,0.01873,0.07492,omreznina
+01.03.2025–31.03.2025,Skupaj omrežnina za elektroenergetski sistem,,,,6.26361,skupaj
+01.03.2025–31.03.2025,Prispevek za delovanje operaterja trga,137.0,kWh,0.00013,0.01781,prispevki
+01.03.2025–31.03.2025,Prispevek za energetsko učinkovitost,137.0,kWh,0.0008,0.1096,prispevki
+01.03.2025–31.03.2025,Prispevek za SPTE in OVE,3.5,kW,0.0,0.0,prispevki
+01.03.2025–31.03.2025,Skupaj prispevki in ostale dajatve,,,,0.12741,skupaj
+01.03.2025–31.03.2025,Trošarina,137.0,kWh,0.00153,0.20961,trosarina
+01.03.2025–31.03.2025,Skupaj trošarina,,,,0.20961,skupaj
+01.03.2025–31.03.2025,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
+01.03.2025–31.03.2025,Pavšalni strošek poslovanja,1.0,kos,1.99,1.99,poslovanje
+01.03.2025–31.03.2025,E-popust,1.0,kos,-0.81,-0.81,poslovanje
+01.03.2025–31.03.2025,Obračun storitev pogodbenega računa,,,,1.18,skupaj
+01.03.2025–31.03.2025,Skupaj brez DDV,,,,23.79193,skupaj
+01.03.2025–31.03.2025,DDV 22%,,,,5.23422,ddv
+01.03.2025–31.03.2025,Skupaj z DDV,,,,29.02615,skupaj
+01.03.2025–31.03.2025,ZA PLAČILO,,,,29.02615,za_placilo
+01.04.2025–30.04.2025,Elektro energija – Zanesljiva oskrba (redni cenik),,,,,naslov
+01.04.2025–30.04.2025,Električna energija MT,39.0,kWh,0.1029,4.0131,energija
+01.04.2025–30.04.2025,Električna energija VT,73.0,kWh,0.1249,9.1177,energija
+01.04.2025–30.04.2025,Skupaj električna energija,,,,13.1308,skupaj
+01.04.2025–30.04.2025,Dogovorjena moč za časovni blok 2,3.5,kW,0.91224,3.19284,omreznina
+01.04.2025–30.04.2025,Dogovorjena moč za časovni blok 3,3.5,kW,0.16297,0.57039,omreznina
+01.04.2025–30.04.2025,Dogovorjena moč za časovni blok 4,3.5,kW,0.00407,0.01424,omreznina
+01.04.2025–30.04.2025,Dogovorjena moč za časovni blok 5,3.5,kW,0.0,0.0,omreznina
+01.04.2025–30.04.2025,Prevzeta EE za časovni blok 2,48.0,kWh,0.01833,0.87984,omreznina
+01.04.2025–30.04.2025,Prevzeta EE za časovni blok 3,44.0,kWh,0.01809,0.79596,omreznina
+01.04.2025–30.04.2025,Prevzeta EE za časovni blok 4,16.0,kWh,0.01855,0.2968,omreznina
+01.04.2025–30.04.2025,Prevzeta EE za časovni blok 5,3.0,kWh,0.01873,0.05619,omreznina
+01.04.2025–30.04.2025,Skupaj omrežnina za elektroenergetski sistem,,,,5.80626,skupaj
+01.04.2025–30.04.2025,Prispevek za delovanje operaterja trga,112.0,kWh,0.00013,0.01456,prispevki
+01.04.2025–30.04.2025,Prispevek za energetsko učinkovitost,112.0,kWh,0.0008,0.0896,prispevki
+01.04.2025–30.04.2025,Prispevek za SPTE in OVE,3.5,kW,0.0,0.0,prispevki
+01.04.2025–30.04.2025,Skupaj prispevki in ostale dajatve,,,,0.10416,skupaj
+01.04.2025–30.04.2025,Trošarina,112.0,kWh,0.00153,0.17136,trosarina
+01.04.2025–30.04.2025,Skupaj trošarina,,,,0.17136,skupaj
+01.04.2025–30.04.2025,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
+01.04.2025–30.04.2025,Pavšalni strošek poslovanja,1.0,kos,1.99,1.99,poslovanje
+01.04.2025–30.04.2025,E-popust,1.0,kos,-0.81,-0.81,poslovanje
+01.04.2025–30.04.2025,Obračun storitev pogodbenega računa,,,,1.18,skupaj
+01.04.2025–30.04.2025,Skupaj brez DDV,,,,20.39258,skupaj
+01.04.2025–30.04.2025,DDV 22%,,,,4.48637,ddv
+01.04.2025–30.04.2025,Skupaj z DDV,,,,24.87895,skupaj
+01.04.2025–30.04.2025,ZA PLAČILO,,,,24.87895,za_placilo
+01.05.2025–31.05.2025,Elektro energija – Zanesljiva oskrba (redni cenik),,,,,naslov
+01.05.2025–31.05.2025,Električna energija MT,76.0,kWh,0.1029,7.8204,energija
+01.05.2025–31.05.2025,Električna energija VT,81.0,kWh,0.1249,10.1169,energija
+01.05.2025–31.05.2025,Skupaj električna energija,,,,17.9373,skupaj
+01.05.2025–31.05.2025,Dogovorjena moč za časovni blok 2,3.5,kW,0.91224,3.19284,omreznina
+01.05.2025–31.05.2025,Dogovorjena moč za časovni blok 3,3.5,kW,0.16297,0.57039,omreznina
+01.05.2025–31.05.2025,Dogovorjena moč za časovni blok 4,3.5,kW,0.00407,0.01424,omreznina
+01.05.2025–31.05.2025,Dogovorjena moč za časovni blok 5,3.5,kW,0.0,0.0,omreznina
+01.05.2025–31.05.2025,Prevzeta EE za časovni blok 2,53.0,kWh,0.01833,0.97149,omreznina
+01.05.2025–31.05.2025,Prevzeta EE za časovni blok 3,71.0,kWh,0.01809,1.28439,omreznina
+01.05.2025–31.05.2025,Prevzeta EE za časovni blok 4,27.0,kWh,0.01855,0.50085,omreznina
+01.05.2025–31.05.2025,Prevzeta EE za časovni blok 5,6.0,kWh,0.01873,0.11238,omreznina
+01.05.2025–31.05.2025,Skupaj omrežnina za elektroenergetski sistem,,,,6.64658,skupaj
+01.05.2025–31.05.2025,Prispevek za delovanje operaterja trga,157.0,kWh,0.00013,0.02041,prispevki
+01.05.2025–31.05.2025,Prispevek za energetsko učinkovitost,157.0,kWh,0.0008,0.1256,prispevki
+01.05.2025–31.05.2025,Prispevek za SPTE in OVE,3.5,kW,0.0,0.0,prispevki
+01.05.2025–31.05.2025,Skupaj prispevki in ostale dajatve,,,,0.14601,skupaj
+01.05.2025–31.05.2025,Trošarina,157.0,kWh,0.00153,0.24021,trosarina
+01.05.2025–31.05.2025,Skupaj trošarina,,,,0.24021,skupaj
+01.05.2025–31.05.2025,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
+01.05.2025–31.05.2025,Pavšalni strošek poslovanja,1.0,kos,1.99,1.99,poslovanje
+01.05.2025–31.05.2025,E-popust,1.0,kos,-0.81,-0.81,poslovanje
+01.05.2025–31.05.2025,Obračun storitev pogodbenega računa,,,,1.18,skupaj
+01.05.2025–31.05.2025,Skupaj brez DDV,,,,26.1501,skupaj
+01.05.2025–31.05.2025,DDV 22%,,,,5.75302,ddv
+01.05.2025–31.05.2025,Skupaj z DDV,,,,31.90312,skupaj
+01.05.2025–31.05.2025,ZA PLAČILO,,,,31.90312,za_placilo
+01.06.2025–30.06.2025,Elektro energija – Zanesljiva oskrba (redni cenik),,,,,naslov
+01.06.2025–30.06.2025,Električna energija MT,47.0,kWh,0.1029,4.8363,energija
+01.06.2025–30.06.2025,Električna energija VT,87.0,kWh,0.1249,10.8663,energija
+01.06.2025–30.06.2025,Skupaj električna energija,,,,15.7026,skupaj
+01.06.2025–30.06.2025,Dogovorjena moč za časovni blok 2,3.5,kW,0.91224,3.19284,omreznina
+01.06.2025–30.06.2025,Dogovorjena moč za časovni blok 3,3.5,kW,0.16297,0.57039,omreznina
+01.06.2025–30.06.2025,Dogovorjena moč za časovni blok 4,3.5,kW,0.00407,0.01424,omreznina
+01.06.2025–30.06.2025,Dogovorjena moč za časovni blok 5,3.5,kW,0.0,0.0,omreznina
+01.06.2025–30.06.2025,Prevzeta EE za časovni blok 2,56.0,kWh,0.01833,1.02648,omreznina
+01.06.2025–30.06.2025,Prevzeta EE za časovni blok 3,51.0,kWh,0.01809,0.92259,omreznina
+01.06.2025–30.06.2025,Prevzeta EE za časovni blok 4,22.0,kWh,0.01855,0.4081,omreznina
+01.06.2025–30.06.2025,Prevzeta EE za časovni blok 5,5.0,kWh,0.01873,0.09365,omreznina
+01.06.2025–30.06.2025,Skupaj omrežnina za elektroenergetski sistem,,,,6.22829,skupaj
+01.06.2025–30.06.2025,Prispevek za delovanje operaterja trga,134.0,kWh,0.00013,0.01742,prispevki
+01.06.2025–30.06.2025,Prispevek za energetsko učinkovitost,134.0,kWh,0.0008,0.1072,prispevki
+01.06.2025–30.06.2025,Prispevek za SPTE in OVE,3.5,kW,0.0,0.0,prispevki
+01.06.2025–30.06.2025,Skupaj prispevki in ostale dajatve,,,,0.12462,skupaj
+01.06.2025–30.06.2025,Trošarina,134.0,kWh,0.00153,0.20502,trosarina
+01.06.2025–30.06.2025,Skupaj trošarina,,,,0.20502,skupaj
+01.06.2025–30.06.2025,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
+01.06.2025–30.06.2025,Pavšalni strošek poslovanja,1.0,kos,1.99,1.99,poslovanje
+01.06.2025–30.06.2025,E-popust,1.0,kos,-0.81,-0.81,poslovanje
+01.06.2025–30.06.2025,Obračun storitev pogodbenega računa,,,,1.18,skupaj
+01.06.2025–30.06.2025,Skupaj brez DDV,,,,23.44053,skupaj
+01.06.2025–30.06.2025,DDV 22%,,,,5.15692,ddv
+01.06.2025–30.06.2025,Skupaj z DDV,,,,28.59745,skupaj
+01.06.2025–30.06.2025,ZA PLAČILO,,,,28.59745,za_placilo
+01.07.2025–31.07.2025,Elektro energija – Zanesljiva oskrba (redni cenik),,,,,naslov
+01.07.2025–31.07.2025,Električna energija MT,41.0,kWh,0.1029,4.2189,energija
+01.07.2025–31.07.2025,Električna energija VT,85.0,kWh,0.1249,10.6165,energija
+01.07.2025–31.07.2025,Skupaj električna energija,,,,14.8354,skupaj
+01.07.2025–31.07.2025,Dogovorjena moč za časovni blok 2,3.5,kW,0.91224,3.19284,omreznina
+01.07.2025–31.07.2025,Dogovorjena moč za časovni blok 3,3.5,kW,0.16297,0.57039,omreznina
+01.07.2025–31.07.2025,Dogovorjena moč za časovni blok 4,3.5,kW,0.00407,0.01424,omreznina
+01.07.2025–31.07.2025,Dogovorjena moč za časovni blok 5,3.5,kW,0.0,0.0,omreznina
+01.07.2025–31.07.2025,Prevzeta EE za časovni blok 2,55.0,kWh,0.01833,1.00815,omreznina
+01.07.2025–31.07.2025,Prevzeta EE za časovni blok 3,47.0,kWh,0.01809,0.85023,omreznina
+01.07.2025–31.07.2025,Prevzeta EE za časovni blok 4,19.0,kWh,0.01855,0.35245,omreznina
+01.07.2025–31.07.2025,Prevzeta EE za časovni blok 5,4.0,kWh,0.01873,0.07492,omreznina
+01.07.2025–31.07.2025,Skupaj omrežnina za elektroenergetski sistem,,,,6.06322,skupaj
+01.07.2025–31.07.2025,Prispevek za delovanje operaterja trga,126.0,kWh,0.00013,0.01638,prispevki
+01.07.2025–31.07.2025,Prispevek za energetsko učinkovitost,126.0,kWh,0.0008,0.1008,prispevki
+01.07.2025–31.07.2025,Prispevek za SPTE in OVE,3.5,kW,0.77562,2.71467,prispevki
+01.07.2025–31.07.2025,Skupaj prispevki in ostale dajatve,,,,2.83185,skupaj
+01.07.2025–31.07.2025,Trošarina,126.0,kWh,0.00153,0.19278,trosarina
+01.07.2025–31.07.2025,Skupaj trošarina,,,,0.19278,skupaj
+01.07.2025–31.07.2025,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
+01.07.2025–31.07.2025,Pavšalni strošek poslovanja,1.0,kos,1.99,1.99,poslovanje
+01.07.2025–31.07.2025,E-popust,1.0,kos,-0.81,-0.81,poslovanje
+01.07.2025–31.07.2025,Obračun storitev pogodbenega računa,,,,1.18,skupaj
+01.07.2025–31.07.2025,Skupaj brez DDV,,,,25.10325,skupaj
+01.07.2025–31.07.2025,DDV 22%,,,,5.52271,ddv
+01.07.2025–31.07.2025,Skupaj z DDV,,,,30.62596,skupaj
+01.07.2025–31.07.2025,ZA PLAČILO,,,,30.62596,za_placilo
+01.08.2025–31.08.2025,Elektro energija – Zanesljiva oskrba (redni cenik),,,,,naslov
+01.08.2025–31.08.2025,Električna energija MT,71.0,kWh,0.1029,7.3059,energija
+01.08.2025–31.08.2025,Električna energija VT,108.0,kWh,0.1249,13.4892,energija
+01.08.2025–31.08.2025,Skupaj električna energija,,,,20.7951,skupaj
+01.08.2025–31.08.2025,Dogovorjena moč za časovni blok 2,3.5,kW,0.91224,3.19284,omreznina
+01.08.2025–31.08.2025,Dogovorjena moč za časovni blok 3,3.5,kW,0.16297,0.57039,omreznina
+01.08.2025–31.08.2025,Dogovorjena moč za časovni blok 4,3.5,kW,0.00407,0.01424,omreznina
+01.08.2025–31.08.2025,Dogovorjena moč za časovni blok 5,3.5,kW,0.0,0.0,omreznina
+01.08.2025–31.08.2025,Prevzeta EE za časovni blok 2,68.0,kWh,0.01833,1.24644,omreznina
+01.08.2025–31.08.2025,Prevzeta EE za časovni blok 3,78.0,kWh,0.01809,1.41102,omreznina
+01.08.2025–31.08.2025,Prevzeta EE za časovni blok 4,26.0,kWh,0.01855,0.4823,omreznina
+01.08.2025–31.08.2025,Prevzeta EE za časovni blok 5,7.0,kWh,0.01873,0.13111,omreznina
+01.08.2025–31.08.2025,Skupaj omrežnina za elektroenergetski sistem,,,,7.04834,skupaj
+01.08.2025–31.08.2025,Prispevek za delovanje operaterja trga,179.0,kWh,0.00013,0.02327,prispevki
+01.08.2025–31.08.2025,Prispevek za energetsko učinkovitost,179.0,kWh,0.0008,0.1432,prispevki
+01.08.2025–31.08.2025,Prispevek za SPTE in OVE,3.5,kW,0.77562,2.71467,prispevki
+01.08.2025–31.08.2025,Skupaj prispevki in ostale dajatve,,,,2.88114,skupaj
+01.08.2025–31.08.2025,Trošarina,179.0,kWh,0.00153,0.27387,trosarina
+01.08.2025–31.08.2025,Skupaj trošarina,,,,0.27387,skupaj
+01.08.2025–31.08.2025,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
+01.08.2025–31.08.2025,Pavšalni strošek poslovanja,1.0,kos,1.99,1.99,poslovanje
+01.08.2025–31.08.2025,E-popust,1.0,kos,-0.81,-0.81,poslovanje
+01.08.2025–31.08.2025,Obračun storitev pogodbenega računa,,,,1.18,skupaj
+01.08.2025–31.08.2025,Skupaj brez DDV,,,,32.17845,skupaj
+01.08.2025–31.08.2025,DDV 22%,,,,7.07926,ddv
+01.08.2025–31.08.2025,Skupaj z DDV,,,,39.25771,skupaj
+01.08.2025–31.08.2025,ZA PLAČILO,,,,39.25771,za_placilo
+01.09.2025–30.09.2025,Elektro energija – Zanesljiva oskrba (redni cenik),,,,,naslov
+01.09.2025–30.09.2025,Električna energija MT,49.0,kWh,0.1029,5.0421,energija
+01.09.2025–30.09.2025,Električna energija VT,101.0,kWh,0.1249,12.6149,energija
+01.09.2025–30.09.2025,Skupaj električna energija,,,,17.657,skupaj
+01.09.2025–30.09.2025,Dogovorjena moč za časovni blok 2,3.5,kW,0.91224,3.19284,omreznina
+01.09.2025–30.09.2025,Dogovorjena moč za časovni blok 3,3.5,kW,0.16297,0.57039,omreznina
+01.09.2025–30.09.2025,Dogovorjena moč za časovni blok 4,3.5,kW,0.00407,0.01424,omreznina
+01.09.2025–30.09.2025,Dogovorjena moč za časovni blok 5,3.5,kW,0.0,0.0,omreznina
+01.09.2025–30.09.2025,Prevzeta EE za časovni blok 2,68.0,kWh,0.01833,1.24644,omreznina
+01.09.2025–30.09.2025,Prevzeta EE za časovni blok 3,61.0,kWh,0.01809,1.10349,omreznina
+01.09.2025–30.09.2025,Prevzeta EE za časovni blok 4,19.0,kWh,0.01855,0.35245,omreznina
+01.09.2025–30.09.2025,Prevzeta EE za časovni blok 5,3.0,kWh,0.01873,0.05619,omreznina
+01.09.2025–30.09.2025,Skupaj omrežnina za elektroenergetski sistem,,,,6.53604,skupaj
+01.09.2025–30.09.2025,Prispevek za delovanje operaterja trga,150.0,kWh,0.00013,0.0195,prispevki
+01.09.2025–30.09.2025,Prispevek za energetsko učinkovitost,150.0,kWh,0.0008,0.12,prispevki
+01.09.2025–30.09.2025,Prispevek za SPTE in OVE,3.5,kW,0.77562,2.71467,prispevki
+01.09.2025–30.09.2025,Skupaj prispevki in ostale dajatve,,,,2.85417,skupaj
+01.09.2025–30.09.2025,Trošarina,150.0,kWh,0.00153,0.2295,trosarina
+01.09.2025–30.09.2025,Skupaj trošarina,,,,0.2295,skupaj
+01.09.2025–30.09.2025,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
+01.09.2025–30.09.2025,Pavšalni strošek poslovanja,1.0,kos,1.99,1.99,poslovanje
+01.09.2025–30.09.2025,E-popust,1.0,kos,-0.81,-0.81,poslovanje
+01.09.2025–30.09.2025,Obračun storitev pogodbenega računa,,,,1.18,skupaj
+01.09.2025–30.09.2025,Skupaj brez DDV,,,,28.45671,skupaj
+01.09.2025–30.09.2025,DDV 22%,,,,6.26048,ddv
+01.09.2025–30.09.2025,Skupaj z DDV,,,,34.71719,skupaj
+01.09.2025–30.09.2025,ZA PLAČILO,,,,34.71719,za_placilo
+01.10.2025–31.10.2025,Elektro energija – Zanesljiva oskrba (redni cenik),,,,,naslov
+01.10.2025–31.10.2025,Električna energija MT,59.0,kWh,0.1029,6.0711,energija
+01.10.2025–31.10.2025,Električna energija VT,101.0,kWh,0.1249,12.6149,energija
+01.10.2025–31.10.2025,Skupaj električna energija,,,,18.686,skupaj
+01.10.2025–31.10.2025,Dogovorjena moč za časovni blok 2,3.5,kW,0.91224,3.19284,omreznina
+01.10.2025–31.10.2025,Dogovorjena moč za časovni blok 3,3.5,kW,0.16297,0.57039,omreznina
+01.10.2025–31.10.2025,Dogovorjena moč za časovni blok 4,3.5,kW,0.00407,0.01424,omreznina
+01.10.2025–31.10.2025,Dogovorjena moč za časovni blok 5,3.5,kW,0.0,0.0,omreznina
+01.10.2025–31.10.2025,Prevzeta EE za časovni blok 2,63.0,kWh,0.01833,1.15479,omreznina
+01.10.2025–31.10.2025,Prevzeta EE za časovni blok 3,71.0,kWh,0.01809,1.28439,omreznina
+01.10.2025–31.10.2025,Prevzeta EE za časovni blok 4,22.0,kWh,0.01855,0.4081,omreznina
+01.10.2025–31.10.2025,Prevzeta EE za časovni blok 5,4.0,kWh,0.01873,0.07492,omreznina
+01.10.2025–31.10.2025,Skupaj omrežnina za elektroenergetski sistem,,,,6.69967,skupaj
+01.10.2025–31.10.2025,Prispevek za delovanje operaterja trga,160.0,kWh,0.00013,0.0208,prispevki
+01.10.2025–31.10.2025,Prispevek za energetsko učinkovitost,160.0,kWh,0.0008,0.128,prispevki
+01.10.2025–31.10.2025,Prispevek za SPTE in OVE,3.5,kW,0.77562,2.71467,prispevki
+01.10.2025–31.10.2025,Skupaj prispevki in ostale dajatve,,,,2.86347,skupaj
+01.10.2025–31.10.2025,Trošarina,160.0,kWh,0.00153,0.2448,trosarina
+01.10.2025–31.10.2025,Skupaj trošarina,,,,0.2448,skupaj
+01.10.2025–31.10.2025,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
+01.10.2025–31.10.2025,Pavšalni strošek poslovanja,1.0,kos,1.99,1.99,poslovanje
+01.10.2025–31.10.2025,E-popust,1.0,kos,-0.81,-0.81,poslovanje
+01.10.2025–31.10.2025,Obračun storitev pogodbenega računa,,,,1.18,skupaj
+01.10.2025–31.10.2025,Skupaj brez DDV,,,,29.67394,skupaj
+01.10.2025–31.10.2025,DDV 22%,,,,6.52827,ddv
+01.10.2025–31.10.2025,Skupaj z DDV,,,,36.20221,skupaj
+01.10.2025–31.10.2025,ZA PLAČILO,,,,36.20221,za_placilo
+01.11.2025–30.11.2025,Elektro energija – Zanesljiva oskrba (redni cenik),,,,,naslov
+01.11.2025–30.11.2025,Električna energija MT,52.0,kWh,0.1029,5.3508,energija
+01.11.2025–30.11.2025,Električna energija VT,68.0,kWh,0.1249,8.4932,energija
+01.11.2025–30.11.2025,Skupaj električna energija,,,,13.844,skupaj
+01.11.2025–30.11.2025,Dogovorjena moč za časovni blok 1,3.5,kW,1.71126,5.98941,omreznina
+01.11.2025–30.11.2025,Dogovorjena moč za časovni blok 2,3.5,kW,0.91224,3.19284,omreznina
+01.11.2025–30.11.2025,Dogovorjena moč za časovni blok 3,3.5,kW,0.16297,0.57039,omreznina
+01.11.2025–30.11.2025,Dogovorjena moč za časovni blok 4,3.5,kW,0.00407,0.01424,omreznina
+01.11.2025–30.11.2025,Prevzeta EE za časovni blok 1,44.0,kWh,0.01998,0.87912,omreznina
+01.11.2025–30.11.2025,Prevzeta EE za časovni blok 2,56.0,kWh,0.01833,1.02648,omreznina
+01.11.2025–30.11.2025,Prevzeta EE za časovni blok 3,16.0,kWh,0.01809,0.28944,omreznina
+01.11.2025–30.11.2025,Prevzeta EE za časovni blok 4,4.0,kWh,0.01855,0.0742,omreznina
+01.11.2025–30.11.2025,Skupaj omrežnina za elektroenergetski sistem,,,,12.03612,skupaj
+01.11.2025–30.11.2025,Prispevek za delovanje operaterja trga,120.0,kWh,0.00013,0.0156,prispevki
+01.11.2025–30.11.2025,Prispevek za energetsko učinkovitost,120.0,kWh,0.0008,0.096,prispevki
+01.11.2025–30.11.2025,Prispevek za SPTE in OVE,3.5,kW,0.38781,1.35733,prispevki
+01.11.2025–30.11.2025,Skupaj prispevki in ostale dajatve,,,,1.46893,skupaj
+01.11.2025–30.11.2025,Trošarina,120.0,kWh,0.00153,0.1836,trosarina
+01.11.2025–30.11.2025,Skupaj trošarina,,,,0.1836,skupaj
+01.11.2025–30.11.2025,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
+01.11.2025–30.11.2025,Pavšalni strošek poslovanja,1.0,kos,1.99,1.99,poslovanje
+01.11.2025–30.11.2025,E-popust,1.0,kos,-0.81,-0.81,poslovanje
+01.11.2025–30.11.2025,Obračun storitev pogodbenega računa,,,,1.18,skupaj
+01.11.2025–30.11.2025,Skupaj brez DDV,,,,28.71265,skupaj
+01.11.2025–30.11.2025,DDV 22%,,,,6.31678,ddv
+01.11.2025–30.11.2025,Skupaj z DDV,,,,35.02943,skupaj
+01.11.2025–30.11.2025,ZA PLAČILO,,,,35.02943,za_placilo
+01.12.2025–31.12.2025,Elektro energija – Zanesljiva oskrba (redni cenik),,,,,naslov
+01.12.2025–31.12.2025,Električna energija MT,63.0,kWh,0.1029,6.4827,energija
+01.12.2025–31.12.2025,Električna energija VT,89.0,kWh,0.1249,11.1161,energija
+01.12.2025–31.12.2025,Skupaj električna energija,,,,17.5988,skupaj
+01.12.2025–31.12.2025,Dogovorjena moč za časovni blok 1,3.5,kW,1.71126,5.98941,omreznina
+01.12.2025–31.12.2025,Dogovorjena moč za časovni blok 2,3.5,kW,0.91224,3.19284,omreznina
+01.12.2025–31.12.2025,Dogovorjena moč za časovni blok 3,3.5,kW,0.16297,0.57039,omreznina
+01.12.2025–31.12.2025,Dogovorjena moč za časovni blok 4,3.5,kW,0.00407,0.01424,omreznina
+01.12.2025–31.12.2025,Prevzeta EE za časovni blok 1,61.0,kWh,0.01998,1.21878,omreznina
+01.12.2025–31.12.2025,Prevzeta EE za časovni blok 2,69.0,kWh,0.01833,1.26477,omreznina
+01.12.2025–31.12.2025,Prevzeta EE za časovni blok 3,19.0,kWh,0.01809,0.34371,omreznina
+01.12.2025–31.12.2025,Prevzeta EE za časovni blok 4,4.0,kWh,0.01855,0.0742,omreznina
+01.12.2025–31.12.2025,Skupaj omrežnina za elektroenergetski sistem,,,,12.66834,skupaj
+01.12.2025–31.12.2025,Prispevek za delovanje operaterja trga,152.0,kWh,0.00013,0.01976,prispevki
+01.12.2025–31.12.2025,Prispevek za energetsko učinkovitost,152.0,kWh,0.0008,0.1216,prispevki
+01.12.2025–31.12.2025,Prispevek za SPTE in OVE,3.5,kW,0.38781,1.35733,prispevki
+01.12.2025–31.12.2025,Skupaj prispevki in ostale dajatve,,,,1.49869,skupaj
+01.12.2025–31.12.2025,Trošarina,152.0,kWh,0.00153,0.23256,trosarina
+01.12.2025–31.12.2025,Skupaj trošarina,,,,0.23256,skupaj
+01.12.2025–31.12.2025,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
+01.12.2025–31.12.2025,Pavšalni strošek poslovanja,1.0,kos,1.99,1.99,poslovanje
+01.12.2025–31.12.2025,E-popust,1.0,kos,-0.81,-0.81,poslovanje
+01.12.2025–31.12.2025,Obračun storitev pogodbenega računa,,,,1.18,skupaj
+01.12.2025–31.12.2025,Skupaj brez DDV,,,,33.17839,skupaj
+01.12.2025–31.12.2025,DDV 22%,,,,7.29925,ddv
+01.12.2025–31.12.2025,Skupaj z DDV,,,,40.47764,skupaj
+01.12.2025–31.12.2025,ZA PLAČILO,,,,40.47764,za_placilo
+01.01.2026–31.01.2026,Elektro energija – Zanesljiva oskrba (redni cenik),,,,,naslov
+01.01.2026–31.01.2026,Električna energija MT,67.0,kWh,0.1029,6.8943,energija
+01.01.2026–31.01.2026,Električna energija VT,88.0,kWh,0.1249,10.9912,energija
+01.01.2026–31.01.2026,Skupaj električna energija,,,,17.8855,skupaj
+01.01.2026–31.01.2026,Dogovorjena moč za časovni blok 1,2.8,kW,1.71126,4.79153,omreznina
+01.01.2026–31.01.2026,Dogovorjena moč za časovni blok 2,3.5,kW,0.91224,3.19284,omreznina
+01.01.2026–31.01.2026,Dogovorjena moč za časovni blok 3,3.5,kW,0.16297,0.57039,omreznina
+01.01.2026–31.01.2026,Dogovorjena moč za časovni blok 4,3.5,kW,0.00407,0.01424,omreznina
+01.01.2026–31.01.2026,Prevzeta EE za časovni blok 1,58.0,kWh,0.01998,1.15884,omreznina
+01.01.2026–31.01.2026,Prevzeta EE za časovni blok 2,72.0,kWh,0.01833,1.31976,omreznina
+01.01.2026–31.01.2026,Prevzeta EE za časovni blok 3,21.0,kWh,0.01809,0.37989,omreznina
+01.01.2026–31.01.2026,Prevzeta EE za časovni blok 4,5.0,kWh,0.01855,0.09275,omreznina
+01.01.2026–31.01.2026,Skupaj omrežnina za elektroenergetski sistem,,,,11.52024,skupaj
+01.01.2026–31.01.2026,Prispevek za delovanje operaterja trga,155.0,kWh,0.00013,0.02015,prispevki
+01.01.2026–31.01.2026,Prispevek za energetsko učinkovitost,155.0,kWh,0.0008,0.124,prispevki
+01.01.2026–31.01.2026,Prispevek za SPTE in OVE,2.8,kW,0.38781,1.08587,prispevki
+01.01.2026–31.01.2026,Skupaj prispevki in ostale dajatve,,,,1.23002,skupaj
+01.01.2026–31.01.2026,Trošarina,155.0,kWh,0.00153,0.23715,trosarina
+01.01.2026–31.01.2026,Skupaj trošarina,,,,0.23715,skupaj
+01.01.2026–31.01.2026,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
+01.01.2026–31.01.2026,Pavšalni strošek poslovanja,1.0,kos,1.99,1.99,poslovanje
+01.01.2026–31.01.2026,E-popust,1.0,kos,-0.81,-0.81,poslovanje
+01.01.2026–31.01.2026,Obračun storitev pogodbenega računa,,,,1.18,skupaj
+01.01.2026–31.01.2026,Skupaj brez DDV,,,,32.05291,skupaj
+01.01.2026–31.01.2026,DDV 22%,,,,7.05164,ddv
+01.01.2026–31.01.2026,Skupaj z DDV,,,,39.10455,skupaj
+01.01.2026–31.01.2026,ZA PLAČILO,,,,39.10455,za_placilo
+01.02.2026–28.02.2026,Elektro energija – Zanesljiva oskrba (redni cenik),,,,,naslov
+01.02.2026–28.02.2026,Električna energija MT,57.0,kWh,0.1029,5.8653,energija
+01.02.2026–28.02.2026,Električna energija VT,88.0,kWh,0.1249,10.9912,energija
+01.02.2026–28.02.2026,Skupaj električna energija,,,,16.8565,skupaj
+01.02.2026–28.02.2026,Dogovorjena moč za časovni blok 1,2.8,kW,1.71126,4.79153,omreznina
+01.02.2026–28.02.2026,Dogovorjena moč za časovni blok 2,3.5,kW,0.91224,3.19284,omreznina
+01.02.2026–28.02.2026,Dogovorjena moč za časovni blok 3,3.5,kW,0.16297,0.57039,omreznina
+01.02.2026–28.02.2026,Dogovorjena moč za časovni blok 4,3.5,kW,0.00407,0.01424,omreznina
+01.02.2026–28.02.2026,Prevzeta EE za časovni blok 1,56.0,kWh,0.01998,1.11888,omreznina
+01.02.2026–28.02.2026,Prevzeta EE za časovni blok 2,65.0,kWh,0.01833,1.19145,omreznina
+01.02.2026–28.02.2026,Prevzeta EE za časovni blok 3,20.0,kWh,0.01809,0.3618,omreznina
+01.02.2026–28.02.2026,Prevzeta EE za časovni blok 4,4.0,kWh,0.01855,0.0742,omreznina
+01.02.2026–28.02.2026,Skupaj omrežnina za elektroenergetski sistem,,,,11.31533,skupaj
+01.02.2026–28.02.2026,Prispevek za delovanje operaterja trga,145.0,kWh,0.00013,0.01885,prispevki
+01.02.2026–28.02.2026,Prispevek za energetsko učinkovitost,145.0,kWh,0.0008,0.116,prispevki
+01.02.2026–28.02.2026,Prispevek za SPTE in OVE,2.8,kW,0.38781,1.08587,prispevki
+01.02.2026–28.02.2026,Skupaj prispevki in ostale dajatve,,,,1.22072,skupaj
+01.02.2026–28.02.2026,Trošarina,145.0,kWh,0.00153,0.22185,trosarina
+01.02.2026–28.02.2026,Skupaj trošarina,,,,0.22185,skupaj
+01.02.2026–28.02.2026,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
+01.02.2026–28.02.2026,Pavšalni strošek poslovanja,1.0,kos,1.99,1.99,poslovanje
+01.02.2026–28.02.2026,E-popust,1.0,kos,-0.81,-0.81,poslovanje
+01.02.2026–28.02.2026,Obračun storitev pogodbenega računa,,,,1.18,skupaj
+01.02.2026–28.02.2026,Skupaj brez DDV,,,,30.7944,skupaj
+01.02.2026–28.02.2026,DDV 22%,,,,6.77477,ddv
+01.02.2026–28.02.2026,Skupaj z DDV,,,,37.56917,skupaj
+01.02.2026–28.02.2026,ZA PLAČILO,,,,37.56917,za_placilo
+01.03.2026–31.03.2026,Elektro energija – Zanesljiva oskrba (redni cenik),,,,,naslov
+01.03.2026–31.03.2026,Električna energija MT,49.0,kWh,0.1029,5.0421,energija
+01.03.2026–31.03.2026,Električna energija VT,94.0,kWh,0.1249,11.7406,energija
+01.03.2026–31.03.2026,Skupaj električna energija,,,,16.7827,skupaj
+01.03.2026–31.03.2026,Dogovorjena moč za časovni blok 2,3.5,kW,1.0923,3.82305,omreznina
+01.03.2026–31.03.2026,Dogovorjena moč za časovni blok 3,3.5,kW,0.28902,1.01157,omreznina
+01.03.2026–31.03.2026,Dogovorjena moč za časovni blok 4,3.5,kW,0.02436,0.08526,omreznina
+01.03.2026–31.03.2026,Dogovorjena moč za časovni blok 5,3.5,kW,0.00245,0.00857,omreznina
+01.03.2026–31.03.2026,Prevzeta EE za časovni blok 2,64.0,kWh,0.01998,1.27872,omreznina
+01.03.2026–31.03.2026,Prevzeta EE za časovni blok 3,55.0,kWh,0.01717,0.94435,omreznina
+01.03.2026–31.03.2026,Prevzeta EE za časovni blok 4,20.0,kWh,0.01805,0.361,omreznina
+01.03.2026–31.03.2026,Prevzeta EE za časovni blok 5,4.0,kWh,0.01299,0.05196,omreznina
+01.03.2026–31.03.2026,Skupaj omrežnina za elektroenergetski sistem,,,,7.56448,skupaj
+01.03.2026–31.03.2026,Prispevek za delovanje operaterja trga,143.0,kWh,0.00013,0.01859,prispevki
+01.03.2026–31.03.2026,Prispevek za energetsko učinkovitost,143.0,kWh,0.0008,0.1144,prispevki
+01.03.2026–31.03.2026,Prispevek za SPTE in OVE,3.5,kW,0.77562,2.71467,prispevki
+01.03.2026–31.03.2026,Skupaj prispevki in ostale dajatve,,,,2.84766,skupaj
+01.03.2026–31.03.2026,Trošarina,143.0,kWh,0.00153,0.21879,trosarina
+01.03.2026–31.03.2026,Skupaj trošarina,,,,0.21879,skupaj
+01.03.2026–31.03.2026,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
+01.03.2026–31.03.2026,Pavšalni strošek poslovanja,1.0,kos,1.99,1.99,poslovanje
+01.03.2026–31.03.2026,E-popust,1.0,kos,-0.81,-0.81,poslovanje
+01.03.2026–31.03.2026,Obračun storitev pogodbenega računa,,,,1.18,skupaj
+01.03.2026–31.03.2026,Skupaj brez DDV,,,,28.59363,skupaj
+01.03.2026–31.03.2026,DDV 22%,,,,6.2906,ddv
+01.03.2026–31.03.2026,Skupaj z DDV,,,,34.88423,skupaj
+01.03.2026–31.03.2026,ZA PLAČILO,,,,34.88423,za_placilo
+01.04.2026–30.04.2026,Elektro energija – Zanesljiva oskrba (redni cenik),,,,,naslov
+01.04.2026–30.04.2026,Električna energija MT,62.0,kWh,0.1029,6.3798,energija
+01.04.2026–30.04.2026,Električna energija VT,80.0,kWh,0.1249,9.992,energija
+01.04.2026–30.04.2026,Skupaj električna energija,,,,16.3718,skupaj
+01.04.2026–30.04.2026,Dogovorjena moč za časovni blok 2,3.5,kW,1.0923,3.82305,omreznina
+01.04.2026–30.04.2026,Dogovorjena moč za časovni blok 3,3.5,kW,0.28902,1.01157,omreznina
+01.04.2026–30.04.2026,Dogovorjena moč za časovni blok 4,3.5,kW,0.02436,0.08526,omreznina
+01.04.2026–30.04.2026,Dogovorjena moč za časovni blok 5,3.5,kW,0.00245,0.00857,omreznina
+01.04.2026–30.04.2026,Prevzeta EE za časovni blok 2,53.0,kWh,0.01998,1.05894,omreznina
+01.04.2026–30.04.2026,Prevzeta EE za časovni blok 3,65.0,kWh,0.01717,1.11605,omreznina
+01.04.2026–30.04.2026,Prevzeta EE za časovni blok 4,20.0,kWh,0.01805,0.361,omreznina
+01.04.2026–30.04.2026,Prevzeta EE za časovni blok 5,4.0,kWh,0.01299,0.05196,omreznina
+01.04.2026–30.04.2026,Skupaj omrežnina za elektroenergetski sistem,,,,7.5164,skupaj
+01.04.2026–30.04.2026,Prispevek za delovanje operaterja trga,142.0,kWh,0.00013,0.01846,prispevki
+01.04.2026–30.04.2026,Prispevek za energetsko učinkovitost,142.0,kWh,0.0008,0.1136,prispevki
+01.04.2026–30.04.2026,Prispevek za SPTE in OVE,3.5,kW,0.77562,2.71467,prispevki
+01.04.2026–30.04.2026,Skupaj prispevki in ostale dajatve,,,,2.84673,skupaj
+01.04.2026–30.04.2026,Trošarina,142.0,kWh,0.00153,0.21726,trosarina
+01.04.2026–30.04.2026,Skupaj trošarina,,,,0.21726,skupaj
+01.04.2026–30.04.2026,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
+01.04.2026–30.04.2026,Pavšalni strošek poslovanja,1.0,kos,1.99,1.99,poslovanje
+01.04.2026–30.04.2026,E-popust,1.0,kos,-0.81,-0.81,poslovanje
+01.04.2026–30.04.2026,Obračun storitev pogodbenega računa,,,,1.18,skupaj
+01.04.2026–30.04.2026,Skupaj brez DDV,,,,28.13219,skupaj
+01.04.2026–30.04.2026,DDV 22%,,,,6.18908,ddv
+01.04.2026–30.04.2026,Skupaj z DDV,,,,34.32127,skupaj
+01.04.2026–30.04.2026,ZA PLAČILO,,,,34.32127,za_placilo
+01.05.2026–31.05.2026,Elektro energija – Zanesljiva oskrba (redni cenik),,,,,naslov
+01.05.2026–31.05.2026,Električna energija MT,79.0,kWh,0.1029,8.1291,energija
+01.05.2026–31.05.2026,Električna energija VT,88.0,kWh,0.1249,10.9912,energija
+01.05.2026–31.05.2026,Skupaj električna energija,,,,19.1203,skupaj
+01.05.2026–31.05.2026,Dogovorjena moč za časovni blok 2,3.5,kW,1.0923,3.82305,omreznina
+01.05.2026–31.05.2026,Dogovorjena moč za časovni blok 3,3.5,kW,0.28902,1.01157,omreznina
+01.05.2026–31.05.2026,Dogovorjena moč za časovni blok 4,3.5,kW,0.02436,0.08526,omreznina
+01.05.2026–31.05.2026,Dogovorjena moč za časovni blok 5,3.5,kW,0.00245,0.00857,omreznina
+01.05.2026–31.05.2026,Prevzeta EE za časovni blok 2,53.0,kWh,0.01998,1.05894,omreznina
+01.05.2026–31.05.2026,Prevzeta EE za časovni blok 3,81.0,kWh,0.01717,1.39077,omreznina
+01.05.2026–31.05.2026,Prevzeta EE za časovni blok 4,28.0,kWh,0.01805,0.5054,omreznina
+01.05.2026–31.05.2026,Prevzeta EE za časovni blok 5,6.0,kWh,0.01299,0.07794,omreznina
+01.05.2026–31.05.2026,Skupaj omrežnina za elektroenergetski sistem,,,,7.9615,skupaj
+01.05.2026–31.05.2026,Prispevek za delovanje operaterja trga,167.0,kWh,0.00013,0.02171,prispevki
+01.05.2026–31.05.2026,Prispevek za energetsko učinkovitost,167.0,kWh,0.0008,0.1336,prispevki
+01.05.2026–31.05.2026,Prispevek za SPTE in OVE,3.5,kW,0.77562,2.71467,prispevki
+01.05.2026–31.05.2026,Skupaj prispevki in ostale dajatve,,,,2.86998,skupaj
+01.05.2026–31.05.2026,Trošarina,167.0,kWh,0.00153,0.25551,trosarina
+01.05.2026–31.05.2026,Skupaj trošarina,,,,0.25551,skupaj
+01.05.2026–31.05.2026,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
+01.05.2026–31.05.2026,Pavšalni strošek poslovanja,1.0,kos,1.99,1.99,poslovanje
+01.05.2026–31.05.2026,E-popust,1.0,kos,-0.81,-0.81,poslovanje
+01.05.2026–31.05.2026,Obračun storitev pogodbenega računa,,,,1.18,skupaj
+01.05.2026–31.05.2026,Skupaj brez DDV,,,,31.38729,skupaj
+01.05.2026–31.05.2026,DDV 22%,,,,6.9052,ddv
+01.05.2026–31.05.2026,Skupaj z DDV,,,,38.29249,skupaj
+01.05.2026–31.05.2026,ZA PLAČILO,,,,38.29249,za_placilo
+01.06.2026–30.06.2026,Elektro energija – Zanesljiva oskrba (redni cenik),,,,,naslov
+01.06.2026–30.06.2026,Električna energija MT,60.0,kWh,0.1029,6.174,energija
+01.06.2026–30.06.2026,Električna energija VT,85.0,kWh,0.1249,10.6165,energija
+01.06.2026–30.06.2026,Skupaj električna energija,,,,16.7905,skupaj
+01.06.2026–30.06.2026,Dogovorjena moč za časovni blok 2,3.5,kW,1.0923,3.82305,omreznina
+01.06.2026–30.06.2026,Dogovorjena moč za časovni blok 3,3.5,kW,0.28902,1.01157,omreznina
+01.06.2026–30.06.2026,Dogovorjena moč za časovni blok 4,3.5,kW,0.02436,0.08526,omreznina
+01.06.2026–30.06.2026,Dogovorjena moč za časovni blok 5,3.5,kW,0.00245,0.00857,omreznina
+01.06.2026–30.06.2026,Prevzeta EE za časovni blok 2,53.0,kWh,0.01998,1.05894,omreznina
+01.06.2026–30.06.2026,Prevzeta EE za časovni blok 3,63.0,kWh,0.01717,1.08171,omreznina
+01.06.2026–30.06.2026,Prevzeta EE za časovni blok 4,24.0,kWh,0.01805,0.4332,omreznina
+01.06.2026–30.06.2026,Prevzeta EE za časovni blok 5,5.0,kWh,0.01299,0.06495,omreznina
+01.06.2026–30.06.2026,Skupaj omrežnina za elektroenergetski sistem,,,,7.56725,skupaj
+01.06.2026–30.06.2026,Prispevek za delovanje operaterja trga,145.0,kWh,0.00013,0.01885,prispevki
+01.06.2026–30.06.2026,Prispevek za energetsko učinkovitost,145.0,kWh,0.0008,0.116,prispevki
+01.06.2026–30.06.2026,Prispevek za SPTE in OVE,3.5,kW,0.77562,2.71467,prispevki
+01.06.2026–30.06.2026,Skupaj prispevki in ostale dajatve,,,,2.84952,skupaj
+01.06.2026–30.06.2026,Trošarina,145.0,kWh,0.00153,0.22185,trosarina
+01.06.2026–30.06.2026,Skupaj trošarina,,,,0.22185,skupaj
+01.06.2026–30.06.2026,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
+01.06.2026–30.06.2026,Pavšalni strošek poslovanja,1.0,kos,1.99,1.99,poslovanje
+01.06.2026–30.06.2026,E-popust,1.0,kos,-0.81,-0.81,poslovanje
+01.06.2026–30.06.2026,Obračun storitev pogodbenega računa,,,,1.18,skupaj
+01.06.2026–30.06.2026,Skupaj brez DDV,,,,28.60912,skupaj
+01.06.2026–30.06.2026,DDV 22%,,,,6.29401,ddv
+01.06.2026–30.06.2026,Skupaj z DDV,,,,34.90313,skupaj
+01.06.2026–30.06.2026,ZA PLAČILO,,,,34.90313,za_placilo
+01.07.2026–31.07.2026,Elektro energija – Zanesljiva oskrba (redni cenik),,,,,naslov
+01.07.2026–31.07.2026,Električna energija MT,57.0,kWh,0.1029,5.8653,energija
+01.07.2026–31.07.2026,Električna energija VT,102.0,kWh,0.1249,12.7398,energija
+01.07.2026–31.07.2026,Skupaj električna energija,,,,18.6051,skupaj
+01.07.2026–31.07.2026,Dogovorjena moč za časovni blok 2,3.5,kW,1.0923,3.82305,omreznina
+01.07.2026–31.07.2026,Dogovorjena moč za časovni blok 3,3.5,kW,0.28902,1.01157,omreznina
+01.07.2026–31.07.2026,Dogovorjena moč za časovni blok 4,3.5,kW,0.02436,0.08526,omreznina
+01.07.2026–31.07.2026,Dogovorjena moč za časovni blok 5,3.5,kW,0.00245,0.00857,omreznina
+01.07.2026–31.07.2026,Prevzeta EE za časovni blok 2,63.0,kWh,0.01998,1.25874,omreznina
+01.07.2026–31.07.2026,Prevzeta EE za časovni blok 3,63.0,kWh,0.01717,1.08171,omreznina
+01.07.2026–31.07.2026,Prevzeta EE za časovni blok 4,27.0,kWh,0.01805,0.48735,omreznina
+01.07.2026–31.07.2026,Prevzeta EE za časovni blok 5,6.0,kWh,0.01299,0.07794,omreznina
+01.07.2026–31.07.2026,Skupaj omrežnina za elektroenergetski sistem,,,,7.83419,skupaj
+01.07.2026–31.07.2026,Prispevek za delovanje operaterja trga,159.0,kWh,0.00013,0.02067,prispevki
+01.07.2026–31.07.2026,Prispevek za energetsko učinkovitost,159.0,kWh,0.0008,0.1272,prispevki
+01.07.2026–31.07.2026,Prispevek za SPTE in OVE,3.5,kW,0.77562,2.71467,prispevki
+01.07.2026–31.07.2026,Skupaj prispevki in ostale dajatve,,,,2.86254,skupaj
+01.07.2026–31.07.2026,Trošarina,159.0,kWh,0.00153,0.24327,trosarina
+01.07.2026–31.07.2026,Skupaj trošarina,,,,0.24327,skupaj
+01.07.2026–31.07.2026,100% Jedrska energija,1.0,kos,0.0,0.0,poslovanje
+01.07.2026–31.07.2026,Pavšalni strošek poslovanja,1.0,kos,1.99,1.99,poslovanje
+01.07.2026–31.07.2026,E-popust,1.0,kos,-0.81,-0.81,poslovanje
+01.07.2026–31.07.2026,Obračun storitev pogodbenega računa,,,,1.18,skupaj
+01.07.2026–31.07.2026,Skupaj brez DDV,,,,30.7251,skupaj
+01.07.2026–31.07.2026,DDV 22%,,,,6.75952,ddv
+01.07.2026–31.07.2026,Skupaj z DDV,,,,37.48462,skupaj
+01.07.2026–31.07.2026,ZA PLAČILO,,,,37.48462,za_placilo
