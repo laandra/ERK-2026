@@ -183,8 +183,8 @@ def run_user(uid, cluster_id, cells):
 
     print("  [setup] data loading...")
     data_code = cells[6].replace(
-        '"Datasorted by user/Ausgrid 123.csv"',
-        f'"Datasorted by user/Ausgrid {uid}.csv"',
+        '"../Input data/Ausgrid/Ausgrid 123.csv"',
+        f'"../Input data/Ausgrid/Ausgrid {uid}.csv"',
     )
     run_cell(data_code, ns, "6:data")
 
