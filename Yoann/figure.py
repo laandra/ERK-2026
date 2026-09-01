@@ -229,3 +229,17 @@ def fix_illustrative_figure(dataset_name: str, output_root: str = "results"):
 if __name__ == "__main__":
     make_paper_figures(output_root="results")
     fix_illustrative_figure("Ausgrid 65", output_root="results")
+
+    # Paired per-site statistics across arms, once the sweep has been run.
+    arms_path = os.path.join("results", "summary_all_arms.csv")
+    if os.path.exists(arms_path):
+        arms = pd.read_csv(arms_path)
+        for metric in ("cost_prophet", "cost_oracle", "cost_rule"):
+            if metric in arms.columns:
+                print()
+                print(f"--- paired on {metric} (reference {REFERENCE_ARM}) ---")
+                rep = paired_report(arms, output_root="results", metric=metric)
+                print(rep.to_string(index=False))
+    else:
+        print()
+        print(f"{arms_path} not found -- run the sweep before the paired stats.")
