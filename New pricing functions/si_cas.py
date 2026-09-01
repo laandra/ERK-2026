@@ -83,17 +83,50 @@ except ZoneInfoNotFoundError:
 
 TZ_UTC = dt.timezone.utc
 
+# Privzeto: Slovenija, severna polobla. Blokovni razporedi so definirani glede
+# na "delovni / dela prost dan" in "visja / nizka sezona", ne glede na koledar
+# dolocene drzave -- zato je mogoce isto tarifno strukturo uporabiti na profilu
+# iz druge drzave ali z druge poloble, ce se koledar premakne z `nastavi_koledar`.
+#
+# Configurable because the tariff structure is portable but the calendar is not.
+# Applying SI public holidays to an Australian load profile marks the wrong days
+# as non-working (only 5 of 11 NSW and 14 SI dates coincide in 2013), and the
+# northern high season puts the winter network peak on the southern summer.
+DRZAVA_PRAZNIKOV = "SI"
+PODROCJE_PRAZNIKOV = None                              # npr. "NSW"
 VISJA_SEZONA_MESECI = frozenset({11, 12, 1, 2})        # nov, dec, jan, feb
 
 
+def nastavi_koledar(drzava=None, podrocje=None, visja_sezona_meseci=None):
+    """Premakni koledar na drugo drzavo / poloblo. Vrne prejsnjo nastavitev.
+
+    Returns the previous (country, subdivision, months) so a caller can restore
+    it -- these are module-level, so a study that changes them changes them for
+    everything in the process.
+    """
+    global DRZAVA_PRAZNIKOV, PODROCJE_PRAZNIKOV, VISJA_SEZONA_MESECI
+    prej = (DRZAVA_PRAZNIKOV, PODROCJE_PRAZNIKOV, VISJA_SEZONA_MESECI)
+    if drzava is not None:
+        DRZAVA_PRAZNIKOV, PODROCJE_PRAZNIKOV = drzava, podrocje
+    elif podrocje is not None:
+        PODROCJE_PRAZNIKOV = podrocje
+    if visja_sezona_meseci is not None:
+        VISJA_SEZONA_MESECI = frozenset(visja_sezona_meseci)
+    return prej
+
+
 @lru_cache(maxsize=None)
-def _prazniki(leto: int) -> frozenset:
-    """Dela prosti prazniki v SI (kategorija 'public')."""
-    return frozenset(holidays.country_holidays("SI", years=leto).keys())
+def _prazniki(leto: int, drzava: str = "SI", podrocje=None) -> frozenset:
+    """Dela prosti prazniki (kategorija 'public') za dano drzavo/podrocje."""
+    return frozenset(
+        holidays.country_holidays(drzava, subdiv=podrocje, years=leto).keys()
+    )
 
 
 def je_dela_prost(d: dt.date) -> bool:
-    return d.weekday() >= 5 or d in _prazniki(d.year)
+    return d.weekday() >= 5 or d in _prazniki(
+        d.year, DRZAVA_PRAZNIKOV, PODROCJE_PRAZNIKOV
+    )
 
 
 def je_visja_sezona(d: dt.date) -> bool:
