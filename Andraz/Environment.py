@@ -3,7 +3,7 @@ from typing import Optional
 import gymnasium as gym
 import numpy as np
 
-from Basic_Functions import (
+from rl_legacy import (
     BatMaxPolTrenutno,
     BatMaxPraTrenutno,
     BaterijaSprememba,

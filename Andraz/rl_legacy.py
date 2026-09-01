@@ -1,3 +1,33 @@
+"""Legacy support for the RL study: AU pricing, plus its State/Action types.
+
+Renamed off `Basic_Functions` deliberately. Upstream Energy_Community has a
+module of that name at the repo root, and after the merge the two sat on
+`sys.path` together -- whichever directory a notebook happened to run from
+decided which one won.
+
+That mattered most for `calculate_interval_price`. Upstream moved its own into
+`Pricing_Functions` under the SLOVENIAN scheme, with a signature that is
+positionally compatible with the Australian one below:
+
+    calculate_interval_price(smp, consumed_kwh, utc_date, interval_minutes)
+
+so repointing the RL at it would not raise -- it would quietly return Slovenian
+prices for an Australian study. The AU implementation therefore stays here,
+unchanged, and the migration is a deliberate, separately-reviewable step rather
+than an accident of import order.
+
+The four battery-envelope helpers below were checked against upstream's renamed
+equivalents and are numerically identical on every tested state:
+
+    BatMaxPraTrenutno  == Basic_Functions.max_discharge_now
+    BatMaxPolTrenutno  == Basic_Functions.max_charge_now
+    PaneliOdvec        == Basic_Functions.pv_surplus
+    BaterijaSprememba  == Basic_Functions.battery_delta
+
+They are kept local rather than imported so this module has no cross-directory
+path dependency; consolidate them when the RL migrates.
+"""
+
 ### Basic_Functions.py - Updated to accept parameters as function arguments
 
 import pandas as pd

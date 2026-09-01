@@ -3,7 +3,7 @@ import random
 import numpy as np
 import pandas as pd
 
-from Basic_Functions import (
+from rl_legacy import (
     Action,
     BatMaxPolTrenutno,
     BatMaxPraTrenutno,
