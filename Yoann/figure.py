@@ -4,6 +4,8 @@ Section 9 -- Cross-dataset comparison figures (ERK paper, Section 3.1)
 import os
 import numpy as np
 import pandas as pd
+
+JITTER_SEED = 20260101
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -35,7 +37,10 @@ def make_paper_figures(summary_df: pd.DataFrame = None,
     ]:
         data = df[col].dropna().values
         ax.boxplot(data, widths=0.5)
-        x_jitter = 1 + np.random.uniform(-0.05, 0.05, size=len(data))
+        # Seeded: an unseeded jitter makes the figure irreproducible, so two
+        # runs of the same results produce visibly different plots.
+        x_jitter = 1 + np.random.default_rng(JITTER_SEED).uniform(
+            -0.05, 0.05, size=len(data))
         ax.scatter(x_jitter, data, alpha=0.5, s=14, color="steelblue")
         ax.set_ylabel(ylabel)
         ax.set_xticks([1])
@@ -73,6 +78,71 @@ def make_paper_figures(summary_df: pd.DataFrame = None,
 
     df.to_csv(os.path.join(output_root, "summary_with_fraction.csv"), encoding="utf-8-sig")
     return df
+
+
+# ---------------------------------------------------------------------------
+# Paired statistics across sites
+# ---------------------------------------------------------------------------
+def paired_comparison(df, a: str, b: str, label_a: str = None,
+                      label_b: str = None) -> dict:
+    """Wilcoxon signed-rank on the per-site difference between two columns.
+
+    The sites are PAIRED -- every household is run under both conditions -- so
+    the per-site difference is the unit of analysis and a box plot of two
+    independent-looking distributions understates the evidence. Wilcoxon rather
+    than a t-test because 30 sites of cost differences are not plausibly normal
+    and a handful of them (large exporters, dead arrays) sit far out.
+
+    Returns the median difference, its IQR, the number of sites in each
+    direction, and the two-sided p-value. `n_effective` excludes exact ties,
+    which the test drops.
+    """
+    from scipy import stats
+
+    pair = df[[a, b]].dropna()
+    diff = (pair[a] - pair[b]).astype(float)
+    nonzero = diff[diff != 0]
+    out = {
+        "comparison": f"{label_a or a} - {label_b or b}",
+        "n": int(len(diff)),
+        "n_effective": int(len(nonzero)),
+        "median_diff": float(diff.median()),
+        "q1_diff": float(diff.quantile(0.25)),
+        "q3_diff": float(diff.quantile(0.75)),
+        "n_a_greater": int((diff > 0).sum()),
+        "n_b_greater": int((diff < 0).sum()),
+        "n_tied": int((diff == 0).sum()),
+    }
+    if len(nonzero) < 6:
+        # Below ~6 non-tied pairs the exact test cannot reach p < 0.05 whatever
+        # the data does, so a p-value here would be misleading rather than weak.
+        out["p_value"] = float("nan")
+        out["note"] = f"only {len(nonzero)} non-tied pairs; test not run"
+    else:
+        out["p_value"] = float(stats.wilcoxon(nonzero).pvalue)
+        out["note"] = ""
+    return out
+
+
+def paired_report(df_arms, output_root: str = "results",
+                  metric: str = "cost_prophet") -> pd.DataFrame:
+    """Every arm against the reference arm, site by site.
+
+    `df_arms` is the long frame run_arms() writes: one row per (arm, dataset).
+    """
+    wide = df_arms.pivot(index="dataset", columns="arm", values=metric)
+    arms = [c for c in wide.columns if c != REFERENCE_ARM]
+    rows = [paired_comparison(wide, arm, REFERENCE_ARM) for arm in arms
+            if REFERENCE_ARM in wide.columns]
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        path = os.path.join(output_root, f"paired_{metric}.csv")
+        out.to_csv(path, index=False, encoding="utf-8-sig")
+        print(f"Paired comparisons on {metric}: {path}")
+    return out
+
+
+REFERENCE_ARM = "AU_H24"
 
 
 def plot_scenarios_fixed(df_fc, df_pk, delta_t=0.5, save_path=None, title_suffix=""):
