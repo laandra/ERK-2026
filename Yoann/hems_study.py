@@ -362,6 +362,57 @@ def build_forecast_table_refit(params_con, params_gen, df_train, df_sim,
     return pd.concat(frames, ignore_index=True)
 
 
+class TruthForecaster:
+    """Perfect day-ahead knowledge. NOT deployable; a bound, not a controller.
+
+    Day-ahead and no further: the table it serves is anchored at the start of a
+    local day and holds exactly that day, so a controller reading it knows the
+    next 24 h perfectly and nothing beyond. That is the distinction from the
+    oracle arm, which re-reads the truth at every step over a rolling horizon.
+
+    It exists to split the forecast question in two. Paired with a Prophet
+    consumption model under `kind="pvtruth"` it answers "what would a perfect PV
+    forecast be worth?", which is the only way to read the study's most
+    uncomfortable measurement: Prophet's generation model scores WORSE than
+    yesterday-same-interval (skill vs seasonal-naive -0.13 over a year on
+    Ausgrid 127, -0.08 over 14 days). If pvtruth buys little, the PV forecast is
+    not where the money is and fitting a better one is wasted effort.
+    """
+
+    def __init__(self, frame: pd.DataFrame, steps_per_day: int):
+        self.frame = frame
+        self.spd = steps_per_day
+
+    def fit(self, *a, **k):
+        return self
+
+    def config(self) -> dict:
+        return {"kind": "truth", "steps_per_day": self.spd}
+
+    def predict_next_day(self, anchor_ts, horizon_steps: int = 48,
+                         freq: str = "30min") -> pd.DataFrame:
+        i = self.frame.index.get_indexer([anchor_ts])[0]
+        if i < 0:
+            raise KeyError(f"anchor {anchor_ts} is not in the truth frame")
+        window = self.frame.iloc[i:i + horizon_steps]
+        return pd.DataFrame({
+            "ds": window.index,
+            "yhat_con": window["Energy_Consumption"].values,
+            "yhat_gen": window["Energy_Generation"].values,
+        })
+
+
+# A forecast has two channels and they are not equally hard. Prophet earns its
+# place on consumption (skill vs seasonal-naive about +0.2 to +0.3) and loses to
+# yesterday on generation. Averaging the two into one "forecast quality" hides
+# that, so these kinds hold the consumption channel fixed at Prophet and vary
+# only the roof: {kind: (consumption source, generation source)}.
+HYBRID_KINDS = {
+    "pvnaive": ("prophet", "persistence"),
+    "pvtruth": ("prophet", "truth"),
+}
+
+
 def seasonal_naive(actual: pd.Series, spd: int) -> pd.Series:
     """Yesterday, same interval. The baseline any forecaster must beat."""
     return actual.shift(spd)
@@ -458,23 +509,48 @@ def load_or_build_forecasts(dataset_name: str,
         served.table = table
         return served, path
 
-    if kind == "persistence":
-        # No fitting: yesterday, same interval. `history` supplies the day
-        # before the simulation so the first day is copied from real data.
-        frame = pd.concat([history, df_sim]) if history is not None else df_sim
-        pf = PersistenceForecaster(frame, H)
-        table = build_forecast_table(pf, list(df_sim.index[::H]), H, freq)
-        print(f"  [Forecaster] persistence: {len(table)} rows, nothing fitted")
-    elif refit_every_days:
-        table = build_forecast_table_refit(
-            forecaster.params_con, forecaster.params_gen, df_train, df_sim,
-            H, freq, refit_every_days)
-    else:
+    anchors = list(df_sim.index[::H])
+
+    def channel_table(source: str) -> pd.DataFrame:
+        """One source's day-ahead table over every simulated day."""
+        if source == "persistence":
+            # No fitting: yesterday, same interval. `history` supplies the day
+            # before the simulation so the first day is copied from real data.
+            frame = pd.concat([history, df_sim]) if history is not None else df_sim
+            table = build_forecast_table(PersistenceForecaster(frame, H),
+                                         anchors, H, freq)
+            print(f"  [Forecaster] persistence: {len(table)} rows, nothing fitted")
+            return table
+        if source == "truth":
+            table = build_forecast_table(TruthForecaster(df_sim, H), anchors, H, freq)
+            print(f"  [Forecaster] truth: {len(table)} rows, nothing fitted")
+            return table
+        if refit_every_days:
+            return build_forecast_table_refit(
+                forecaster.params_con, forecaster.params_gen, df_train, df_sim,
+                H, freq, refit_every_days)
         forecaster.fit(df_train, "Energy_Consumption", "Energy_Generation")
         # One anchor per simulated day, at the day's first interval -- the same
         # anchors ReactiveController._forecast_slice asks for.
-        anchors = list(df_sim.index[::H])
-        table = build_forecast_table(forecaster, anchors, H, freq)
+        return build_forecast_table(forecaster, anchors, H, freq)
+
+    if kind in HYBRID_KINDS:
+        con_source, gen_source = HYBRID_KINDS[kind]
+        table = channel_table(con_source)
+        gen = channel_table(gen_source)
+        # Both tables are built over the same anchors in the same order, so the
+        # rows line up positionally. Checked rather than assumed: a silent
+        # misalignment here would score one day's PV against another's load.
+        if len(gen) != len(table) or not gen["ds"].equals(table["ds"]):
+            raise ValueError(
+                f"{kind}: the {con_source} and {gen_source} tables do not share "
+                f"an index ({len(table)} vs {len(gen)} rows)"
+            )
+        table = table.assign(yhat_gen=gen["yhat_gen"].to_numpy())
+        print(f"  [Forecaster] {kind}: consumption from {con_source}, "
+              f"generation from {gen_source}")
+    else:
+        table = channel_table(kind)
     table.to_csv(path, index=False, compression="gzip")
     print(f"  [Forecaster] cached {len(table)} rows -> {os.path.basename(path)}")
     served = TableForecaster(table)
@@ -890,7 +966,14 @@ SI_PAKET_ID = "GENI_SAMO_DINAMICNI"     # GEN-I "Dinamicni", samooskrba
 
 
 def au_rate_vectors(index, smp_eur_per_kwh, interval_minutes: int = 30) -> tuple:
-    """Ausgrid EA025 time-of-use, on Australia/Sydney local time."""
+    """Ausgrid EA025 time-of-use, on Australia/Sydney local time.
+
+    Rates are AUD per kWh: the SMP column arrives in EUR/kWh and is divided by
+    0.615 on the way in. The SI arm's are EUR per kWh. Neither is USD, which is
+    what every column in this frame used to be labelled, so the label is gone
+    rather than made wrong in a new way -- an arm's currency is a property of
+    its tariff and travels with the arm.
+    """
     buy, sell = TariffCalculator.rates_series(
         pd.Series(list(smp_eur_per_kwh), index=index))
     const = TariffCalculator.constant_cost_per_interval(interval_minutes)
@@ -925,207 +1008,22 @@ def build_rate_vectors(tariff: str, env, index, smp_eur_per_kwh,
 
 
 # =====================================================================
-# 3d — Baselines
+# 3d — (was: hand-rolled baselines)
 # =====================================================================
 #
-# Two things the MILP has to be measured against, or its 40 % saving means
-# nothing:
+# SelfConsumptionScheduler, TariffArbitrageScheduler, BASELINE_SCHEDULERS and
+# run_baseline lived here. They are gone rather than kept "just in case": a
+# second implementation of a controller is exactly how the MILP ended up solving
+# a different battery from the rules it was compared against (see
+# align_envelope). Their replacements:
 #
-#   SelfConsumptionScheduler  the rule every residential inverter ships with.
-#                             The honest floor: if the MILP cannot beat it by
-#                             much, the optimisation is not what is buying the
-#                             saving. Deliberately built as a SCHEDULER rather
-#                             than a separate runner, so it and the MILP differ
-#                             ONLY in how a setpoint is chosen -- same envelope,
-#                             same rate vectors, same evaluator, same
-#                             assertions. That is upstream Rule_Based_Control's
-#                             own design rule, applied here.
-#   PersistenceForecaster     yesterday, same interval. If Prophet cannot beat
-#                             it, the complexity is not earning its place.
-
-_RULE_EPS = 1e-9
-
-
-class SelfConsumptionScheduler:
-    """Charge the PV surplus, discharge into the deficit. Never trade.
-
-    Myopic by construction: it reads only the interval in front of it, so it
-    cannot arbitrage a price spread and it cannot pre-charge for a peak. The
-    horizon is still walked forward, because ReactiveController records a plan
-    and asserts the executed SoC follows it -- but only step 0 is ever applied,
-    and re-planning happens every step, so what the rule actually does is decide
-    one interval at a time from what it can know.
-    """
-
-    def __init__(self, env, battery_cap: float, soc_min_pct: float,
-                 soc_max_pct: float, p_max: float, eff: float, delta_t: float,
-                 **_ignored):
-        self.env       = env
-        self.eff       = eff
-        self.delta_t   = delta_t
-        self.p_max     = p_max
-        self.soc_min   = battery_cap * soc_min_pct
-        self.soc_max   = battery_cap * soc_max_pct
-        self.capacity  = env.battery_capacity_kwh
-        self.max_ch_kw  = env.max_charge_kwh / eff / delta_t
-        self.max_dis_kw = env.max_discharge_kwh * eff / delta_t
-
-    def solve(self, soc_init: float, buy_rate: list, sell_rate: list,
-              p_gen: list, p_con: list, terminal_soc: float | None = None) -> dict:
-        H, dt = len(buy_rate), self.delta_t
-        stored = float(np.clip(soc_init - self.soc_min, 0.0, self.capacity))
-
-        x_ch, x_dis, p_buy, p_sell, soc_plan = [], [], [], [], []
-        for t in range(H):
-            gen_kwh, con_kwh = p_gen[t] * dt, p_con[t] * dt
-            # The same envelope add_household_physics writes into the LP.
-            hi = max_charge_now(stored, self.eff, self.env.max_charge_kwh, self.capacity)
-            lo = max_discharge_now(stored, self.eff, self.env.max_discharge_kwh)
-
-            surplus = pv_surplus(gen_kwh, con_kwh)
-            deficit = max(con_kwh - gen_kwh, 0.0)
-            if surplus > _RULE_EPS:
-                ch, dis = min(surplus, hi), 0.0
-            elif deficit > _RULE_EPS:
-                ch, dis = 0.0, min(deficit, lo)
-            else:
-                ch, dis = 0.0, 0.0
-
-            stored += battery_delta(ch, dis, self.eff, self.eff)
-            net = con_kwh + ch - gen_kwh - dis
-            x_ch.append(ch / dt)
-            x_dis.append(dis / dt)
-            p_buy.append(max(net, 0.0) / dt)
-            p_sell.append(max(-net, 0.0) / dt)
-            soc_plan.append(stored + self.soc_min)
-
-        cost = sum(p_buy[t] * buy_rate[t] - p_sell[t] * sell_rate[t]
-                   for t in range(H)) * dt
-        return {"status": "Optimal", "x_ch": x_ch, "x_dis": x_dis,
-                "p_buy": p_buy, "p_sell": p_sell, "soc_plan": soc_plan,
-                "cost": cost, "n_floored": 0}
-
-
-class TariffArbitrageScheduler(SelfConsumptionScheduler):
-    """Self-consumption, plus grid arbitrage against the PUBLISHED tariff.
-
-    The third baseline, and the one that isolates what the study is really
-    measuring. It reads the tariff over the horizon -- which is published, not
-    forecast -- and the generation and consumption of the interval in front of
-    it, which a meter measures. It reads no forecast of either, and solves no
-    LP. Scrambling every future generation/consumption value never moves step
-    0's action, which is the property that makes "forecast-free" a claim rather
-    than a label.
-
-    It exists because the oracle's advantage over `SelfConsumptionScheduler` is
-    overwhelmingly time-of-use arbitrage rather than better PV capture: the
-    oracle charges ~70% of its throughput off the grid, which pure
-    self-consumption is structurally forbidden to do. Attributing that gap to
-    forecast quality, when it is really the absence of grid charging, is the
-    misreading this arm is here to prevent.
-    """
-
-    # Quantiles of the horizon's own published rates, so one policy runs
-    # unchanged under either tariff rather than hard-coding EA025's 15:00-21:00.
-    CHEAP_Q, PEAK_Q = 0.33, 0.67
-
-    def solve(self, soc_init, buy_rate, sell_rate, p_gen, p_con,
-              terminal_soc=None):
-        H, dt = len(buy_rate), self.delta_t
-        rates = np.asarray(buy_rate, dtype=float)
-        cheap_thr = float(np.quantile(rates, self.CHEAP_Q))
-        peak_thr = float(np.quantile(rates, self.PEAK_Q))
-        step_dis = self.env.max_discharge_kwh
-
-        stored = float(np.clip(soc_init - self.soc_min, 0.0, self.capacity))
-        x_ch, x_dis, p_buy, p_sell, soc_plan = [], [], [], [], []
-
-        for t in range(H):
-            gen_kwh, con_kwh = p_gen[t] * dt, p_con[t] * dt
-            hi = max_charge_now(stored, self.eff, self.env.max_charge_kwh,
-                                self.capacity)
-            lo = max_discharge_now(stored, self.eff, step_dis)
-
-            # The reserve is what makes this more than a rule with a clock:
-            # energy is held back from a cheap interval's deficit while priced
-            # intervals are still ahead, and the amount held is what the battery
-            # could physically deliver into them. Battery spec and tariff table
-            # only -- never a load forecast.
-            n_peak_ahead = int((rates[t + 1:] >= peak_thr).sum())
-            reserve = float(min(self.capacity, n_peak_ahead * step_dis))
-            is_peak = rates[t] >= peak_thr
-            is_cheap = rates[t] <= cheap_thr
-            # Round-trip guard: never buy unless some interval ahead clears the
-            # purchase after BOTH conversion losses.
-            worth_it = (rates[t + 1:].max(initial=0.0) * self.eff * self.eff
-                        > rates[t])
-
-            surplus = pv_surplus(gen_kwh, con_kwh)
-            deficit = max(con_kwh - gen_kwh, 0.0)
-            ch = dis = 0.0
-
-            if surplus > _RULE_EPS:
-                ch = min(surplus, hi)
-                if is_cheap and worth_it:
-                    # Free roof energy first, then top up from the grid.
-                    ch = min(surplus + max(reserve - stored, 0.0), hi)
-            elif deficit > _RULE_EPS:
-                if is_peak:
-                    dis = min(deficit, lo)
-                else:
-                    spare = max(stored - reserve, 0.0)
-                    dis = min(deficit, lo,
-                              max_discharge_now(spare, self.eff, step_dis)
-                              if spare > 0 else 0.0)
-                    if is_cheap and worth_it and stored < reserve:
-                        dis = 0.0
-                        ch = min(reserve - stored, hi)
-            elif is_cheap and worth_it and stored < reserve:
-                ch = min(reserve - stored, hi)
-
-            stored += battery_delta(ch, dis, self.eff, self.eff)
-            net = con_kwh + ch - gen_kwh - dis
-            x_ch.append(ch / dt)
-            x_dis.append(dis / dt)
-            p_buy.append(max(net, 0.0) / dt)
-            p_sell.append(max(-net, 0.0) / dt)
-            soc_plan.append(stored + self.soc_min)
-
-        cost = sum(p_buy[t] * buy_rate[t] - p_sell[t] * sell_rate[t]
-                   for t in range(H)) * dt
-        return {"status": "Optimal", "x_ch": x_ch, "x_dis": x_dis,
-                "p_buy": p_buy, "p_sell": p_sell, "soc_plan": soc_plan,
-                "cost": cost, "n_floored": 0}
-
-
-BASELINE_SCHEDULERS = (
-    ("rule", SelfConsumptionScheduler),
-    ("tou", TariffArbitrageScheduler),
-)
-
-
-def run_baseline(cls, env, df_ctrl, rates, n_sim, soc_init, control_horizon, H,
-                 delta_t, prefix, **battery):
-    """One forecast-free baseline over the simulation, as {prefix}-keyed metrics.
-
-    `env` is the ARM's environment, passed in rather than built here. Building a
-    second one made the baselines drive a battery the MILP never saw -- a 5.3 %
-    larger charge rating and a 5.0 % smaller discharge rating, because upstream
-    bounds stored energy where the MILP bounded AC power. Same env, same
-    envelope, same contract; only the setpoint rule differs.
-    """
-    ctrl = ReactiveController(
-        scheduler=cls(env, delta_t=delta_t, **battery),
-        forecaster=None, real_data=df_ctrl, soc_init=soc_init,
-        horizon_steps=control_horizon, steps_per_day=H, reoptimize_every=1,
-        freq="30min", rate_vectors=rates,
-    )
-    df = ctrl.run(num_days=n_sim, use_forecast=False)
-    return df, {
-        f"cost_{prefix}": float(df["Step_Cost_USD"].sum()),
-        f"buy_{prefix}": float((df["Buy_kW"] * delta_t).sum()),
-        f"sell_{prefix}": float((df["Sell_kW"] * delta_t).sum()),
-    }
+#   SelfConsumptionScheduler   Rule_Based_Control.SelfConsumption, the same rule,
+#                              executed and priced by the same runner as the
+#                              other eight
+#   TariffArbitrageScheduler   TariffArbitrage in section 3e, ported to a Policy
+#                              so nothing is lost -- it is the arm that showed a
+#                              forecast-free rule beating MILP+Prophet
+#   run_baseline               run_rules in section 3e
 
 
 class PersistenceForecaster:
@@ -1205,6 +1103,115 @@ def make_au_settlement(rates, delta_t):
     return settle
 
 
+class TariffArbitrage(rbc.Policy):
+    """Self-consumption, plus arbitrage against the PUBLISHED tariff.
+
+    Carried over from the study's own `TariffArbitrageScheduler`, re-expressed
+    as a Policy so it is executed and priced by the same runner as the other
+    eight instead of by a parallel code path. It is kept because it is the arm
+    that isolates what the study is really measuring: on Ausgrid 127 over 14
+    days it came in at 26.36 EUR against MILP+Prophet's 27.27: a forecast-free
+    rule beating the forecast. If that holds up, the oracle's advantage is
+    time-of-use arbitrage rather than better PV capture, and attributing it to
+    forecast quality is the misreading this rule exists to prevent.
+
+    It reads the tariff over the day -- published, not forecast -- and the
+    generation and consumption of the interval in front of it, which a meter
+    measures. It reads no forecast of either and solves no LP.
+    """
+
+    name = "tariff_arbitrage"
+    label = "Tariff arbitrage"
+
+    CHEAP_Q, PEAK_Q = 0.33, 0.67
+
+    def __init__(self, respect_peak=True):
+        self.respect_peak = respect_peak
+
+    def reset(self, sig):
+        # Thresholds from the day's OWN published rates: SIPX and the AEMO
+        # pre-dispatch both publish the day ahead, so ranking today's intervals
+        # is something a controller genuinely has. Quantiles rather than a
+        # hard-coded clock, so one policy runs unchanged under either tariff.
+        self._cheap = np.empty(sig.n_steps, dtype=float)
+        self._peak = np.empty(sig.n_steps, dtype=float)
+        for steps in sig.day_steps:
+            if not steps:
+                continue
+            lo, hi = steps[0], steps[-1] + 1
+            rates = sig.import_rate[lo:hi]
+            self._cheap[lo:hi] = float(np.quantile(rates, self.CHEAP_Q))
+            self._peak[lo:hi] = float(np.quantile(rates, self.PEAK_Q))
+
+    def setpoint(self, sig, idx, soc_kwh, lo, hi, peak_state):
+        rates = sig.import_rate
+        day = next((s for s in sig.day_steps if s and s[0] <= idx <= s[-1]), None)
+        end = (day[-1] + 1) if day else sig.n_steps
+        ahead = rates[idx + 1:end]
+
+        # The reserve is what makes this more than a rule with a clock: energy
+        # is held back from a cheap interval's deficit while priced intervals
+        # are still ahead, and the amount held is what the battery could
+        # physically deliver into them. Battery spec and tariff table only --
+        # never a load forecast.
+        n_peak_ahead = int((ahead >= self._peak[idx]).sum())
+        reserve = float(min(sig.capacity_kwh, n_peak_ahead * sig.max_discharge_ac))
+        is_peak = rates[idx] >= self._peak[idx]
+        is_cheap = rates[idx] <= self._cheap[idx]
+        # Round-trip guard: never buy unless something ahead clears the purchase
+        # after BOTH conversion losses.
+        worth_it = bool(ahead.size) and float(ahead.max()) * sig.eta_rt > rates[idx]
+
+        surplus, deficit = sig.surplus[idx], sig.deficit[idx]
+        room = rbc._grid_charge_room(sig, idx, hi, peak_state, self.respect_peak)
+
+        if surplus > 1e-9:
+            if is_cheap and worth_it:
+                return min(surplus + max(reserve - soc_kwh, 0.0), room)
+            return min(surplus, hi)
+        if deficit > 1e-9:
+            if is_peak:
+                return -min(deficit, -lo)
+            if is_cheap and worth_it and soc_kwh < reserve:
+                return min(reserve - soc_kwh, room)
+            spare = max(soc_kwh - reserve, 0.0)
+            return -min(deficit, -lo, spare * sig.eta_dis)
+        if is_cheap and worth_it and soc_kwh < reserve:
+            return min(reserve - soc_kwh, room)
+        return 0.0
+
+
+def run_rules(env, settle, tariff, signals=None, only=None, n_steps=None):
+    """Every rule this tariff is compared against, executed and priced.
+
+    Returns `(metrics, rows)`: metrics keyed `cost_<rule>` for the checkpoint,
+    and one row per controller carrying the full set of columns.
+
+    `no_battery` is run here too, as an idle policy, rather than taken from
+    KPITracker: it then goes through the same settlement, the same terminal-SOC
+    treatment and the same endogenous contract as everything it is the reference
+    for. A reference priced by a different function is not a reference.
+    """
+    if signals is None:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            signals = rbc.build_signals(env, n_steps=n_steps)
+
+    roster = [rbc._Idle()] + rule_roster(tariff)
+    if only is not None:
+        roster = [pol for pol in roster if pol.name in set(only)]
+
+    metrics, rows = {}, []
+    for pol in roster:
+        out = rbc.run_policy(env, pol, signals=signals, settle=settle)
+        metrics[f"cost_{pol.name}"] = out["Cost_EUR_Closed"]
+        metrics[f"efc_{pol.name}"] = out["Equivalent_Full_Cycles"]
+        rows.append({"controller": pol.name, "label": pol.label,
+                     "causal": pol.causal, **{
+                         k: v for k, v in out.items() if not k.startswith("_")}})
+    return metrics, rows
+
+
 def build_settlement(tariff, env, rates, delta_t):
     """The one evaluator this arm prices every controller through."""
     if tariff == "AU":
@@ -1223,8 +1230,10 @@ def build_settlement(tariff, env, rates, delta_t):
 # On SI they are the point.
 RULES_BY_TARIFF = {
     "AU": ["self_consumption", "fixed_schedule", "delayed_pv_charge",
-           "price_threshold", "price_rank_daily", "price_oracle"],
-    "SI": list(rbc.POLICY_ORDER),
+           "price_threshold", "price_rank_daily", "tariff_arbitrage",
+           "price_oracle"],
+    "SI": [n for n in rbc.POLICY_ORDER if n != "price_oracle"]
+          + ["tariff_arbitrage", "price_oracle"],
 }
 # `respect_peak` caps grid charging at the agreed power so a rule does not buy
 # its arbitrage twice. On AU there is no excess-power charge to avoid, and the
@@ -1235,6 +1244,7 @@ _PEAK_AWARE_ARGS = {
     "fixed_schedule": "respect_peak", "price_threshold": "respect_peak",
     "price_rank_daily": "respect_peak", "price_oracle": "respect_peak",
     "peak_shaving": "ratchet_aware", "self_consumption_peak_shaving": "ratchet_aware",
+    "tariff_arbitrage": "respect_peak",
 }
 
 
@@ -1244,7 +1254,13 @@ def rule_roster(tariff):
     out = []
     for name in RULES_BY_TARIFF[tariff]:
         arg = _PEAK_AWARE_ARGS.get(name)
-        out.append(rbc.make_policy(name, **({arg: respect} if arg else {})))
+        kw = {arg: respect} if arg else {}
+        if name == "tariff_arbitrage":
+            pol = TariffArbitrage(**kw)
+            pol.name = name
+        else:
+            pol = rbc.make_policy(name, **kw)
+        out.append(pol)
     return out
 
 
@@ -1526,8 +1542,8 @@ class ReactiveController:
             history.append({
                 "Timestamp":        self.data.index[k],
                 "Price_SMP":        real_smp,
-                "Buy_Rate_USD_kWh": real_buy_rate,
-                "Sell_Rate_USD_kWh":real_sell_rate,
+                "Buy_Rate_kWh":     real_buy_rate,
+                "Sell_Rate_kWh":    real_sell_rate,
                 "Solar_Gen":        real_gen,
                 "Consumption":      real_con,
                 "SoC_kWh":          soc_cur,
@@ -1540,7 +1556,7 @@ class ReactiveController:
                 "Discharge_kW":     act_dis,
                 "Buy_kW":           act_buy,
                 "Sell_kW":          act_sell,
-                "Step_Cost_USD":    step_cost,
+                "Step_Cost":        step_cost,
                 "Reoptimized":      int(need_reopt),
             })
             plan_pos += 1
@@ -1576,9 +1592,9 @@ class KPITracker:
         buy_nb=np.maximum(0,df_fc["Consumption"]-df_fc["Solar_Gen"])
         sell_nb=np.maximum(0,df_fc["Solar_Gen"]-df_fc["Consumption"])
 
-        cost_nb=((buy_nb*df_fc["Buy_Rate_USD_kWh"]-sell_nb*df_fc["Sell_Rate_USD_kWh"])*delta_t).sum()
-        cost_pk=df_pk["Step_Cost_USD"].sum()
-        cost_fc=df_fc["Step_Cost_USD"].sum()
+        cost_nb=((buy_nb*df_fc["Buy_Rate_kWh"]-sell_nb*df_fc["Sell_Rate_kWh"])*delta_t).sum()
+        cost_pk=df_pk["Step_Cost"].sum()
+        cost_fc=df_fc["Step_Cost"].sum()
 
         buy_nb_e=(buy_nb*delta_t).sum()
         buy_pk=(df_pk["Buy_kW"]*delta_t).sum()
@@ -1590,11 +1606,11 @@ class KPITracker:
 
         pct = KPITracker._pct
         rows=[
-        {"KPI":"Total cost (USD)",
+        {"KPI":"Total cost",
          "No battery":f"{cost_nb:.2f}",
          "Perfect foresight":f"{cost_pk:.2f} ({pct(cost_pk-cost_nb, cost_nb)})",
          "Forecast (Prophet)":f"{cost_fc:.2f} ({pct(cost_fc-cost_nb, cost_nb)})"},
-        {"KPI":"Regret vs perfect foresight (USD, % of no-battery cost)",
+        {"KPI":"Regret vs perfect foresight (% of no-battery cost)",
          "No battery":"—",
          "Perfect foresight":"0.00 (+0.0 %)",
          "Forecast (Prophet)":f"{cost_fc-cost_pk:.2f} ({pct(cost_fc-cost_pk, cost_nb)})"},
@@ -1818,6 +1834,9 @@ def run_pipeline_for_file(file_path: str,
     )
     rates = build_rate_vectors(tariff, env, df_ctrl.index,
                                df_ctrl["SMP"].values, int(round(delta_t * 60)))
+    # The one evaluator this arm prices every controller through -- rules and
+    # MILP alike. See section 3e.
+    settle = build_settlement(tariff, env, rates, delta_t)
     print(f"Tariff: {tariff} | import rate "
           f"{np.min(rates[0]):.4f}..{np.max(rates[0]):.4f} EUR/kWh")
 
@@ -1830,22 +1849,21 @@ def run_pipeline_for_file(file_path: str,
                 soc_max_pct=soc_max_pct, p_max=p_max, eff=eff)
     cached = read_checkpoint(out_dir, cfg)
     if cached is not None:
-        missing = [p for p, _ in BASELINE_SCHEDULERS if f"cost_{p}" not in cached]
+        missing = [pol.name for pol in rule_roster(tariff)
+                   if f"cost_{pol.name}" not in cached]
         if not missing:
             print("  [checkpoint] already complete under this configuration; skipping")
             return {"dataset": dataset_name, **cached}
-        # A checkpoint written before one of these baselines existed. They need
-        # no forecast and no LP, so they are recomputed in seconds and merged
-        # rather than discarding MILP results that are still perfectly valid.
-        # The tag guard exists to stop rows produced under DIFFERENT RULES from
-        # mixing; adding a column changes no rule that produced the rest.
+        # A checkpoint written before one of these rules existed. They need no
+        # forecast and no LP, so they are recomputed in seconds and merged rather
+        # than discarding MILP results that are still perfectly valid. The tag
+        # guard exists to stop rows produced under DIFFERENT RULES from mixing;
+        # adding a controller changes no rule that produced the rest.
         print(f"  [checkpoint] backfilling {', '.join(missing)} "
               f"(forecast-free, no LP); MILP results reused")
-        for prefix in missing:
-            _, extra = run_baseline(
-                dict(BASELINE_SCHEDULERS)[prefix], env, df_ctrl, rates, n_sim,
-                soc_init, control_horizon, H, delta_t, prefix, **_bat)
-            cached = {**cached, **extra}
+        extra, _ = run_rules(env, settle, tariff, only=missing,
+                             n_steps=n_sim * H)
+        cached = {**cached, **extra}
         write_checkpoint(out_dir, cfg, cached)
         return {"dataset": dataset_name, **cached}
 
@@ -1903,22 +1921,38 @@ def run_pipeline_for_file(file_path: str,
     )
     df_pk = ctrl_pk.run(num_days=n_sim, use_forecast=False)
 
-    # The deployable floor, scored on the same rate vectors by the same
-    # evaluator. Run on REALIZED data deliberately: a self-consumption inverter
-    # measures the surplus in front of it, it does not forecast one, so giving
-    # it the realized interval is physical fidelity rather than the look-ahead
-    # it would be for a planner. There is correspondingly no "forecast" variant
-    # of this baseline.
-    print("\n--- Forecast-free baselines ---")
+    # Every controller re-priced through the arm's ONE evaluator, the two MILP
+    # arms included: ReactiveController accumulates a running cost as it goes,
+    # but that is a convenience, not the bill, and it drops the standing charge.
     kpi_table, kpi_raw = KPITracker.compare_three(df_fc, df_pk, delta_t)
-    baseline_frames = {}
-    for _prefix, _cls in BASELINE_SCHEDULERS:
-        baseline_frames[_prefix], _extra = run_baseline(
-            _cls, env, df_ctrl, rates, n_sim, soc_init, control_horizon, H,
-            delta_t, _prefix, **_bat)
-        kpi_raw.update(_extra)
-        print(f"  {_prefix:5s} {_extra[f'cost_{_prefix}']:9.2f} EUR")
-    df_rule = baseline_frames["rule"]
+    # The SCORED window, not the environment's span. `env` is built on df_ctrl,
+    # which carries one extra horizon of lookahead so a 24 h horizon is not
+    # truncated over the final day while an 11 h one is -- but only df_sim is
+    # ever billed. Building the signal bundle over df_ctrl ran every rule for one
+    # day longer than the MILP and charged it for that day: the no-battery
+    # reference came out 35.42 EUR through the rules against 34.12 through the
+    # MILP path, which is a difference in window length wearing the costume of a
+    # difference in control.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        sig = rbc.build_signals(env, n_steps=len(df_sim))
+    for _name, _frame in (("oracle", df_pk), ("prophet", df_fc)):
+        _net = (_frame["Buy_kW"] - _frame["Sell_kW"]).to_numpy() * delta_t
+        _s = settle_trajectory(env, _net, settle, sig)
+        kpi_raw.update({f"{_k.lower()}_{_name}": _v for _k, _v in _s.items()})
+
+    # The deployable alternative, on realized data deliberately: an inverter
+    # measures the surplus in front of it, it does not forecast one, so giving a
+    # rule the realized interval is physical fidelity rather than the look-ahead
+    # it would be for a planner. There is correspondingly no "forecast" variant
+    # of any of them.
+    print(f"\n--- Rule-based controllers ({tariff}) ---")
+    rule_metrics, rule_rows = run_rules(env, settle, tariff, signals=sig)
+    kpi_raw.update(rule_metrics)
+    for _r in rule_rows:
+        print(f"  {_r['controller']:30s} {_r['Cost_EUR_Closed']:9.2f} EUR"
+              f"   EFC {_r['Equivalent_Full_Cycles']:6.1f}"
+              f"   peak {_r['Peak_Import_kW']:5.2f} kW")
     print(f"vs no battery {kpi_raw['cost_no_battery']:.2f} "
           f"vs oracle {kpi_raw['cost_oracle']:.2f} EUR")
     # Forecast quality alongside the cost, because a forecasting-in-the-loop
@@ -1949,9 +1983,9 @@ def run_pipeline_for_file(file_path: str,
     # raw time series also kept, useful for finer analysis later
     df_fc.to_csv(df_fc_csv_path, encoding="utf-8-sig")
     df_pk.to_csv(df_pk_csv_path, encoding="utf-8-sig")
-    for _prefix, _frame in baseline_frames.items():
-        _frame.to_csv(os.path.join(out_dir, f"df_{_prefix}_{dataset_name}.csv"),
-                      encoding="utf-8-sig")
+    pd.DataFrame(rule_rows).to_csv(
+        os.path.join(out_dir, f"rules_{dataset_name}.csv"),
+        index=False, encoding="utf-8-sig")
 
     print(f"\nResults saved to: {out_dir}/")
 
@@ -2022,13 +2056,30 @@ def run_all(data_dir: str,
 
     summary_df = pd.DataFrame(summary_rows)
     if not summary_df.empty:
-        summary_df["regret_prophet_usd"] = summary_df["cost_prophet"] - summary_df["cost_oracle"]
-        summary_df["gain_oracle_vs_no_battery_pct"] = 100 * (
-            summary_df["cost_no_battery"] - summary_df["cost_oracle"]
-        ) / summary_df["cost_no_battery"]
-        summary_df["gain_prophet_vs_no_battery_pct"] = 100 * (
-            summary_df["cost_no_battery"] - summary_df["cost_prophet"]
-        ) / summary_df["cost_no_battery"]
+        summary_df["regret_prophet"] = (
+            summary_df["cost_prophet"] - summary_df["cost_oracle"])
+
+        # A percentage needs a positive denominator, and here it is not
+        # guaranteed to have one. A household that exports more than it imports
+        # has cost_no_battery <= 0, and dividing by it flips the sign, so a site
+        # that saves money reads as one that loses it -- a real result, on a real
+        # figure, produced by arithmetic rather than by a battery. figure.py
+        # warned about this after the fact; the fix belongs here, where the
+        # column is made.
+        baseline = summary_df["cost_no_battery"]
+        usable = baseline > 1e-9
+        for col, cost in (("oracle", "cost_oracle"), ("prophet", "cost_prophet")):
+            summary_df[f"gain_{col}_vs_no_battery_pct"] = np.where(
+                usable, 100.0 * (baseline - summary_df[cost]) / baseline.where(usable),
+                np.nan,
+            )
+        summary_df["baseline_positive"] = usable
+        if not usable.all():
+            bad = summary_df.loc[~usable, "dataset"].tolist()
+            print(f"\n! {len(bad)} site(s) have a non-positive no-battery cost, so a "
+                  f"saving PERCENTAGE is undefined for them: {', '.join(map(str, bad))}")
+            print("  Their euro columns are still valid; the _pct columns are NaN.")
+
         summary_df = summary_df.set_index("dataset")
 
     summary_path = os.path.join(output_root, "summary_all_datasets.csv")
@@ -2127,7 +2178,29 @@ STUDY_ARMS = [
      "forecaster_kind": "persistence"},
     {"name": "SI_H24_persist",  "tariff": "SI", "control_horizon": 48,
      "forecaster_kind": "persistence"},
+    # The forecast-channel arms. Prophet's consumption model beats
+    # seasonal-naive; its generation model LOSES to it. A single "with forecast"
+    # arm averages those two facts into one number and hides the interesting
+    # one, so these hold consumption at Prophet and vary only the roof.
+    {"name": "AU_H24_pvnaive",  "tariff": "AU", "control_horizon": 48,
+     "forecaster_kind": "pvnaive"},
+    {"name": "SI_H24_pvnaive",  "tariff": "SI", "control_horizon": 48,
+     "forecaster_kind": "pvnaive"},
+    {"name": "AU_H24_pvtruth",  "tariff": "AU", "control_horizon": 48,
+     "forecaster_kind": "pvtruth"},
+    {"name": "SI_H24_pvtruth",  "tariff": "SI", "control_horizon": 48,
+     "forecaster_kind": "pvtruth"},
 ]
+
+# The arm each tariff's comparison is read against, and whose full controller
+# roster the "all controllers" figure is drawn from.
+REFERENCE_ARM = {"AU": "AU_H24", "SI": "SI_H24"}
+ARM_ORDER = [a["name"] for a in STUDY_ARMS]
+
+
+def arm_tariff(name):
+    """Which tariff an arm is on -- the axis its results are comparable along."""
+    return next(a["tariff"] for a in STUDY_ARMS if a["name"] == name)
 
 
 def run_arms(data_dir, output_root="results", dataset_ids=None,
@@ -2158,6 +2231,179 @@ def run_arms(data_dir, output_root="results", dataset_ids=None,
     allrows.to_csv(path, index=False, encoding="utf-8-sig")
     print(f"\nAll arms: {path}")
     return allrows
+
+
+# =====================================================================
+# 9 — Reading the sweep back, and the statistics the article quotes
+# =====================================================================
+
+RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results_local")
+KEY_COLUMNS = ["arm", "dataset"]
+
+
+def collect_results(output_root=None, arms=None) -> pd.DataFrame:
+    """Every finished (arm, household) as one long frame, read from checkpoints.
+
+    The checkpoint is the source of truth rather than summary_all_arms.csv: it
+    carries the config each row was produced under, so a row computed under
+    superseded rules can be DROPPED rather than silently mixed in with current
+    ones. Rows are tagged with the arm's tariff and the cluster the household
+    was drawn to represent, so both can be grouped by without another join.
+    """
+    output_root = RESULTS_DIR if output_root is None else output_root
+    units = study_units()
+    rows = []
+    pattern = os.path.join(output_root, "*", "*", "checkpoint.json")
+    for path in sorted(glob.glob(pattern)):
+        arm = os.path.basename(os.path.dirname(os.path.dirname(path)))
+        dataset = os.path.basename(os.path.dirname(path))
+        if arms is not None and arm not in arms:
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                saved = json.load(fh)
+        except (ValueError, OSError) as exc:
+            print(f"  ! unreadable checkpoint {path}: {exc}")
+            continue
+        cfg = saved.get("config", {})
+        row = {"arm": arm, "dataset": dataset}
+        row.update(saved.get("metrics", {}))
+        for field in ("tariff", "control_horizon", "forecaster_kind",
+                      "milp_parity", "cycle_cost_eur_per_efc", "n_sim",
+                      "battery_cap"):
+            row[field] = cfg.get(field)
+        try:
+            uid = int(str(dataset).rsplit(" ", 1)[-1])
+            row["cluster"] = int(units.loc[uid, "cluster"])
+            row["dist_to_centroid"] = float(units.loc[uid, "dist_to_centroid"])
+        except (ValueError, KeyError):
+            row["cluster"] = np.nan
+            row["dist_to_centroid"] = np.nan
+        rows.append(row)
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    order = {a: i for i, a in enumerate(ARM_ORDER)}
+    df["_ord"] = df["arm"].map(order).fillna(len(order))
+    return df.sort_values(["_ord", "dataset"]).drop(columns="_ord").reset_index(drop=True)
+
+
+def controller_columns(df: pd.DataFrame) -> list:
+    """The controllers present in a results frame, in reporting order."""
+    known = ["no_battery"] + list(rbc.POLICY_ORDER)
+    known = known + ["tariff_arbitrage", "prophet", "oracle"]
+    present = set()
+    for col in df.columns:
+        if col.startswith("cost_"):
+            present.add(col[len("cost_"):])
+    return [c for c in known if c in present] + sorted(present - set(known))
+
+
+def summarize(df: pd.DataFrame, reference="no_battery") -> pd.DataFrame:
+    """One row per (arm, household, controller): cost, saving, share of oracle.
+
+    Long rather than wide, because every figure and every paired test wants a
+    row per controller while the checkpoint stores a column per controller.
+    """
+    frames = []
+    for name in controller_columns(df):
+        part = df[KEY_COLUMNS + ["tariff", "cluster"]].copy()
+        part["controller"] = name
+        part["cost"] = df["cost_" + name]
+        part["efc"] = df["efc_" + name] if "efc_" + name in df else np.nan
+        frames.append(part)
+    long = pd.concat(frames, ignore_index=True)
+
+    indexed = df.set_index(KEY_COLUMNS)
+    key = pd.MultiIndex.from_frame(long[KEY_COLUMNS])
+    base = indexed["cost_" + reference].reindex(key).to_numpy()
+    long["baseline_cost"] = base
+    long["saving"] = base - long["cost"]
+
+    # The oracle's gain is what "fraction of theoretical gain" divides by.
+    # Guarded: a household whose oracle saves nothing has no share to take a
+    # percentage of, and dividing by it manufactures a number.
+    oracle_gain = indexed["cost_" + reference] - indexed["cost_oracle"]
+    oracle_gain = oracle_gain.reindex(key).to_numpy()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        long["gain_share_pct"] = np.where(
+            oracle_gain > 1e-9, 100.0 * long["saving"] / oracle_gain, np.nan)
+        long["saving_pct"] = np.where(
+            base > 1e-9, 100.0 * long["saving"] / base, np.nan)
+    return long
+
+
+def best_rule(long: pd.DataFrame, arm: str, exclude=("price_oracle",)) -> str:
+    """The deployable rule to carry into that tariff's other arms.
+
+    Lowest median cost across households on the arm's own reference run, with
+    the non-causal diagnostics excluded: `price_oracle` reads the whole year and
+    is there to bound what foresight is worth to a threshold rule, never to be
+    recommended.
+    """
+    rules = (set(rbc.POLICY_ORDER) | {"tariff_arbitrage"}) - set(exclude)
+    sub = long[(long["arm"] == arm) & long["controller"].isin(rules)]
+    if sub.empty:
+        raise ValueError(f"no rule rows for arm {arm!r}")
+    return sub.groupby("controller")["cost"].median().idxmin()
+
+
+def paired_comparison(df, a, b, label_a=None, label_b=None) -> dict:
+    """Wilcoxon signed-rank on the per-site difference between two columns.
+
+    The sites are PAIRED -- every household is run under both conditions -- so
+    the per-site difference is the unit of analysis, and a box plot of two
+    independent-looking distributions understates the evidence. Wilcoxon rather
+    than a t-test because 30 sites of cost differences are not plausibly normal
+    and a handful of them (large exporters, dead arrays) sit far out.
+    """
+    from scipy import stats
+
+    pair = df[[a, b]].dropna()
+    diff = (pair[a] - pair[b]).astype(float)
+    nonzero = diff[diff != 0]
+    out = {
+        "comparison": f"{label_a or a} - {label_b or b}",
+        "n": int(len(diff)),
+        "n_effective": int(len(nonzero)),
+        "median_diff": float(diff.median()),
+        "q1_diff": float(diff.quantile(0.25)),
+        "q3_diff": float(diff.quantile(0.75)),
+        "n_a_greater": int((diff > 0).sum()),
+        "n_b_greater": int((diff < 0).sum()),
+        "n_tied": int((diff == 0).sum()),
+    }
+    if len(nonzero) < 6:
+        # Below ~6 non-tied pairs the exact test cannot reach p < 0.05 whatever
+        # the data does, so a p-value here would mislead rather than be weak.
+        out["p_value"] = float("nan")
+        out["note"] = f"only {len(nonzero)} non-tied pairs; test not run"
+    else:
+        out["p_value"] = float(stats.wilcoxon(nonzero).pvalue)
+        out["note"] = ""
+    return out
+
+
+def paired_arms(df: pd.DataFrame, tariff: str, metric="cost_prophet"):
+    """Every arm on one tariff against that tariff's reference arm, site by site."""
+    sub = df[df["tariff"] == tariff]
+    wide = sub.pivot(index="dataset", columns="arm", values=metric)
+    ref = REFERENCE_ARM[tariff]
+    if ref not in wide.columns:
+        return pd.DataFrame()
+    rows = [paired_comparison(wide, arm, ref) for arm in wide.columns if arm != ref]
+    return pd.DataFrame(rows)
+
+
+def paired_controllers(long: pd.DataFrame, arm: str, reference="prophet"):
+    """Every controller against MILP+Prophet on one arm, household by household."""
+    wide = long[long["arm"] == arm].pivot(
+        index="dataset", columns="controller", values="cost")
+    if reference not in wide.columns:
+        return pd.DataFrame()
+    rows = [paired_comparison(wide, c, reference)
+            for c in wide.columns if c != reference]
+    return pd.DataFrame(rows)
 
 
 if __name__ == "__main__":
