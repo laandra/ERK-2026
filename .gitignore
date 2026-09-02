@@ -20,3 +20,10 @@ forecast_cache/
 
 # Local virtualenv
 .venv/
+
+# Generated figures. Regenerated from the notebook in seconds, and an export
+# from a dirty tree is not reproducible from a commit id anyway (see
+# PLOTTING_GUIDE section 9) -- so what would be tracked here is whichever run
+# happened last, which for a smoke test is a 4-household 7-day panel dressed up
+# as the article. Export for the paper from a clean tree at the end.
+Results/Figures/
