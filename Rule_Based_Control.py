@@ -13,22 +13,23 @@ pick a setpoint. Everything else is shared, not re-implemented:
                     same AC-side bounds `add_household_physics` writes into the LP
     the price       `MILP_Household.interval_rate_vectors`, the same two vectors
                     the MILP objective is built from
-    the cost        `Horizon_Comparison.price_interval`, the single evaluator,
-                    carrying one running peak state per run
+    the cost        `price_interval` below, the single evaluator, carrying one
+                    running peak state per run
     the calendar    `MILP_Household.day_calendar`, local days, DST-correct
 
 The runner re-clamps every setpoint to the feasible bounds, so a rule cannot
 violate the physics even if it asks to; `SOC_Drift_kWh` is 0 by construction
-rather than by trust. `run_policy` returns the same keys `Horizon_Comparison.
-run_strategy` returns, so the two drop into one results frame.
+rather than by trust. `run_policy` returns the same keys the MILP runner returns, so the two drop
+into one results frame.
 
 The agreed billing power is endogenous, as it is for the MILP: each month's
 dogovorjena moc is re-agreed from the peaks the controller's own metered profile
 realized the month before, so a rule that shaves its way onto a lower contract is
 then held to it, and a rule that charges at night pays for the peak it made. The
-runner iterates to that fixed point; `Horizon_Comparison.run_strategy` decides it
-inside the LP for the MILP reference, so the reference is still an exact optimum
-and still a lower bound.
+runner iterates to that fixed point through `Environment.converge_agreed_power`;
+the MILP decides it inside the LP instead (`MILP_Household.
+add_endogenous_agreed_power`), so the reference is still an exact optimum and
+still a lower bound.
 
 Two asymmetries are handled explicitly rather than hidden:
 
@@ -50,13 +51,12 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-import Horizon_Comparison as hc
 from Basic_Functions import max_charge_now, max_discharge_now
+from Pricing_Functions import calculate_interval_price
 from Environment import converge_agreed_power
 from MILP_Household import (
     SOC_FRACTION,
@@ -68,12 +68,10 @@ from MILP_Household import (
 )
 
 # --- Study configuration ---------------------------------------------------
-# The axes are Horizon_Comparison's, read from there rather than re-typed: the
-# same eight Fluvius groups, the same four GEN-I price lists with the same
-# eligibility scopes, the same agreed-power rule and ratchet reset.
-CAPACITIES_KWH = [5.0, 10.0, 20.0, 30.0]
-
-RESULTS_DIR = Path(__file__).resolve().parent / "Results" / "RBC_Comparison"
+# The pack sizes a capacity sweep walks. 2.5 kWh is included deliberately: at a
+# fixed 1.5 kW inverter it is a C=0.6 pack, above the 0.5 residential default,
+# and it is the size at which a battery stops being able to ride an evening out.
+CAPACITIES_KWH = [2.5, 5.0, 10.0, 20.0, 30.0]
 
 # The two reference rows every unit carries, so a controller can be read against
 # both bounds without joining another table.
@@ -82,6 +80,83 @@ MILP_REFERENCE = "milp_full_period"
 
 _BLOCKS = (1, 2, 3, 4, 5)
 _EPS = 1e-12
+
+
+# ---------------------------------------------------------------------------
+# Settlement: the one evaluator every controller is priced through
+# ---------------------------------------------------------------------------
+# These three used to live in `Horizon_Comparison`, which is gone. They are the
+# whole of what this module needed from it, and they are small enough that
+# owning them here is better than reviving a study surface for three functions.
+#
+# The walk is `Basic_Functions.cumulative_interval_price_series`'s, interval for
+# interval -- one running per-block peak, dropped on each ratchet reset-window
+# boundary, priced against the dogovorjena moc in force. The only difference is
+# that this one prices the trajectory a CONTROLLER produced rather than a fixed
+# profile, so it takes the realized net draw as an argument.
+def reset_windows(env, n_steps=None):
+    """Per-interval ratchet reset-window id, as an int array."""
+    n_steps = int(env.episode_length if n_steps is None else n_steps)
+    ids = env.reset_window_ids
+    if ids is None:
+        # No ratchet configured: one window for the whole run, so the peak state
+        # is never dropped and no excess charge can be billed twice.
+        return np.zeros(n_steps, dtype=np.int64)
+    return np.asarray(ids[:n_steps], dtype=np.int64)
+
+
+def _drop_peak_on_window_start(peak_state, windows, idx):
+    """Zero the running peak when a new ratchet window opens at `idx`.
+
+    The excess-power charge is billed per window, so the peak it is measured
+    against has to start each window at zero -- otherwise a January peak is
+    charged for again every month of the year.
+    """
+    if idx == 0 or windows[idx] == windows[idx - 1]:
+        return peak_state
+    return {b: 0.0 for b in _BLOCKS}
+
+
+def price_interval(env, idx, net_kwh, peak_state):
+    """Price one executed interval, carrying the ratchet forward.
+
+    Returns `(variable, energy, power, fixed, new_peak_kw)`, all EUR.
+
+        variable  what the decision moved: energy + power. This is the figure a
+                  controller is compared on, because it is the only part any
+                  controller can change.
+        fixed     the prorated standing charge, reported separately rather
+                  than dropped: it is large enough (a few hundred EUR a year)
+                  that a saving quoted against the energy bill alone reads as
+                  roughly twice the saving against the invoice.
+
+                  NOT decision-independent under the SI schemes, which is easy
+                  to assume and wrong. `_prorated_fixed_breakdown_eur` takes
+                  `dogovorjena_moc`, so the network's fixed charge scales with
+                  the agreed power -- and the agreed power is endogenous, rolled
+                  from the peaks the controller itself realized. A peak shaver
+                  therefore earns twice: once on `power` (the excess charge it
+                  stops paying) and again on `fixed` (the smaller contract it
+                  walks itself onto). Measured over 60 days on Ausgrid 127:
+                  15.54 -> 13.24 EUR on fixed, on top of 1.78 -> 0.33 on power.
+    """
+    res = calculate_interval_price(
+        smp_market_price_kwh=float(env.arr_price[idx]),
+        total_consumed_kwh=float(net_kwh),
+        utc_date=env.dataset.index[idx],
+        interval_minutes=float(env.interval_minutes),
+        scheme=env.pricing_scheme,
+        dogovorjena_moc=env.agreed_power_at(idx),
+        prev_peak_kw=peak_state,
+        **(env.pricing_options or {}),
+    )
+    return (
+        float(res["variable_price_aud"]),
+        float(res["energy_component_eur"]),
+        float(res["power_component_eur"]),
+        float(res["constant_price_aud"]),
+        dict(res["new_peak_kw"]),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +250,7 @@ def build_signals(env, n_steps=None):
         import_rate=np.asarray(import_rates, dtype=float),
         export_credit=np.asarray(export_rates, dtype=float),
         blocks=blocks,
-        windows=hc.reset_windows(env, n_steps),
+        windows=reset_windows(env, n_steps),
         agreed_kw=agreed_kw,
         local_hour=local_hour,
         day_idx=day_idx,
@@ -743,8 +818,8 @@ def make_policy(name, **kwargs):
 def run_policy(env, policy, n_steps=None, signals=None, keep_traces=False):
     """Execute one controller over the horizon and return its priced trajectory.
 
-    The accounting is `Horizon_Comparison.run_strategy`'s, interval for
-    interval, with the solve replaced by a call to the rule: the same starting
+    The accounting is the MILP runner's, interval for interval, with the solve
+    replaced by a call to the rule: the same starting
     SOC, the same running peak state dropped on the same window boundaries, the
     same shared evaluator, the same output keys. Only the setpoint differs.
 
@@ -754,7 +829,7 @@ def run_policy(env, policy, n_steps=None, signals=None, keep_traces=False):
 
     With `env.agreed_power_from_dispatch` set the run is repeated until the
     dogovorjena moc it is billed under is the one its own peaks agree to, exactly
-    as `Horizon_Comparison.run_strategy` does it for the MILP. A rule is cheap,
+    as the MILP runner does it for the MILP. A rule is cheap,
     so the loop costs little here -- but it is the same loop, and a controller
     that shaves its way onto a lower contract is then held to it.
     """
@@ -812,7 +887,7 @@ def _run_policy_once(env, policy, n_steps=None, signals=None, keep_traces=False)
     day_used = np.zeros(len(sig.day_steps), dtype=float)
 
     peak_state = {b: 0.0 for b in _BLOCKS}
-    cost = energy_cost = power_cost = 0.0
+    cost = energy_cost = power_cost = fixed_cost = 0.0
     charged = discharged = grid_charged = 0.0
     import_kwh = export_kwh = 0.0
     peak_import_kw = 0.0
@@ -827,7 +902,7 @@ def _run_policy_once(env, policy, n_steps=None, signals=None, keep_traces=False)
 
     t_start = time.time()
     for idx in range(n_steps):
-        peak_state = hc._drop_peak_on_window_start(peak_state, sig.windows, idx)
+        peak_state = _drop_peak_on_window_start(peak_state, sig.windows, idx)
 
         lo = -max_discharge_now(soc, sig.eta_dis, env.max_discharge_kwh)
         hi = max_charge_now(soc, sig.eta_ch, env.max_charge_kwh, capacity)
@@ -848,10 +923,12 @@ def _run_policy_once(env, policy, n_steps=None, signals=None, keep_traces=False)
         # comparison reports `Curtailed_kWh` for both so the asymmetry shows.
         net = sig.consumption[idx] + ch - sig.generation[idx] - dis
 
-        step_cost, e_part, p_part, peak_state = hc.price_interval(env, idx, net, peak_state)
+        step_cost, e_part, p_part, f_part, peak_state = price_interval(
+            env, idx, net, peak_state)
         cost += step_cost
         energy_cost += e_part
         power_cost += p_part
+        fixed_cost += f_part
 
         net_trace[idx] = net
         # What the rule may learn from this interval is what the meter recorded,
@@ -892,6 +969,10 @@ def _run_policy_once(env, policy, n_steps=None, signals=None, keep_traces=False)
         "Terminal_SOC_Adj_EUR": terminal_adj,
         "Energy_EUR": energy_cost,
         "Power_EUR": power_cost,
+        # Not a constant across controllers under the SI schemes: it scales
+        # with the agreed power, which is endogenous. See `price_interval`.
+        "Fixed_EUR": fixed_cost,
+        "Cost_EUR_Total": cost + terminal_adj + fixed_cost,
         "Final_SOC_kWh": soc,
         "Charged_kWh": charged,
         "Discharged_kWh": discharged,
@@ -912,25 +993,6 @@ def _run_policy_once(env, policy, n_steps=None, signals=None, keep_traces=False)
         out["_soc_trace"] = soc_trace
         out["_cost_trace"] = cost_trace
         out["_setpoints"] = setpoints
-    return out
-
-
-def run_milp_reference(env, n_steps=None):
-    """The perfect-foresight whole-year solve, as the same row shape.
-
-    `Horizon_Comparison.run_strategy` is called rather than re-implemented, so
-    the reference is literally the horizon study's `full_period` strategy: same
-    solver gap, same terminal SOC, same evaluator.
-    """
-    out = hc.run_strategy(
-        env, "period", "block", soc_mode="fixed50", n_steps=n_steps,
-        solver=hc.full_period_solver(),
-    )
-    for key in ("_soc_trace", "_cost_trace", "_net_trace"):
-        out.pop(key, None)
-    # Pinned to 50 % at both ends by construction, so there is nothing to close.
-    out["Terminal_SOC_Adj_EUR"] = 0.0
-    out["Cost_EUR_Closed"] = out["Cost_EUR"]
     return out
 
 
@@ -989,361 +1051,3 @@ def rebind_signals(sig, env):
         eta_rt=float(env.charge_efficiency) * float(env.discharge_efficiency),
     )
 
-
-# ---------------------------------------------------------------------------
-# One (household, price list): every controller at every capacity
-# ---------------------------------------------------------------------------
-LEAD_COLUMNS = [
-    "Dataset", "Household", "Tariff", "Capacity_kWh", "Controller", "Causal",
-    "Cost_EUR_Closed", "Savings_EUR", "No_Battery_EUR", "Cost_EUR",
-    "Terminal_SOC_Adj_EUR", "Energy_EUR", "Power_EUR",
-]
-KEY_COLUMNS = ["Dataset", "Household", "Tariff", "Capacity_kWh"]
-CHECKPOINT_KEY = ["Controller", "Capacity_kWh"]
-
-
-def unit_csv_path(output_dir, dataset, household_id, tariff=hc.DEFAULT_TARIFF):
-    """Results file for one (household, price list); all capacities in it."""
-    slug = hc.TARIFFS[tariff]["slug"]
-    suffix = f"_{slug}" if slug else ""
-    return Path(output_dir) / f"{dataset}_user_{household_id:03d}{suffix}.csv"
-
-
-def _tag_row(row, dataset, household_id, tariff, capacity_kwh, controller, causal,
-             baseline):
-    row = dict(row)
-    row.update(
-        Dataset=str(dataset),
-        Household=int(household_id),
-        Tariff=str(tariff),
-        Paket_ID=hc.TARIFFS[tariff]["paket_id"],
-        Capacity_kWh=float(capacity_kwh),
-        Controller=str(controller),
-        Causal=bool(causal),
-        No_Battery_EUR=float(baseline),
-        # Against the CLOSED cost: a rule that ends the year with an emptier
-        # pack than it started has not saved the difference, it has spent it.
-        Savings_EUR=float(baseline) - float(row["Cost_EUR_Closed"]),
-        Peak_Reset=hc.PEAK_RESET_TAG,
-        Agreed_Power=hc.AGREED_POWER_TAG,
-    )
-    return row
-
-
-def run_unit(dataset, household_id, tariff=hc.DEFAULT_TARIFF, capacities=None,
-             policies=None, with_milp=True, n_steps=None, verbose=True,
-             checkpoint_path=None):
-    """Every controller at every capacity for one household on one price list.
-
-    One row per (controller, capacity). With `checkpoint_path` the CSV is
-    rewritten after each finished pair and pairs already in it are skipped, so
-    an interrupted batch resumes.
-    """
-    capacities = list(CAPACITIES_KWH if capacities is None else capacities)
-    policies = list(POLICY_ORDER if policies is None else policies)
-
-    data = hc.load_user(household_id, dataset)
-
-    rows, done = [], set()
-    if checkpoint_path is not None and Path(checkpoint_path).exists():
-        previous = pd.read_csv(checkpoint_path)
-        # Rows written under a different ratchet or agreed-power rule hold a
-        # different quantity, not an older one; resuming into them would make
-        # the controllers disagree about the charge.
-        fresh = (
-            hc.peak_reset_tag(previous) == {hc.PEAK_RESET_TAG}
-            and hc.agreed_power_tag(previous) == {hc.AGREED_POWER_TAG}
-        )
-        if fresh:
-            rows = previous.to_dict("records")
-            done = set(zip(previous["Controller"], previous["Capacity_kWh"].astype(float)))
-        else:
-            print(f"  [{dataset} {household_id} | {tariff}] checkpoint written under "
-                  f"peak reset {sorted(hc.peak_reset_tag(previous))} / agreed power "
-                  f"{sorted(hc.agreed_power_tag(previous))}; recomputing from scratch",
-                  flush=True)
-
-    def flush():
-        if checkpoint_path is not None:
-            Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
-            pd.DataFrame(rows).to_csv(checkpoint_path, index=False)
-
-    # The signal bundle is built once on the first capacity and re-bound after.
-    base_sig = None
-    for capacity in capacities:
-        env = hc.build_env(data, capacity_kwh=capacity, tariff=tariff)
-        if base_sig is None:
-            base_sig = build_signals(env, n_steps)
-        sig = rebind_signals(base_sig, env)
-
-        # The baseline is the same bill at every capacity, but it is recomputed
-        # per capacity rather than carried: it costs one idle pass and it is
-        # what every saving on the row is measured from.
-        baseline_row = run_policy(env, _Idle(), signals=sig)
-        baseline = baseline_row["Cost_EUR"]
-
-        wanted = [(NO_BATTERY, None)] + [(p, p) for p in policies]
-        if with_milp:
-            wanted.append((MILP_REFERENCE, None))
-
-        for controller, policy_name in wanted:
-            if (controller, float(capacity)) in done:
-                continue
-            if controller == NO_BATTERY:
-                out, causal = baseline_row, True
-            elif controller == MILP_REFERENCE:
-                out, causal = run_milp_reference(env, n_steps=n_steps), False
-            else:
-                policy = make_policy(policy_name)
-                out, causal = run_policy(env, policy, signals=sig), policy.causal
-            rows.append(_tag_row(out, dataset, household_id, tariff, capacity,
-                                 controller, causal, baseline))
-            if verbose:
-                print(f"  [{dataset} {household_id} | {tariff} | {capacity:g} kWh] "
-                      f"{controller:30s} {rows[-1]['Cost_EUR_Closed']:9.2f} EUR  "
-                      f"({rows[-1]['Runtime_s']:6.1f} s)", flush=True)
-            flush()
-
-    df = pd.DataFrame(rows)
-    lead = [c for c in LEAD_COLUMNS if c in df.columns]
-    return df[lead + [c for c in df.columns if c not in lead]]
-
-
-# ---------------------------------------------------------------------------
-# Batch driver (multiprocessing over households, one CSV per household-list)
-# ---------------------------------------------------------------------------
-def study_jobs(units=None, tariffs=None, per_group=hc.HOUSEHOLDS_PER_GROUP, groups=None):
-    """The (dataset, household, price list) jobs, eligibility already applied.
-
-    `Horizon_Comparison.tariff_allowed` does the filtering: a PV roof cannot
-    sign Redni 2T, and running it anyway would price every exported kWh at zero
-    and read as a tariff result when it is a product-eligibility one.
-    """
-    units = units or hc.study_units(groups=groups, per_group=per_group)
-    return hc.study_jobs(units=units, tariffs=tariffs)
-
-
-def _worker(args):
-    dataset, household_id, tariff, capacities, n_steps, output_dir = args
-    out_path = unit_csv_path(output_dir, dataset, household_id, tariff)
-    df = run_unit(dataset, household_id, tariff=tariff, capacities=capacities,
-                  n_steps=n_steps, verbose=True, checkpoint_path=out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(out_path, index=False)
-    return f"{out_path.name} ({len(df)} rows)"
-
-
-def run_batch(jobs=None, capacities=None, n_steps=None, output_dir=RESULTS_DIR,
-              n_workers=10):
-    """Run every (dataset, household, price list) job in parallel.
-
-    One CSV per job holding every capacity; finished work is skipped, so an
-    interrupted run resumes where it stopped.
-    """
-    import multiprocessing as mp
-
-    jobs = jobs or study_jobs()
-    capacities = list(CAPACITIES_KWH if capacities is None else capacities)
-    payload = [(g, i, t, capacities, n_steps, output_dir) for g, i, t in jobs]
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-    print(f"{len(payload)} jobs x {len(capacities)} capacities x "
-          f"{len(POLICY_ORDER) + 2} controllers on {n_workers} workers", flush=True)
-
-    started = time.time()
-    with mp.get_context("spawn").Pool(n_workers) as pool:
-        for n, message in enumerate(pool.imap_unordered(_worker, payload), start=1):
-            print(f"[{n}/{len(payload)}] {message}  "
-                  f"({time.time() - started:.0f}s elapsed)", flush=True)
-    return len(payload)
-
-
-def collect_results(output_dir=RESULTS_DIR, require_current_tags=True):
-    """Concatenate every per-(household, price list) CSV written so far.
-
-    Rows priced under a superseded ratchet reset or agreed billing power are
-    dropped by default, exactly as `Horizon_Comparison.collect_results` drops
-    them: the charge they carry is a different quantity, so mixing them into a
-    mean would compare two studies.
-    """
-    files = sorted(Path(output_dir).glob("*user_*.csv"))
-    if not files:
-        return pd.DataFrame()
-    out = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
-    if require_current_tags:
-        for column, current in (("Peak_Reset", hc.PEAK_RESET_TAG),
-                                ("Agreed_Power", hc.AGREED_POWER_TAG)):
-            if column not in out.columns:
-                continue
-            stale = out[column].astype(str) != current
-            if stale.any():
-                print(f"collect_results: dropped {int(stale.sum())} of {len(out)} rows "
-                      f"priced under {column} {sorted(set(out.loc[stale, column]))} "
-                      f"(current: {current!r}). Re-run the batch to replace them.",
-                      flush=True)
-                out = out[~stale].reset_index(drop=True)
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Scoring
-# ---------------------------------------------------------------------------
-def score(df_all, reference=MILP_REFERENCE):
-    """Add the gap columns, measured against the perfect-foresight optimum.
-
-    The optimum is resolved per (household, price list, capacity), so a gap
-    never mixes one pack size or one price list into another's. The semantics
-    are `Horizon_Comparison.score`'s: `Gap_pct` is the share of the ACHIEVABLE
-    saving a controller gives up, so 0 % is the MILP and 100 % is a battery that
-    might as well not be there.
-    """
-    # Idempotent: `summarize` scores whatever it is handed, and it is routinely
-    # handed a frame that has already been through here.
-    derived = ["Optimum_EUR", "Gap_to_Optimum_EUR", "Achievable_EUR",
-               "Saving_Captured_pct", "Gap_pct"]
-    df_all = df_all.drop(columns=[c for c in derived if c in df_all.columns])
-    optimum = (
-        df_all[df_all["Controller"] == reference]
-        .set_index(KEY_COLUMNS)["Cost_EUR_Closed"]
-        .rename("Optimum_EUR")
-    )
-    df = df_all.join(optimum, on=KEY_COLUMNS)
-    df["Gap_to_Optimum_EUR"] = df["Cost_EUR_Closed"] - df["Optimum_EUR"]
-    df["Achievable_EUR"] = df["No_Battery_EUR"] - df["Optimum_EUR"]
-    # A percentage of the achievable saving means nothing when there is barely
-    # one: a two-cent optimum turns an 8 EUR shortfall into 36 000 %. Such units
-    # drop out of the percentage, never out of `Gap_to_Optimum_EUR`.
-    achievable = df["Achievable_EUR"].where(lambda s: s > hc.MIN_ACHIEVABLE_EUR)
-    df["Saving_Captured_pct"] = 100.0 * df["Savings_EUR"] / achievable
-    df["Gap_pct"] = 100.0 - df["Saving_Captured_pct"]
-    return df
-
-
-def _pooled_gap_pct(group):
-    """Gap as a share of the achievable saving, pooled over the units.
-
-    Sum of gaps over sum of achievable, so every unit is weighted by the euros
-    actually at stake instead of every household counting the same.
-    """
-    denominator = group["Achievable_EUR"].sum()
-    if abs(denominator) < 1e-9:
-        return np.nan
-    return 100.0 * group["Gap_to_Optimum_EUR"].sum() / denominator
-
-
-def summarize(df_all, by=("Tariff", "Controller"), reference=MILP_REFERENCE):
-    """Comparison table over `by`, averaged across household-units."""
-    if df_all.empty:
-        return pd.DataFrame(), df_all
-    df = score(df_all, reference)
-    by = list(by)
-    pooled = (
-        df.groupby(by)[["Gap_to_Optimum_EUR", "Achievable_EUR"]]
-        .apply(_pooled_gap_pct)
-        .rename("Gap_pct_pooled")
-    )
-    summary = (
-        df.groupby(by)
-        .agg(
-            Units=("Cost_EUR_Closed", "size"),
-            Gap_pct=("Gap_pct", "mean"),
-            Worst_Gap_pct=("Gap_pct", "max"),
-            Best_Gap_pct=("Gap_pct", "min"),
-            Gap_EUR=("Gap_to_Optimum_EUR", "mean"),
-            Cost_EUR=("Cost_EUR_Closed", "mean"),
-            Savings_EUR=("Savings_EUR", "mean"),
-            Cycles=("Equivalent_Full_Cycles", "mean"),
-            Peak_kW=("Peak_Import_kW", "mean"),
-            # A wide fixed price spread pays for grid-to-battery arbitrage,
-            # which is a different business from storing your own roof.
-            Charged_kWh=("Charged_kWh", "mean"),
-            Grid_Charged_kWh=("Grid_Charged_kWh", "mean"),
-            Runtime_s=("Runtime_s", "mean"),
-        )
-        .join(pooled)
-    )
-    return _order_rows(summary, by), df
-
-
-def _order_rows(summary, by):
-    """Reindex a summary onto the study's reporting order where it applies."""
-    orders = {
-        "Controller": CONTROLLER_ORDER,
-        "Tariff": hc.TARIFF_ORDER,
-        "Dataset": hc.DATASET_GROUPS,
-    }
-    if len(by) == 1:
-        order = orders.get(by[0])
-        if order is None:
-            return summary
-        return summary.reindex([k for k in order if k in summary.index])
-    levels = [orders.get(name, list(dict.fromkeys(summary.index.get_level_values(name))))
-              for name in by]
-    wanted = [
-        key for key in pd.MultiIndex.from_product(levels, names=by)
-        if key in set(summary.index)
-    ]
-    return summary.reindex(pd.MultiIndex.from_tuples(wanted, names=by))
-
-
-def cross_group_frame(df_scored):
-    """The rows safe to average ACROSS Fluvius groups.
-
-    Redni 2T is a no-PV-only product (`TARIFFS[...]["scope"]`), so a mean taken
-    over it and the three samooskrba lists together compares which households
-    may sign what, not which list is cheaper. It is dropped here rather than in
-    each chart.
-    """
-    scoped = [t for t, spec in hc.TARIFFS.items() if spec.get("scope", "all") != "all"]
-    return df_scored[~df_scored["Tariff"].isin(scoped)].copy()
-
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-def main():
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="Rule-based controllers vs the MILP, over Fluvius groups, "
-                    "price lists and battery sizes."
-    )
-    parser.add_argument("--per-group", type=int, default=hc.HOUSEHOLDS_PER_GROUP,
-                        help="households per Fluvius dataset group")
-    parser.add_argument("--groups", type=str, default=None,
-                        help=f"comma-separated subset of {', '.join(hc.DATASET_GROUPS)}")
-    parser.add_argument("--tariffs", type=str, default=None,
-                        help=f"comma-separated subset of {', '.join(hc.TARIFF_ORDER)}")
-    parser.add_argument("--capacities", type=str, default=None,
-                        help="comma-separated battery sizes in kWh "
-                             f"(default {', '.join(f'{c:g}' for c in CAPACITIES_KWH)})")
-    parser.add_argument("--steps", type=int, default=None,
-                        help="intervals to run (default: the whole dataset)")
-    parser.add_argument("--workers", type=int, default=10)
-    parser.add_argument("--output", type=str, default=str(RESULTS_DIR))
-    args = parser.parse_args()
-
-    groups = None
-    if args.groups:
-        groups = [g.strip() for g in args.groups.split(",") if g.strip()]
-        unknown = set(groups) - set(hc.DATASET_GROUPS)
-        if unknown:
-            parser.error(f"unknown groups: {', '.join(sorted(unknown))}")
-
-    tariffs = None
-    if args.tariffs:
-        tariffs = [t.strip() for t in args.tariffs.split(",") if t.strip()]
-        unknown = set(tariffs) - set(hc.TARIFFS)
-        if unknown:
-            parser.error(f"unknown tariffs: {', '.join(sorted(unknown))}")
-
-    capacities = CAPACITIES_KWH
-    if args.capacities:
-        capacities = [float(c) for c in args.capacities.split(",") if c.strip()]
-
-    jobs = study_jobs(per_group=args.per_group, groups=groups, tariffs=tariffs)
-    run_batch(jobs=jobs, capacities=capacities, n_steps=args.steps,
-              output_dir=Path(args.output), n_workers=args.workers)
-
-
-if __name__ == "__main__":
-    main()
