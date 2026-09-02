@@ -1,0 +1,333 @@
+================================================================================
+PLOTTING GUIDE — Plotting_Functions.py
+How every figure in this repo is styled, sized, translated and exported.
+================================================================================
+
+There is ONE plotting module: Plotting_Functions.py. It holds the shared style,
+the standard figure geometry, the Slovenian/English glossary and the export
+backend. Figure_Export.py no longer exists; it was merged into this module.
+
+Nothing else writes into Results/Figures. Nothing else sets rcParams.
+
+
+--------------------------------------------------------------------------------
+1. THE TWO LINES THAT MATTER
+--------------------------------------------------------------------------------
+
+At the top of a notebook, once:
+
+    import importlib
+    import Plotting_Functions as pf
+    pf = importlib.reload(pf)
+    pf.use(subdir="battery_sizing", titles=False)
+    from Plotting_Functions import INK, INK_2, MUTED, SURFACE, SERIES, EUR, finish
+
+At the bottom of every figure cell, once:
+
+    pf.show(fig, "cost_vs_capacity")
+
+That is the whole interface. `pf.show` replaces `plt.tight_layout()` +
+`plt.show()`; everything between the two lines is ordinary matplotlib and does
+not change.
+
+
+--------------------------------------------------------------------------------
+2. WHY THE importlib.reload IS THERE — READ THIS ONE
+--------------------------------------------------------------------------------
+
+`import X` returns whatever the kernel cached the FIRST time it ran, for the
+whole life of the kernel. Edit Plotting_Functions.py, re-run the style cell, and
+you still get the old module. The symptom is confusing, because it is an error
+about code that is plainly correct in the file:
+
+    TypeError: use() got an unexpected keyword argument 'titles'
+
+The reload in the style cell fixes that, the same way the imports cell already
+reloads Data_Loader, Environment and MILP_Household. If you ever see an
+AttributeError or TypeError naming something you can see in the .py file:
+
+    RE-RUN THE STYLE CELL (it reloads), or restart the kernel.
+
+Reload resets the module's switches (SAVE_PDF, PRESET, LANG, TITLES, SUBDIR) to
+their defaults — which is harmless, because `pf.use(...)` on the next line sets
+them again. That is why the reload goes BEFORE `pf.use`, never after.
+
+
+--------------------------------------------------------------------------------
+3. pf.use(...) — THE PER-NOTEBOOK SETTINGS
+--------------------------------------------------------------------------------
+
+    pf.use(subdir=None, titles=None, lang=None, preset=None,
+           paper=False, ieee=False, grid=True)
+
+subdir    Folder under Results/Figures/ for this notebook's exports. Set it, or
+          every notebook's figures land in one flat directory and names like
+          "ranking" collide between studies.
+titles    False leaves the title out of the image. An IEEE figure carries no
+          title of its own — the caption below it, set in the article, IS the
+          title — so a title in the image is the caption again in the wrong
+          typeface. The text is NOT lost: see section 7.
+lang      "sl" (default) or "en". See section 6.
+preset    Default geometry for the notebook. See section 5.
+grid      False for a notebook whose own helper turns gridlines on per axis
+          (`ax.grid(axis="y")`), which would otherwise gain x gridlines.
+
+The third line of the style cell — `from Plotting_Functions import INK, ...` —
+is load-bearing. Figure cells use INK, SERIES[0], EUR unqualified; re-exporting
+them at notebook top level is what lets those cells stay untouched. Import only
+what the notebook actually uses.
+
+The notebook's own colour dictionaries (TARIFF_COLOR, CONTRACT_COLOR,
+FAMILY_COLOR, ...) stay in the notebook. What a colour MEANS is the study's
+semantics. Only the palette itself (SERIES) is shared.
+
+
+--------------------------------------------------------------------------------
+4. pf.show(...) — THE TERMINATOR
+--------------------------------------------------------------------------------
+
+    pf.show(fig, name=None, *, save_pdf=None, png=False,
+            preset=None, ratio=None, layout="tight", rect=None,
+            paper=None, subdir=None, lang=None, titles=None,
+            note=None, close=False)
+
+fig       A Figure, or an Axes (pandas `df.plot()` hands back only an Axes), or
+          None for the current figure.
+name      What the article calls the figure. It names the folder AND the file,
+          so the LaTeX side depends on it — keep it stable. Omit it and nothing
+          is written, which is how you convert a cell before deciding the name.
+save_pdf  None means "use pf.SAVE_PDF". Set `pf.SAVE_PDF = False` once while you
+          are iterating and no figure in the session writes anything.
+png       Also write a 600 dpi PNG, for anywhere that cannot take vector art.
+layout    "tight"  (default) — what the cells used to do.
+          "frame"  — the figure went through pf.chart_frame, which measured its
+                     own header and legend bands; running tight_layout again
+                     would undo them.
+          "auto"   — skip when the figure was built with constrained_layout.
+          None     — no layout pass.
+
+pf.show RETURNS NOTHING, on purpose. It used to return the figure, and in a cell
+whose last statement is the call, Jupyter displays that returned Figure as a
+SECOND inline image. If you ever see two copies of one figure, something is
+returning a Figure as the cell's value.
+
+Order inside show: translate -> resize -> lay out -> re-wrap titles -> save ->
+plt.show(). The save is before plt.show() because the inline backend CLOSES a
+figure when it shows it; saving afterwards silently writes a blank page.
+
+
+--------------------------------------------------------------------------------
+5. GEOMETRY — ONE WIDTH, PREVIEW EQUALS EXPORT
+--------------------------------------------------------------------------------
+
+    "screen"    7.16 in  default. \textwidth, comfortable to read inline.
+    "page"      7.16 in  + IEEE text (Times 8 pt, white ground). A figure*.
+    "column"    3.50 in  + IEEE text. \columnwidth.
+    "as_built"  whatever figsize the cell asked for. Opts out.
+
+The preset is applied BEFORE the figure is displayed, not only before it is
+saved. So the inline preview is the picture that goes in the paper — they can
+never drift apart.
+
+    pf.show(fig, "peak", preset="column")     # renders AND exports at 3.5 in
+    pf.use(preset="column")                   # ... for the whole notebook
+
+Width comes from the preset; height keeps the figure's own aspect, so a
+15.4 x 11.2 in panel grid becomes 7.16 x 5.2 rather than being squashed. Pass
+`ratio=` (height/width) to override.
+
+Build new figures with a bare `plt.subplots()`. pf.use sets figure.figsize, so
+that is already the standard size. For a shorter or taller figure at the same
+width use `pf.figsize(ratio=0.40)`. Do NOT put figsize literals in cells any
+more — a figure built at (9, 5) still works, it is just resized on the way out,
+and the provenance records that it was resized rather than built at size.
+
+TWO PANELS SIDE BY SIDE ARE WRONG for a two-column article. Half of \textwidth
+is \columnwidth, and a shared row is unreadable there. Split them into two
+separate figures IN THE SAME CELL, one pf.show each:
+
+    fig, ax = plt.subplots()
+    ...
+    pf.show(fig, "energy_through_battery")
+
+    fig, ax = plt.subplots()
+    ...
+    pf.show(fig, "peak_grid_import")
+
+
+--------------------------------------------------------------------------------
+6. LANGUAGE
+--------------------------------------------------------------------------------
+
+Labels are written in Slovenian in the cells. `pf.LANG = "en"` (or
+`pf.use(lang="en")`) translates the finished figure — titles, axis labels,
+legend keys, annotations — in the preview and the PDF alike. No cell changes.
+
+    GLOSSARY        exact whole-string label translations
+    GLOSSARY_PARTS  fragments that recur inside generated strings, e.g.
+                    "brez baterije: 1,125 EUR/a", where the number rules out an
+                    exact match. Applied longest-first.
+
+Anything neither covers passes through unchanged and is collected:
+
+    pf.LANG = "en"
+    ... run the figure cells ...
+    print(list(pf.MISSING_TRANSLATIONS))
+
+That list is the to-do list for the glossary. Grow it one notebook at a time.
+Product names (GEN-I Dinamični samooskrba) are meant to stay untranslated.
+
+For new code that has both strings to hand: `pf.t("Poraba", "Consumption")`.
+
+
+--------------------------------------------------------------------------------
+7. TITLES AND CAPTIONS
+--------------------------------------------------------------------------------
+
+With `titles=False` the title is not drawn and its space is reclaimed — no gap.
+The text is written into the export folder instead:
+
+    Results/Figures/battery_sizing/marginal_value/SOURCE.md
+
+        ## Caption
+        The title text for this figure, for the article's `\caption{...}`:
+        - Kje se naslednja kWh hrambe ne izplača več
+
+...and into source.json under "caption". So the caption text is never lost, and
+you can copy it straight into LaTeX. `pf.latex_figure(name, caption, ...)` emits
+the whole float block.
+
+The toggle only affects titles set through `pf.finish` and `pf.chart_frame`.
+Panel labels inside a small-multiple grid are data labels, not captions, and are
+never suppressed.
+
+Long subtitles do not belong in an article figure — that is what the caption is
+for. Keep them out.
+
+
+--------------------------------------------------------------------------------
+8. THE SHARED HELPERS
+--------------------------------------------------------------------------------
+
+finish(ax, *, title, xlabel, ylabel, subtitle, yfmt, xfmt, wrap=True)
+    Title, labels and tick formats on one axes. Everything after `ax` is
+    keyword-only. Replaced five near-identical notebook helpers (three `finish`
+    variants with three different positional orders, `tidy`, `style_axes`), so
+    migrating a call means NAMING the arguments, not reordering them.
+
+    Titles are wrapped by measuring the real text against the real axes box,
+    after layout. This is not fussiness: a left-aligned title overflows to the
+    RIGHT of the axes, and a trimmed export does not clip that overflow — it
+    silently widens the saved figure. At an exact IEEE width it clips mid-word
+    instead. A character-count estimate is a third too generous in bold Times.
+
+chart_frame(fig, title, subtitle="", handles=None, ncol=None)
+    Figure-level header and legend, measured in INCHES so one set of numbers
+    works on a 3.4 in row and a 10 in grid. Call it last, in place of suptitle +
+    legend + tight_layout, then `pf.show(fig, name, layout="frame")`.
+
+panel_grid(n, ncols=4, panel=(3.05, 2.5), sharex=True, sharey=False)
+    A wrapped grid of n small panels. Returns (fig, axes) flat, unused trailing
+    slots already hidden — axes[:n] are the live ones. Scales panel text to the
+    FINAL panel width, which is why a 4x4 grid stays legible when it is squeezed
+    to \textwidth.
+
+key_legend(ax, handles, where="below", ncol=4)   placement only; you build the
+                                                 handles, because what a colour
+                                                 means is the study's semantics
+edge_label(ax, y, text, side="right")            annotation pinned to an axes
+                                                 edge, on a surface-coloured pad
+mix(a, b, t)                                     blend two hex colours
+ramp(hue)                                        light-to-hue colormap
+figsize(ratio=0.615)                             standard width, chosen height
+
+Formatters: EUR, PLAIN, KW, PCT, PCT_SIGNED, YEARS.
+    PCT is "12%" and PCT_SIGNED is "+12 %". Both exist because both were in use
+    and they say different things — do not unify them.
+
+Tokens: INK, INK_2, MUTED, SURFACE, GRID, BASELINE, SERIES (4 categorical hues).
+
+
+--------------------------------------------------------------------------------
+9. WHAT AN EXPORT WRITES
+--------------------------------------------------------------------------------
+
+    Results/Figures/<subdir>/<name>/
+        <name>.pdf          always — vector, fonts embedded as TrueType
+        <name>.png          only with png=True — 600 dpi
+        source.json         machine-readable provenance
+        SOURCE.md           the same, readable, including the caption
+        cell.py             the notebook cell that drew it, verbatim
+        uncommitted.diff    only when the tree was dirty — gitignored
+
+The diff excludes *.ipynb, because a notebook diff is mostly base64 of the
+previous run's stored images and would bury the .py changes that actually decide
+what the figure shows. The notebook half of the answer is cell.py.
+
+A figure exported from a dirty tree is NOT reproducible from the commit id
+alone. SOURCE.md says so in bold when that is the case. Commit before the final
+export run for the paper.
+
+Two resolutions, two different questions:
+    DISPLAY_DPI 110    what the inline PNG stored INSIDE the .ipynb is rendered
+                       at. Raising this to get a sharper export just inflates
+                       these 1-4 MB notebooks about 30x.
+    EXPORT_DPI  600    what savefig writes. This is the article's resolution.
+
+
+--------------------------------------------------------------------------------
+10. MIGRATING AN OLD FIGURE CELL
+--------------------------------------------------------------------------------
+
+  1. Style cell: delete the rcParams block and the local helpers it defined
+     (finish/tidy/style_axes, _mix, the EUR/PCT formatters, chart_frame,
+     small_multiples). Replace with the five lines from section 1. Keep the
+     notebook's own colour dictionaries.
+  2. Each figure cell:
+       - drop the figsize literal from plt.subplots(...)
+       - split any subplots(1, 2) into two figures, two pf.show calls
+       - name finish()'s arguments (it is keyword-only now)
+       - drop long subtitles
+       - replace `plt.tight_layout(); plt.show()` with `pf.show(fig, "name")`
+  3. Run the cells. The expensive notebooks all load from a CSV cache, so this
+     re-runs the figures, not the solvers. Check Results/*.csv is unchanged
+     afterwards — if it is not, something re-solved and you want to know why.
+  4. Check the inline previews, then open one PDF.
+
+Convert one notebook at a time. An unconverted notebook is unaffected by the
+module existing, and `pf.show(fig)` with no name behaves exactly like
+plt.show(), so a cell can be converted before its article name is decided.
+
+
+--------------------------------------------------------------------------------
+11. TROUBLESHOOTING
+--------------------------------------------------------------------------------
+
+Two copies of one figure
+    Something returned a Figure as the cell's last value. pf.show returns None;
+    do not assign its result and display it.
+
+TypeError / AttributeError about something that IS in the .py file
+    Stale cached module. Re-run the style cell (it reloads) or restart the
+    kernel. Section 2.
+
+The saved PDF is much wider than the figure
+    A left-aligned title or annotation overflowed the axes and bbox_inches
+    "tight" grew the canvas to keep it. Route the title through pf.finish so it
+    gets wrapped, or shorten it.
+
+Text is cut off mid-word at IEEE width
+    The export is not trimmed at an IEEE preset — deliberately, so the file is
+    the width it claims. Shorten the label or pass a taller `ratio=`.
+
+A grey rectangle behind the axes on the printed page
+    The studio ground (#fcfcfb). pf.show paints the SAVED copy white by default
+    (pf.PAPER_GROUND); if you called save_fig directly, pass facecolor="white".
+
+A 16-panel grid is unreadable at \textwidth
+    That is honest — it IS small at 7.16 in. Use preset="as_built" for a
+    reading copy, or fewer columns for the article.
+
+Blank PDF
+    Something saved after plt.show(). The inline backend closes the figure when
+    it shows it. Let pf.show do the ordering.
