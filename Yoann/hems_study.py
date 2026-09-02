@@ -2405,6 +2405,26 @@ def summarize(df: pd.DataFrame, reference="no_battery") -> pd.DataFrame:
             oracle_gain > 1e-9, 100.0 * long["saving"] / oracle_gain, np.nan)
         long["saving_pct"] = np.where(
             base > 1e-9, 100.0 * long["saving"] / base, np.nan)
+
+    # What the cycles cost, at the pack price and rated cycle life
+    # Battery_Economics carries. Derived here rather than stored: it is a
+    # function of EFC and the pack, both already on the row, and deriving it
+    # means a change of pack price does not invalidate a sweep.
+    #
+    # This is a REPORTED cost, never a billed one. No controller here has a wear
+    # price in its objective by default, so `saving_net_of_wear` says what a
+    # saving would be worth after the battery is paid for -- not what any of them
+    # was optimising. A controller with a negative one is buying its saving out
+    # of pack life.
+    import Battery_Economics as be
+
+    caps = pd.to_numeric(
+        df.set_index(KEY_COLUMNS)["battery_cap"].reindex(key), errors="coerce"
+    ).to_numpy()
+    rate = np.where(np.isfinite(caps), be.CAPEX_EUR_PER_KWH * caps
+                    / be.BATTERY_CYCLE_LIMIT_EFC, np.nan)
+    long["wear_eur"] = long["efc"] * rate
+    long["saving_net_of_wear"] = long["saving"] - long["wear_eur"].fillna(0.0)
     return long
 
 
