@@ -1979,10 +1979,16 @@ def run_pipeline_for_file(file_path: str,
         # side by side under different names is exactly the unfair comparison
         # this study set out to remove, and it flatters the MILP on SI by the
         # whole excess-power charge.
+        # `cost_<controller>` is the comparison figure and the ONLY key allowed
+        # to start with "cost_": controller_columns reads that prefix as the
+        # controller namespace, so a component named cost_eur_oracle would show
+        # up in every table as a controller called "eur_oracle".
         kpi_raw[f"cost_{_name}"] = _s["Cost_EUR_Closed"]
-        for _k in ("Cost_EUR", "Energy_EUR", "Power_EUR", "Fixed_EUR",
-                   "Terminal_SOC_Adj_EUR", "Peak_Import_kW"):
-            kpi_raw[f"{_k.lower()}_{_name}"] = _s[_k]
+        for _k, _prefix in (("Cost_EUR", "gross"), ("Energy_EUR", "energy"),
+                            ("Power_EUR", "power"), ("Fixed_EUR", "fixed"),
+                            ("Terminal_SOC_Adj_EUR", "termadj"),
+                            ("Peak_Import_kW", "peakkw")):
+            kpi_raw[f"{_prefix}_{_name}"] = _s[_k]
         # Cycles, on the same convention the rules report: energy through the
         # STORE against the NAMEPLATE pack, which is what a cycle rating is
         # quoted against.
@@ -2367,7 +2373,15 @@ def controller_columns(df: pd.DataFrame) -> list:
     for col in df.columns:
         if col.startswith("cost_"):
             present.add(col[len("cost_"):])
-    return [c for c in known if c in present] + sorted(present - set(known))
+    # Only names that are actually controllers. An unrecognised cost_* column is
+    # reported rather than sorted in at the end of the list, where it reads as a
+    # controller nobody can name -- which is how "eur_closed_oracle" ended up in
+    # the paired tables next to "peak shaving".
+    unknown = present - set(known)
+    if unknown:
+        print(f"  ! ignoring cost_* column(s) that name no controller: "
+              f"{', '.join(sorted(unknown))}")
+    return [c for c in known if c in present]
 
 
 def summarize(df: pd.DataFrame, reference="no_battery") -> pd.DataFrame:
