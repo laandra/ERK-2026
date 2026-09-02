@@ -1181,7 +1181,8 @@ class TariffArbitrage(rbc.Policy):
         return 0.0
 
 
-def run_rules(env, settle, tariff, signals=None, only=None, n_steps=None):
+def run_rules(env, settle, tariff, signals=None, only=None, n_steps=None,
+              soc_init_kwh=None):
     """Every rule this tariff is compared against, executed and priced.
 
     Returns `(metrics, rows)`: metrics keyed `cost_<rule>` for the checkpoint,
@@ -1203,7 +1204,8 @@ def run_rules(env, settle, tariff, signals=None, only=None, n_steps=None):
 
     metrics, rows = {}, []
     for pol in roster:
-        out = rbc.run_policy(env, pol, signals=signals, settle=settle)
+        out = rbc.run_policy(env, pol, signals=signals, settle=settle,
+                             soc_init_kwh=soc_init_kwh)
         metrics[f"cost_{pol.name}"] = out["Cost_EUR_Closed"]
         metrics[f"efc_{pol.name}"] = out["Equivalent_Full_Cycles"]
         rows.append({"controller": pol.name, "label": pol.label,
@@ -1264,7 +1266,7 @@ def rule_roster(tariff):
     return out
 
 
-def settle_trajectory(env, net_kwh, settle, sig):
+def settle_trajectory(env, net_kwh, settle, sig, soc_start=None, soc_end=None):
     """Price an executed trajectory through the arm's evaluator.
 
     The MILP half of "one evaluator". `ReactiveController.run` decides a
@@ -1285,7 +1287,18 @@ def settle_trajectory(env, net_kwh, settle, sig):
         power += p_
         fixed += f
         peak_kw = max(peak_kw, float(net_kwh[idx]) / sig.hours)
-    return {"Cost_EUR": cost, "Energy_EUR": energy, "Power_EUR": power,
+    # The same close-out the rules get. A controller that ends the year with a
+    # flatter pack than it started has spent stored energy it was given, and
+    # booking that as a saving is free money; valuing the shortfall at the mean
+    # delivered import rate closes it. The MILP's per-solve terminal constraint
+    # makes this small, which is the point -- it should be small, and it should be
+    # measured rather than assumed.
+    adj = 0.0
+    if soc_start is not None and soc_end is not None:
+        mean_rate = float(np.mean(sig.import_rate[:len(net_kwh)]))
+        adj = (float(soc_start) - float(soc_end)) / sig.eta_ch * mean_rate
+    return {"Cost_EUR": cost, "Cost_EUR_Closed": cost + adj,
+            "Terminal_SOC_Adj_EUR": adj, "Energy_EUR": energy, "Power_EUR": power,
             "Fixed_EUR": fixed, "Peak_Import_kW": peak_kw}
 
 
@@ -1862,7 +1875,8 @@ def run_pipeline_for_file(file_path: str,
         print(f"  [checkpoint] backfilling {', '.join(missing)} "
               f"(forecast-free, no LP); MILP results reused")
         extra, _ = run_rules(env, settle, tariff, only=missing,
-                             n_steps=n_sim * H)
+                             n_steps=n_sim * H,
+                             soc_init_kwh=soc_init - battery_cap * soc_min_pct)
         cached = {**cached, **extra}
         write_checkpoint(out_dir, cfg, cached)
         return {"dataset": dataset_name, **cached}
@@ -1938,7 +1952,8 @@ def run_pipeline_for_file(file_path: str,
         sig = rbc.build_signals(env, n_steps=len(df_sim))
     for _name, _frame in (("oracle", df_pk), ("prophet", df_fc)):
         _net = (_frame["Buy_kW"] - _frame["Sell_kW"]).to_numpy() * delta_t
-        _s = settle_trajectory(env, _net, settle, sig)
+        _s = settle_trajectory(env, _net, settle, sig, soc_start=soc_init,
+                               soc_end=float(_frame["SoC_kWh"].iloc[-1]))
         kpi_raw.update({f"{_k.lower()}_{_name}": _v for _k, _v in _s.items()})
 
     # The deployable alternative, on realized data deliberately: an inverter
@@ -1947,7 +1962,14 @@ def run_pipeline_for_file(file_path: str,
     # it would be for a planner. There is correspondingly no "forecast" variant
     # of any of them.
     print(f"\n--- Rule-based controllers ({tariff}) ---")
-    rule_metrics, rule_rows = run_rules(env, settle, tariff, signals=sig)
+    # `soc_init` is absolute kWh in the controller's frame (soc_min..soc_max);
+    # the rules work in upstream's stored frame (0..capacity). Without the offset
+    # the rules would start at SOC_FRACTION * capacity = 3.5 kWh stored while the
+    # MILP started at 4.0, which is not the same experiment -- and the half kWh
+    # difference comes out as a saving.
+    rule_metrics, rule_rows = run_rules(
+        env, settle, tariff, signals=sig,
+        soc_init_kwh=soc_init - battery_cap * soc_min_pct)
     kpi_raw.update(rule_metrics)
     for _r in rule_rows:
         print(f"  {_r['controller']:30s} {_r['Cost_EUR_Closed']:9.2f} EUR"

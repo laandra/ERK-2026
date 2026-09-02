@@ -825,7 +825,7 @@ def make_policy(name, **kwargs):
 # The runner: execute a rule and price it exactly as the MILP is priced
 # ---------------------------------------------------------------------------
 def run_policy(env, policy, n_steps=None, signals=None, keep_traces=False,
-               settle=None):
+               settle=None, soc_init_kwh=None):
     """Execute one controller over the horizon and return its priced trajectory.
 
     The accounting is the MILP runner's, interval for interval, with the solve
@@ -860,7 +860,8 @@ def run_policy(env, policy, n_steps=None, signals=None, keep_traces=False,
             # rebuilt, so converging costs solves and not price vectors.
             out = _run_policy_once(env, policy, n_steps=n_steps,
                                    signals=rebind_agreed_power(base, env),
-                                   keep_traces=True, settle=settle)
+                                   keep_traces=True, settle=settle,
+                                   soc_init_kwh=soc_init_kwh)
             spent["seconds"] += out["Runtime_s"]
             return out, np.maximum(out["_net_trace"], 0.0) / hours
 
@@ -877,7 +878,8 @@ def run_policy(env, policy, n_steps=None, signals=None, keep_traces=False,
         return out
 
     out = _run_policy_once(env, policy, n_steps=n_steps, signals=signals,
-                           keep_traces=keep_traces, settle=settle)
+                           keep_traces=keep_traces, settle=settle,
+                           soc_init_kwh=soc_init_kwh)
     out.pop("_net_trace", None)
     out["Agreed_Power_Iters"] = 1
     out["Agreed_Power_Converged"] = True
@@ -885,7 +887,7 @@ def run_policy(env, policy, n_steps=None, signals=None, keep_traces=False,
 
 
 def _run_policy_once(env, policy, n_steps=None, signals=None, keep_traces=False,
-                     settle=None):
+                     settle=None, soc_init_kwh=None):
     """One pass of the rule under the contract currently in force."""
     settle = price_interval if settle is None else settle
     sig = build_signals(env, n_steps) if signals is None else signals
@@ -893,7 +895,12 @@ def _run_policy_once(env, policy, n_steps=None, signals=None, keep_traces=False,
     policy.reset(sig)
 
     capacity = sig.capacity_kwh
-    soc_target = SOC_FRACTION * capacity
+    # Where the pack starts, and the level the terminal adjustment closes it back
+    # to. `SOC_FRACTION * capacity` is the default every MILP strategy uses, but a
+    # study whose own controller starts somewhere else has to be able to say so:
+    # a rule starting at 3.5 kWh stored and a MILP starting at 4.0 are not running
+    # the same experiment, and the difference shows up as a saving.
+    soc_target = SOC_FRACTION * capacity if soc_init_kwh is None else float(soc_init_kwh)
     soc = soc_target
 
     # The MILP's daily cap is a constraint on store throughput per LOCAL day;
