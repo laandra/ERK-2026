@@ -2283,6 +2283,21 @@ def collect_results(output_root=None, arms=None) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
+
+    # Whether a row carries every controller its tariff is compared on. A
+    # checkpoint written before the rule roster existed has cost_prophet and
+    # cost_oracle but none of the rules, and reading it as if it did is how a
+    # partial panel gets reported as a whole one. Flagged rather than dropped
+    # here, so the caller can say what it is holding out and why.
+    def complete(row):
+        tariff = row.get("tariff")
+        if tariff not in RULES_BY_TARIFF:
+            return False
+        wanted = ["no_battery"] + [pol.name for pol in rule_roster(tariff)]
+        return all(f"cost_{name}" in row and pd.notna(row[f"cost_{name}"])
+                   for name in wanted)
+
+    df["roster_complete"] = df.apply(complete, axis=1)
     order = {a: i for i, a in enumerate(ARM_ORDER)}
     df["_ord"] = df["arm"].map(order).fillna(len(order))
     return df.sort_values(["_ord", "dataset"]).drop(columns="_ord").reset_index(drop=True)
@@ -2343,8 +2358,12 @@ def best_rule(long: pd.DataFrame, arm: str, exclude=("price_oracle",)) -> str:
     """
     rules = (set(rbc.POLICY_ORDER) | {"tariff_arbitrage"}) - set(exclude)
     sub = long[(long["arm"] == arm) & long["controller"].isin(rules)]
+    sub = sub.dropna(subset=["cost"])
     if sub.empty:
-        raise ValueError(f"no rule rows for arm {arm!r}")
+        # No rule has run on this arm -- almost always a results directory
+        # written before the roster existed. None, not an exception: a notebook
+        # should be able to say "not run yet" and carry on drawing what it has.
+        return None
     return sub.groupby("controller")["cost"].median().idxmin()
 
 
