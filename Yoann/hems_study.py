@@ -362,6 +362,21 @@ def build_forecast_table_refit(params_con, params_gen, df_train, df_sim,
     return pd.concat(frames, ignore_index=True)
 
 
+def _naive(index) -> pd.DatetimeIndex:
+    """Forecast timestamps, tz-stripped -- the one convention every source uses.
+
+    Prophet drops the timezone in `_to_prophet_df` and never puts it back, so its
+    tables carry naive stamps. The sources that read a frame instead of fitting a
+    model were handing back that frame's own tz-aware index, which compares
+    unequal to an identical naive instant: the hybrid kinds refused to merge with
+    "the prophet and persistence tables do not share an index (384 vs 384 rows)",
+    which is the guard working and the convention being wrong. The data is UTC
+    throughout, so nothing is lost by dropping the label.
+    """
+    idx = pd.DatetimeIndex(index)
+    return idx.tz_localize(None) if idx.tz is not None else idx
+
+
 class TruthForecaster:
     """Perfect day-ahead knowledge. NOT deployable; a bound, not a controller.
 
@@ -396,7 +411,7 @@ class TruthForecaster:
             raise KeyError(f"anchor {anchor_ts} is not in the truth frame")
         window = self.frame.iloc[i:i + horizon_steps]
         return pd.DataFrame({
-            "ds": window.index,
+            "ds": _naive(window.index),
             "yhat_con": window["Energy_Consumption"].values,
             "yhat_gen": window["Energy_Generation"].values,
         })
@@ -541,7 +556,9 @@ def load_or_build_forecasts(dataset_name: str,
         # Both tables are built over the same anchors in the same order, so the
         # rows line up positionally. Checked rather than assumed: a silent
         # misalignment here would score one day's PV against another's load.
-        if len(gen) != len(table) or not gen["ds"].equals(table["ds"]):
+        aligned = (len(gen) == len(table)
+                   and _naive(gen["ds"]).equals(_naive(table["ds"])))
+        if not aligned:
             raise ValueError(
                 f"{kind}: the {con_source} and {gen_source} tables do not share "
                 f"an index ({len(table)} vs {len(gen)} rows)"
@@ -1059,7 +1076,7 @@ class PersistenceForecaster:
         prev = self.frame.iloc[j:j + horizon_steps]
         idx = self.frame.index[i:i + horizon_steps]
         return pd.DataFrame({
-            "ds": idx,
+            "ds": _naive(idx),
             "yhat_con": prev["Energy_Consumption"].values[:len(idx)],
             "yhat_gen": prev["Energy_Generation"].values[:len(idx)],
         })
@@ -1950,11 +1967,28 @@ def run_pipeline_for_file(file_path: str,
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         sig = rbc.build_signals(env, n_steps=len(df_sim))
+    nominal_kwh = float(battery_cap)
     for _name, _frame in (("oracle", df_pk), ("prophet", df_fc)):
         _net = (_frame["Buy_kW"] - _frame["Sell_kW"]).to_numpy() * delta_t
         _s = settle_trajectory(env, _net, settle, sig, soc_start=soc_init,
                                soc_end=float(_frame["SoC_kWh"].iloc[-1]))
-        kpi_raw.update({f"{_k.lower()}_{_name}": _v for _k, _v in _s.items()})
+        # OVERWRITE what KPITracker put here. Its cost_prophet / cost_oracle are
+        # the controller's own running total: buy x rate - sell x rate, with no
+        # standing charge and -- on SI -- no capacity charge at all. Every rule's
+        # cost_<rule> comes from the settlement and carries both. Leaving the two
+        # side by side under different names is exactly the unfair comparison
+        # this study set out to remove, and it flatters the MILP on SI by the
+        # whole excess-power charge.
+        kpi_raw[f"cost_{_name}"] = _s["Cost_EUR_Closed"]
+        for _k in ("Cost_EUR", "Energy_EUR", "Power_EUR", "Fixed_EUR",
+                   "Terminal_SOC_Adj_EUR", "Peak_Import_kW"):
+            kpi_raw[f"{_k.lower()}_{_name}"] = _s[_k]
+        # Cycles, on the same convention the rules report: energy through the
+        # STORE against the NAMEPLATE pack, which is what a cycle rating is
+        # quoted against.
+        _stored = (float(_frame["Charge_kW"].sum()) * delta_t * eff
+                   + float(_frame["Discharge_kW"].sum()) * delta_t / eff)
+        kpi_raw[f"efc_{_name}"] = _stored / (2.0 * nominal_kwh)
 
     # The deployable alternative, on realized data deliberately: an inverter
     # measures the surplus in front of it, it does not forecast one, so giving a
@@ -2350,6 +2384,10 @@ def summarize(df: pd.DataFrame, reference="no_battery") -> pd.DataFrame:
         part["efc"] = df["efc_" + name] if "efc_" + name in df else np.nan
         frames.append(part)
     long = pd.concat(frames, ignore_index=True)
+    # A controller that does not run on this arm's tariff -- peak shaving on AU,
+    # where there is no capacity charge to earn from -- is absent, not NaN. A row
+    # of NaN reads as "ran and produced nothing", which is a different claim.
+    long = long[long["cost"].notna()].reset_index(drop=True)
 
     indexed = df.set_index(KEY_COLUMNS)
     key = pd.MultiIndex.from_frame(long[KEY_COLUMNS])

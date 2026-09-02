@@ -1,0 +1,52 @@
+{
+  "figure": "wear_vs_saving_au",
+  "created_utc": "2026-09-02T16:30:45+00:00",
+  "files": [
+    "wear_vs_saving_au.pdf"
+  ],
+  "export": {
+    "formats": [
+      "pdf"
+    ],
+    "dpi": 600,
+    "bbox": "tight",
+    "figsize_in": [
+      7.16,
+      4.1528
+    ],
+    "matplotlib": "3.11.1",
+    "python": "3.12.12"
+  },
+  "source": {
+    "notebook": null,
+    "notebook_detected_by": null,
+    "cell_execution_count": null,
+    "caller": "<string>:12",
+    "cwd": "C:\\Users\\HP\\Documents\\JupyterNotebook\\ERK 2026\\Yoann"
+  },
+  "git": {
+    "available": true,
+    "commit": "6606bea56fdf5584fc349f0adaf59c45668c6cf7",
+    "commit_short": "6606bea",
+    "branch": "rework/energy-community-fork",
+    "describe": "6606bea-dirty",
+    "subject": "Put every controller on the same starting SoC and the same close-out; drop figure.py",
+    "committed_at": "2026-09-02T18:14:37+02:00",
+    "remote": "https://github.com/laandra/ERK-2026.git",
+    "dirty": true,
+    "dirty_file_count": 2,
+    "dirty_files": [
+      "oann/hems_study.py",
+      "Results/"
+    ],
+    "dirty_stat": "Yoann/hems_study.py | 23 ++++++++++++++++++++---\n 1 file changed, 20 insertions(+), 3 deletions(-)",
+    "diff_file": "uncommitted.diff",
+    "diff_truncated": false,
+    "diff_excludes": [
+      ":(exclude)*.ipynb"
+    ]
+  },
+  "caption": [
+    "What a saving costs in pack life, AU"
+  ]
+}
