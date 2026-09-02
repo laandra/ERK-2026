@@ -118,7 +118,16 @@ def _drop_peak_on_window_start(peak_state, windows, idx):
 
 
 def price_interval(env, idx, net_kwh, peak_state):
-    """Price one executed interval, carrying the ratchet forward.
+    """Price one executed interval under the SI schemes, carrying the ratchet.
+
+    This is the DEFAULT settlement `run_policy` uses, and the signature every
+    settlement has to match: `(env, idx, net_kwh, peak_state) ->
+    (variable, energy, power, fixed, new_peak_kw)`. A study on a tariff these
+    schemes do not describe -- the Ausgrid time-of-use list, say, which has no
+    capacity charge and no per-block agreed power -- passes its own through
+    `run_policy(settle=...)`. What must NOT happen is a study pricing its rules
+    here and its MILP somewhere else: whatever separates two controllers then
+    includes the difference between two evaluators.
 
     Returns `(variable, energy, power, fixed, new_peak_kw)`, all EUR.
 
@@ -815,7 +824,8 @@ def make_policy(name, **kwargs):
 # ---------------------------------------------------------------------------
 # The runner: execute a rule and price it exactly as the MILP is priced
 # ---------------------------------------------------------------------------
-def run_policy(env, policy, n_steps=None, signals=None, keep_traces=False):
+def run_policy(env, policy, n_steps=None, signals=None, keep_traces=False,
+               settle=None):
     """Execute one controller over the horizon and return its priced trajectory.
 
     The accounting is the MILP runner's, interval for interval, with the solve
@@ -826,6 +836,11 @@ def run_policy(env, policy, n_steps=None, signals=None, keep_traces=False):
     `signals` is reusable across every policy on one environment -- building it
     prices the whole year at unit volume -- so a caller running the roster should
     build it once and pass it in.
+
+    `settle` is the evaluator, defaulting to `price_interval`. It is injectable
+    so that a study on another tariff can price its rules and its MILP through
+    ONE function rather than two, which is the only way the gap between them
+    means what it says.
 
     With `env.agreed_power_from_dispatch` set the run is repeated until the
     dogovorjena moc it is billed under is the one its own peaks agree to, exactly
@@ -838,13 +853,14 @@ def run_policy(env, policy, n_steps=None, signals=None, keep_traces=False):
         base = build_signals(env, n_steps) if signals is None else signals
         spent = {"seconds": 0.0}
 
+
         def _dispatch():
             # Only the contract moves between iterations, and it enters the
             # bundle as one array; the rates and the calendar are rebound, not
             # rebuilt, so converging costs solves and not price vectors.
             out = _run_policy_once(env, policy, n_steps=n_steps,
                                    signals=rebind_agreed_power(base, env),
-                                   keep_traces=True)
+                                   keep_traces=True, settle=settle)
             spent["seconds"] += out["Runtime_s"]
             return out, np.maximum(out["_net_trace"], 0.0) / hours
 
@@ -861,15 +877,17 @@ def run_policy(env, policy, n_steps=None, signals=None, keep_traces=False):
         return out
 
     out = _run_policy_once(env, policy, n_steps=n_steps, signals=signals,
-                           keep_traces=keep_traces)
+                           keep_traces=keep_traces, settle=settle)
     out.pop("_net_trace", None)
     out["Agreed_Power_Iters"] = 1
     out["Agreed_Power_Converged"] = True
     return out
 
 
-def _run_policy_once(env, policy, n_steps=None, signals=None, keep_traces=False):
+def _run_policy_once(env, policy, n_steps=None, signals=None, keep_traces=False,
+                     settle=None):
     """One pass of the rule under the contract currently in force."""
+    settle = price_interval if settle is None else settle
     sig = build_signals(env, n_steps) if signals is None else signals
     n_steps = sig.n_steps
     policy.reset(sig)
@@ -923,7 +941,7 @@ def _run_policy_once(env, policy, n_steps=None, signals=None, keep_traces=False)
         # comparison reports `Curtailed_kWh` for both so the asymmetry shows.
         net = sig.consumption[idx] + ch - sig.generation[idx] - dis
 
-        step_cost, e_part, p_part, f_part, peak_state = price_interval(
+        step_cost, e_part, p_part, f_part, peak_state = settle(
             env, idx, net, peak_state)
         cost += step_cost
         energy_cost += e_part

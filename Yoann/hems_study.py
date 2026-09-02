@@ -1168,6 +1168,112 @@ class PersistenceForecaster:
 
 
 # =====================================================================
+# 3e — One settlement, and the rule-based roster
+# =====================================================================
+#
+# The load-bearing rule of the comparison: a rule and the MILP differ ONLY in
+# how a setpoint is chosen. Same envelope, same rate vectors, same evaluator.
+# The evaluator is the part that is easy to get wrong, because the rules arrive
+# with one of their own (`Rule_Based_Control.price_interval`, the SI ratchet
+# walk) and the MILP arm has always had another (buy x rate - sell x rate). Run
+# both and whatever separates two controllers includes the difference between
+# two settlements, which is not a result about control at all.
+#
+# So: one `settle` callable per arm, matching price_interval's signature, used
+# by the rules AND applied to the MILP's executed trajectory.
+
+import Rule_Based_Control as rbc                                  # noqa: E402
+
+
+def make_au_settlement(rates, delta_t):
+    """Ausgrid EA025: the delivered rate vectors, and no capacity charge.
+
+    Returned rather than written inline so it has price_interval's exact
+    signature and can be handed to `run_policy(settle=...)` unchanged. The peak
+    state passes through untouched: EA025 as modelled here bills energy and a
+    standing charge, so there is no running peak to carry and `Power_EUR` is 0
+    for every controller on this tariff by construction, not by accident.
+    """
+    buy, sell, const = (np.asarray(x, dtype=float) for x in rates)
+
+    def settle(env, idx, net_kwh, peak_state):
+        imported = max(float(net_kwh), 0.0)
+        exported = max(-float(net_kwh), 0.0)
+        energy = imported * buy[idx] - exported * sell[idx]
+        return energy, energy, 0.0, float(const[idx]), peak_state
+
+    return settle
+
+
+def build_settlement(tariff, env, rates, delta_t):
+    """The one evaluator this arm prices every controller through."""
+    if tariff == "AU":
+        return make_au_settlement(rates, delta_t)
+    if tariff == "SI":
+        # The full SI walk: a running per-block peak dropped on each ratchet
+        # window, priced against the dogovorjena moc in force -- which is itself
+        # rolled from the peaks this controller realized the month before.
+        return rbc.price_interval
+    raise ValueError(f"unknown tariff {tariff!r}; expected 'AU' or 'SI'")
+
+
+# Which rules run on which tariff. The two peak-shaving rules earn their money
+# from a capacity charge; Ausgrid EA025 as modelled has none, so on AU they can
+# only spend round-trip losses and including them would be a rigged comparison.
+# On SI they are the point.
+RULES_BY_TARIFF = {
+    "AU": ["self_consumption", "fixed_schedule", "delayed_pv_charge",
+           "price_threshold", "price_rank_daily", "price_oracle"],
+    "SI": list(rbc.POLICY_ORDER),
+}
+# `respect_peak` caps grid charging at the agreed power so a rule does not buy
+# its arbitrage twice. On AU there is no excess-power charge to avoid, and the
+# environment's agreed power is an SI artefact of build_study_env -- letting it
+# throttle an Ausgrid controller would be charging it for a contract it is not
+# on. Off there, on under SI.
+_PEAK_AWARE_ARGS = {
+    "fixed_schedule": "respect_peak", "price_threshold": "respect_peak",
+    "price_rank_daily": "respect_peak", "price_oracle": "respect_peak",
+    "peak_shaving": "ratchet_aware", "self_consumption_peak_shaving": "ratchet_aware",
+}
+
+
+def rule_roster(tariff):
+    """The controllers this tariff is compared against, already configured."""
+    respect = tariff == "SI"
+    out = []
+    for name in RULES_BY_TARIFF[tariff]:
+        arg = _PEAK_AWARE_ARGS.get(name)
+        out.append(rbc.make_policy(name, **({arg: respect} if arg else {})))
+    return out
+
+
+def settle_trajectory(env, net_kwh, settle, sig):
+    """Price an executed trajectory through the arm's evaluator.
+
+    The MILP half of "one evaluator". `ReactiveController.run` decides a
+    dispatch and reports what it did; the cost it reports along the way is a
+    running convenience, not the bill. This walks the realized net draw through
+    exactly the settlement the rules are priced by -- same peak state, same
+    window drops, same standing charge -- so `Cost_EUR` means one thing across
+    the whole results frame.
+    """
+    peak_state = {b: 0.0 for b in rbc._BLOCKS}
+    cost = energy = power = fixed = 0.0
+    peak_kw = 0.0
+    for idx in range(len(net_kwh)):
+        peak_state = rbc._drop_peak_on_window_start(peak_state, sig.windows, idx)
+        step, e, p_, f, peak_state = settle(env, idx, float(net_kwh[idx]), peak_state)
+        cost += step
+        energy += e
+        power += p_
+        fixed += f
+        peak_kw = max(peak_kw, float(net_kwh[idx]) / sig.hours)
+    return {"Cost_EUR": cost, "Energy_EUR": energy, "Power_EUR": power,
+            "Fixed_EUR": fixed, "Peak_Import_kW": peak_kw}
+
+
+# =====================================================================
 # 4 — ReactiveController
 # =====================================================================
 
