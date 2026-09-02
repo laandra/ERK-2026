@@ -17,3 +17,6 @@ New pricing functions/__pycache__/
 
 # Cached Prophet forecasts (rebuildable, keyed by config digest)
 forecast_cache/
+
+# Local virtualenv
+.venv/

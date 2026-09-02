@@ -1,0 +1,58 @@
+{
+  "config": {
+    "H": 48,
+    "battery_cap": 10.0,
+    "calendar": [
+      "AU",
+      "NSW",
+      [
+        5,
+        6,
+        7,
+        8
+      ]
+    ],
+    "control_horizon": 48,
+    "delta_t": 0.5,
+    "eff": 0.95,
+    "forecaster_digest": "6e69aec913df",
+    "forecaster_kind": "persistence",
+    "leak_current_interval": false,
+    "n_sim": 365,
+    "n_train": 730,
+    "p_max": 1.5,
+    "refit_every_days": 30,
+    "smp_source": "column",
+    "soc_init": 5.0,
+    "soc_max_pct": 0.8,
+    "soc_min_pct": 0.1,
+    "start_ts": "2010-07-01 00:30:00",
+    "tariff": "AU"
+  },
+  "metrics": {
+    "cost_no_battery": 455.4318958926734,
+    "cost_oracle": 286.18615604645595,
+    "cost_prophet": 396.39799213781674,
+    "buy_no_battery": 2636.215,
+    "buy_oracle": 2311.843485187088,
+    "buy_prophet": 3087.584179484575,
+    "sell_no_battery": 530.0060000000001,
+    "sell_oracle": 33.40888581250003,
+    "sell_prophet": 809.5811929932372,
+    "cost_rule": 406.0329304739238,
+    "buy_rule": 2154.084585,
+    "sell_rule": 7.771561172376096e-16,
+    "gen_mae": 0.06943139269406393,
+    "gen_rmse": 0.1522148738074541,
+    "gen_nmae": 0.42335389943953644,
+    "gen_skill_vs_naive": 0.0,
+    "gen_mae_first_month": 0.05272361111111111,
+    "gen_mae_last_month": 0.05581111111111111,
+    "con_mae": 0.24122317351598171,
+    "con_rmse": 0.5395057921576835,
+    "con_nmae": 0.5964404070477185,
+    "con_skill_vs_naive": 0.0,
+    "con_mae_first_month": 0.4735611111111111,
+    "con_mae_last_month": 0.3502416666666666
+  }
+}
