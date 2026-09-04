@@ -1,0 +1,5 @@
+﻿KPI,No battery,Perfect foresight,Forecast (Prophet)
+Total cost,490.23,427.98 (-12.7 %),489.02 (-0.2 %)
+Regret vs perfect foresight (% of no-battery cost),—,0.00 (+0.0 %),61.04 (+12.5 %)
+Energy bought (kWh),6218.9,5418.1 (-12.9 %),6462.4 (+3.9 %)
+Energy sold (kWh),988.9,26.8 (-97.3 %),1068.3 (+8.0 %)
