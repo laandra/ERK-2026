@@ -279,7 +279,52 @@ class EnergyForecaster:
 #   run checkpoint  depends on all of it, because every one of those axes
 #                   changes the answer.
 
-FORECAST_CACHE_DIR = os.environ.get("ERK_FORECAST_CACHE", "forecast_cache")
+# Anchored to THIS FILE, not to the cwd. A relative "forecast_cache" resolves
+# against wherever the process happens to have started -- the notebook runs
+# from Yoann/, a worker process or a test harness need not -- and a cache that
+# moves when the cwd moves is a cache that silently misses and refits Prophet.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+FORECAST_CACHE_DIR = os.environ.get(
+    "ERK_FORECAST_CACHE", os.path.join(_HERE, "forecast_cache"))
+
+# The solver every LP in this study goes through.
+#
+# CBC is a COMMAND-LINE solver: `PULP_CBC_CMD` writes the model to a temp MPS
+# file and forks the `cbc` binary once per solve. On a 48-step household that
+# round trip is 19.3 of the 24.7 ms a solve costs -- process overhead, not
+# optimisation, on a model with 96 binaries that CBC itself dispatches in
+# microseconds. Across the sweep's 7.9 million solves it is most of the bill.
+#
+# HiGHS runs IN PROCESS through `highspy`: no file, no fork. Measured at 4.35 ms
+# against CBC's 12.96 ms on this model shape, with the objective identical to
+# the last bit over 25 random instances -- the same optimum, reached without the
+# subprocess. `gapRel`/`gapAbs` are pinned to zero because HiGHS otherwise stops
+# at a near-optimal incumbent inside a default MIP gap, and a controller that
+# accepts a 0.01 % worse plan 17,520 times is a changed result, not drift.
+#
+# Falls back to CBC when highspy is not installed, so the study still runs on an
+# environment that has only the wheel PuLP ships with. SOLVER_NAME goes into the
+# run checkpoint: which solver produced a number is part of what makes it
+# reproducible, and mixing two vintages in one panel is the thing the
+# checkpoint tag exists to prevent.
+try:
+    import highspy as _highspy       # noqa: F401
+    SOLVER_NAME = "HiGHS"
+except ImportError:
+    SOLVER_NAME = "CBC"
+
+
+def make_solver():
+    """A fresh solver instance. Not a module-level singleton, deliberately.
+
+    PuLP solver objects carry per-solve state, and the sweep runs them from
+    several worker processes; one shared instance is a race waiting to happen.
+    Constructing one is microseconds against a millisecond solve.
+    """
+    if SOLVER_NAME == "HiGHS":
+        return pulp.HiGHS(msg=False, gapRel=0.0, gapAbs=0.0, threads=1)
+    return pulp.PULP_CBC_CMD(msg=0)
+
 
 
 def config_digest(config: dict) -> str:
@@ -573,6 +618,104 @@ def load_or_build_forecasts(dataset_name: str,
     served = TableForecaster(table)
     served.table = table
     return served, path
+
+
+# =====================================================================
+# 2c — The oracle/rules cache: what does NOT depend on the forecast
+# =====================================================================
+#
+# Same idea as the forecast cache above, one level up. The forecast cache is
+# keyed on what changes a FORECAST; this one is keyed on what changes a
+# dispatch that never reads a forecast.
+#
+# Neither the oracle controller nor any rule-based controller looks at the
+# forecast. The oracle reads `_real_slice` -- realised generation and
+# consumption -- and every rule reads the meter in front of it. So for a fixed
+# (household, window, battery, tariff, calendar, control horizon, solver) they
+# produce the SAME answer in every arm, and the study's eleven arms contain only
+# four distinct oracle workloads: AU/SI x 24 h/11 h.
+#
+# The other seven were being re-solved from scratch: 3.7 million LP solves, a
+# third of the sweep, to recompute a number already on disk. Measured on
+# AU_H24 against AU_H24_leaked, where the leak flag cannot reach the oracle:
+# every cost_<rule> was bit-identical and cost_oracle differed by 3e-4 EUR,
+# which is CBC picking a different vertex on a tie, not a different answer.
+#
+# The key drops exactly the four forecast axes and keeps everything else, so an
+# arm that changes the battery, the tariff, the horizon or the solver still
+# computes its own oracle rather than reading someone else's.
+
+ORACLE_CACHE_DIR = os.environ.get(
+    "ERK_ORACLE_CACHE", os.path.join(_HERE, "oracle_cache"))
+
+# What the oracle and the rules cannot see. Everything else in `study_config`
+# stays in the key.
+_FORECAST_ONLY_KEYS = ("forecaster_kind", "forecaster_digest",
+                       "refit_every_days", "leak_current_interval")
+
+
+def oracle_config(config: dict, dataset_name: str) -> dict:
+    """The part of a run's config that a forecast-blind controller can see."""
+    cfg = {k: v for k, v in config.items() if k not in _FORECAST_ONLY_KEYS}
+    cfg["dataset"] = dataset_name
+    return cfg
+
+
+def _atomic_write(path: str, write_fn) -> None:
+    """Write via a temp file in the same directory, then rename.
+
+    The sweep runs from several worker processes and two of them can reach the
+    same oracle key at once (AU_H24 and AU_H24_persist are different arms and
+    one cache entry). A half-written gzip that a later reader picks up as
+    complete is the failure mode; `os.replace` is atomic on POSIX, so a reader
+    sees either the old file or the whole new one.
+    """
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        write_fn(tmp)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def load_or_build_oracle(dataset_name: str, config: dict, build_fn,
+                         cache_dir: str | None = None) -> tuple:
+    """`(df_pk, rule_metrics, rule_rows)`, solving only on a miss.
+
+    `build_fn()` returns that triple and is called only when nothing on disk
+    matches the key. The trajectory is stored rather than the metrics derived
+    from it: `KPITracker.compare_three` and `settle_trajectory` both need the
+    per-interval frame, and re-deriving them from it costs milliseconds while
+    re-solving it costs a quarter of an hour.
+    """
+    cache_dir = ORACLE_CACHE_DIR if cache_dir is None else cache_dir
+    digest = config_digest(oracle_config(config, dataset_name))
+    os.makedirs(cache_dir, exist_ok=True)
+    base = os.path.join(cache_dir, f"{dataset_name}__{digest}")
+    pk_path, rules_path = f"{base}__oracle.csv.gz", f"{base}__rules.json"
+
+    if os.path.exists(pk_path) and os.path.exists(rules_path):
+        try:
+            df_pk = pd.read_csv(pk_path, index_col=0, parse_dates=[0])
+            with open(rules_path, encoding="utf-8") as fh:
+                saved = json.load(fh)
+            print(f"  [oracle] cache hit {os.path.basename(base)} "
+                  f"({len(df_pk)} steps, {len(saved['rows'])} rules) -- nothing re-solved")
+            return df_pk, saved["metrics"], saved["rows"]
+        except (ValueError, OSError, KeyError) as exc:
+            # A truncated or superseded entry is recomputed, never resumed into.
+            print(f"  [oracle] cache entry unreadable ({exc}); re-solving")
+
+    df_pk, rule_metrics, rule_rows = build_fn()
+    _atomic_write(pk_path, lambda t: df_pk.to_csv(t, encoding="utf-8-sig",
+                                                  compression="gzip"))
+    _atomic_write(rules_path, lambda t: json.dump(
+        {"metrics": rule_metrics, "rows": rule_rows}, open(t, "w", encoding="utf-8"),
+        indent=1, default=float))
+    print(f"  [oracle] cached {len(df_pk)} steps + {len(rule_rows)} rules "
+          f"-> {os.path.basename(base)}")
+    return df_pk, rule_metrics, rule_rows
 
 
 def study_config(**params) -> dict:
@@ -869,7 +1012,7 @@ class UpstreamMILPScheduler:
         self.soc_min  = battery_cap * soc_min_pct
         self.soc_max  = battery_cap * soc_max_pct
         self.parity   = parity
-        self.solver   = solver or pulp.PULP_CBC_CMD(msg=0)
+        self.solver   = solver or make_solver()
 
         if parity:
             # Reproduce the old hand-rolled model exactly: symmetric +-p_max AC
@@ -1681,12 +1824,14 @@ def run_pipeline_for_file(file_path: str,
                            forecaster_params_gen: dict | None = None,
                            refit_every_days: int | None = 30,
                            forecast_cache_dir: str | None = None,
+                           oracle_cache_dir: str | None = None,
                            control_horizon: int | None = None,
                            tariff: str = "AU",
                            forecaster_kind: str = "prophet",
                            leak_current_interval: bool = False,
                            smp_source: str | None = None,
                            milp_parity: bool = True,
+                           milp_exclusivity: str = "inverter",
                            cycle_cost_eur_per_efc: float | None = None,
                            holiday_country: str = "AU",
                            holiday_subdiv: str | None = "NSW",
@@ -1726,12 +1871,24 @@ def run_pipeline_for_file(file_path: str,
         # picks which battery model the MILP solves; cycle_cost_eur_per_efc puts
         # a wear shadow price in its objective, which changes what it decides to
         # do (and, deliberately, stops the objective being the reported bill).
-        milp_parity=bool(milp_parity),
+        # Which battery model the MILP solves. `milp_parity` only means anything
+        # on the binary branch -- the inverter branch never consults it -- so
+        # recording it there would put "parity=True" in the provenance of a run
+        # that did not solve the parity model. None says "not applicable" rather
+        # than saying something false.
+        milp_parity=bool(milp_parity) if milp_exclusivity == "binary" else None,
         cycle_cost_eur_per_efc=cycle_cost_eur_per_efc,
         leak_current_interval=bool(leak_current_interval),
         forecaster_kind=forecaster_kind,
         refit_every_days=refit_every_days,
         smp_source=smp_source or "column",
+        # WHICH solver produced the dispatch. CBC and HiGHS agree to the last
+        # bit on this model, but they need not on a degenerate tie, and a panel
+        # that silently mixes two solvers is the failure the tag guard exists
+        # for. Recording it means a solver swap invalidates every checkpoint
+        # and the sweep comes back one vintage throughout.
+        solver=SOLVER_NAME,
+        milp_exclusivity=milp_exclusivity,
         calendar=(holiday_country, holiday_subdiv, tuple(sorted(high_season_months))),
         # A DIGEST, not the settings themselves: the forecaster's configuration
         # is already recorded beside the forecasts it produced, and duplicating
@@ -1907,20 +2064,76 @@ def run_pipeline_for_file(file_path: str,
 
     # `add_household_physics`, not the hand-rolled MILPScheduler. b53def7 added
     # this adapter and then never instantiated it, so the swap it announced was
-    # inert and the MILP kept solving its own copy of the battery. parity=True
-    # reproduces that copy exactly -- verified to 3.6e-9 EUR over seven daily
-    # solves -- so the published numbers are reproducible, while the study now
-    # has one battery model instead of two that can drift.
-    scheduler = UpstreamMILPScheduler(
-        env,
-        battery_cap=battery_cap,
-        soc_min_pct=soc_min_pct,
-        soc_max_pct=soc_max_pct,
-        p_max=p_max,
-        eff=eff,
-        delta_t=delta_t,
-        parity=milp_parity,
-    )
+    # inert and the MILP kept solving its own copy of the battery. The study now
+    # has one battery model instead of two that can drift, and
+    # `test_milp_parity` holds the old one to it: `parity=True` still reproduces
+    # the hand-rolled model to 3.0e-9 EUR over three daily solves. It is the
+    # checked REFERENCE rather than the default -- see `milp_exclusivity` below
+    # for what the study actually solves and what that was measured against.
+    # `milp_exclusivity` picks how simultaneous charge and discharge is
+    # forbidden, and is the ONLY thing it changes -- the battery, the spill
+    # setting and the metering bounds stay where parity puts them.
+    #
+    #   "inverter"  charge + discharge <= the inverter rating, which is the
+    #               physical bound and leaves a pure LP. THE DEFAULT, and what
+    #               the study now runs.
+    #   "binary"    one binary per interval. The model the study used to solve,
+    #               kept runnable and one flag away.
+    #
+    # The binaries are not wrong, they are redundant. `floor_export_rates` holds
+    # the export credit at or below the delivered import rate at every step, so
+    # a buy/sell or charge/discharge round trip can never pay for its own
+    # losses, and the optimum never wants to do both at once whether or not it
+    # is forbidden. Measured rather than argued:
+    #
+    #   4,800 solves, both tariffs, both horizons, 5 households
+    #       same optimum to 8.4e-7 EUR; not ONE interval of 230,400 came back
+    #       charging and discharging at once; 4x faster.
+    #   6 full simulated years, both tariffs, 3 households
+    #       worst annual cost delta 2.4e-4 RELATIVE, forecast-error columns
+    #       identical to the bit, 5.6x faster end to end (20.30 -> 3.52 ms per
+    #       solve, which is a 3.2 h sweep against a 0.8 h one).
+    #
+    # For scale, that 2.4e-4 is fifty times smaller than the drift already
+    # sitting between the committed checkpoints and this code.
+    #
+    # Going through `parity=False` would also switch curtailment and the
+    # metering bounds on, which is three model changes wearing one flag, so the
+    # inverter branch is built explicitly instead.
+    if milp_exclusivity == "inverter":
+        scheduler = UpstreamMILPScheduler(
+            env,
+            battery_cap=battery_cap, soc_min_pct=soc_min_pct,
+            soc_max_pct=soc_max_pct, p_max=p_max, eff=eff, delta_t=delta_t,
+            parity=False, exclusivity="inverter",
+            allow_spill=False,        # as parity: no curtailment
+            metering_bounds=True,     # the inverter branch needs them to stay bounded
+        )
+        # parity=False skips the envelope check, and that check is the only
+        # thing standing between this and the MILP quietly driving a battery
+        # 5 % larger than the rules do.
+        _step = p_max * delta_t
+        _want = (_step * eff, _step / eff)
+        _got = (float(env.max_charge_kwh), float(env.max_discharge_kwh))
+        if max(abs(a - b) for a, b in zip(_want, _got)) > 1e-9:
+            raise ValueError(
+                f"milp_exclusivity='inverter' needs the same AC-symmetric "
+                f"envelope parity does: expected {_want[0]:.6f}/{_want[1]:.6f}, "
+                f"got {_got[0]:.6f}/{_got[1]:.6f}")
+    elif milp_exclusivity == "binary":
+        scheduler = UpstreamMILPScheduler(
+            env,
+            battery_cap=battery_cap,
+            soc_min_pct=soc_min_pct,
+            soc_max_pct=soc_max_pct,
+            p_max=p_max,
+            eff=eff,
+            delta_t=delta_t,
+            parity=milp_parity,
+        )
+    else:
+        raise ValueError(f"milp_exclusivity must be 'binary' or 'inverter', "
+                         f"got {milp_exclusivity!r}")
 
     print("\n--- Reactive mode (consumption + generation via Prophet) ---")
     ctrl_fc = ReactiveController(
@@ -1938,24 +2151,6 @@ def run_pipeline_for_file(file_path: str,
     df_fc = ctrl_fc.run(num_days=n_sim, use_forecast=True)
     print(f"Simulated steps: {len(df_fc)} | Reopt.: {df_fc['Reoptimized'].sum()}")
 
-    print("\n--- Oracle mode (all real data) ---")
-    ctrl_pk = ReactiveController(
-        scheduler=scheduler,
-        forecaster=fc_table,   # unused by the oracle arm, which reads _real_slice
-        real_data=df_ctrl,
-        soc_init=soc_init,
-        horizon_steps=control_horizon,
-        steps_per_day=H,
-        reoptimize_every=1,
-        freq="30min",
-        rate_vectors=rates,
-    )
-    df_pk = ctrl_pk.run(num_days=n_sim, use_forecast=False)
-
-    # Every controller re-priced through the arm's ONE evaluator, the two MILP
-    # arms included: ReactiveController accumulates a running cost as it goes,
-    # but that is a convenience, not the bill, and it drops the standing charge.
-    kpi_table, kpi_raw = KPITracker.compare_three(df_fc, df_pk, delta_t)
     # The SCORED window, not the environment's span. `env` is built on df_ctrl,
     # which carries one extra horizon of lookahead so a 24 h horizon is not
     # truncated over the final day while an 11 h one is -- but only df_sim is
@@ -1967,6 +2162,52 @@ def run_pipeline_for_file(file_path: str,
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         sig = rbc.build_signals(env, n_steps=len(df_sim))
+
+    # --- Everything that never reads a forecast, in one cached block ---------
+    #
+    # The oracle reads realised data and every rule reads the meter, so for a
+    # fixed (household, window, battery, tariff, calendar, horizon, solver) all
+    # of this is the same in every arm. Solved once, then read by the other arms
+    # that share the key -- see section 2c.
+    print(f"\n--- Oracle mode (all real data) + rule-based controllers ({tariff}) ---")
+
+    def _solve_forecast_blind():
+        ctrl_pk = ReactiveController(
+            scheduler=scheduler,
+            forecaster=fc_table,   # unused by the oracle arm, which reads _real_slice
+            real_data=df_ctrl,
+            soc_init=soc_init,
+            horizon_steps=control_horizon,
+            steps_per_day=H,
+            reoptimize_every=1,
+            freq="30min",
+            rate_vectors=rates,
+        )
+        _df_pk = ctrl_pk.run(num_days=n_sim, use_forecast=False)
+        # The deployable alternative, on realized data deliberately: an inverter
+        # measures the surplus in front of it, it does not forecast one, so
+        # giving a rule the realized interval is physical fidelity rather than
+        # the look-ahead it would be for a planner. There is correspondingly no
+        # "forecast" variant of any of them.
+        #
+        # `soc_init` is absolute kWh in the controller's frame
+        # (soc_min..soc_max); the rules work in upstream's stored frame
+        # (0..capacity). Without the offset the rules would start at
+        # SOC_FRACTION * capacity = 3.5 kWh stored while the MILP started at
+        # 4.0, which is not the same experiment -- and the half kWh difference
+        # comes out as a saving.
+        _m, _rows = run_rules(
+            env, settle, tariff, signals=sig,
+            soc_init_kwh=soc_init - battery_cap * soc_min_pct)
+        return _df_pk, _m, _rows
+
+    df_pk, rule_metrics, rule_rows = load_or_build_oracle(
+        dataset_name, cfg, _solve_forecast_blind, cache_dir=oracle_cache_dir)
+
+    # Every controller re-priced through the arm's ONE evaluator, the two MILP
+    # arms included: ReactiveController accumulates a running cost as it goes,
+    # but that is a convenience, not the bill, and it drops the standing charge.
+    kpi_table, kpi_raw = KPITracker.compare_three(df_fc, df_pk, delta_t)
     nominal_kwh = float(battery_cap)
     for _name, _frame in (("oracle", df_pk), ("prophet", df_fc)):
         _net = (_frame["Buy_kW"] - _frame["Sell_kW"]).to_numpy() * delta_t
@@ -1996,20 +2237,6 @@ def run_pipeline_for_file(file_path: str,
                    + float(_frame["Discharge_kW"].sum()) * delta_t / eff)
         kpi_raw[f"efc_{_name}"] = _stored / (2.0 * nominal_kwh)
 
-    # The deployable alternative, on realized data deliberately: an inverter
-    # measures the surplus in front of it, it does not forecast one, so giving a
-    # rule the realized interval is physical fidelity rather than the look-ahead
-    # it would be for a planner. There is correspondingly no "forecast" variant
-    # of any of them.
-    print(f"\n--- Rule-based controllers ({tariff}) ---")
-    # `soc_init` is absolute kWh in the controller's frame (soc_min..soc_max);
-    # the rules work in upstream's stored frame (0..capacity). Without the offset
-    # the rules would start at SOC_FRACTION * capacity = 3.5 kWh stored while the
-    # MILP started at 4.0, which is not the same experiment -- and the half kWh
-    # difference comes out as a saving.
-    rule_metrics, rule_rows = run_rules(
-        env, settle, tariff, signals=sig,
-        soc_init_kwh=soc_init - battery_cap * soc_min_pct)
     kpi_raw.update(rule_metrics)
     for _r in rule_rows:
         print(f"  {_r['controller']:30s} {_r['Cost_EUR_Closed']:9.2f} EUR"
@@ -2033,8 +2260,15 @@ def run_pipeline_for_file(file_path: str,
     # draws every figure from these CSVs through Plotting_Functions, which is
     # what lets a chart be restyled without re-solving a household-year.
     kpi_csv_path = os.path.join(out_dir, f"kpi_results_{dataset_name}.csv")
-    df_fc_csv_path = os.path.join(out_dir, f"df_fc_{dataset_name}.csv")
-    df_pk_csv_path = os.path.join(out_dir, f"df_pk_{dataset_name}.csv")
+    # Gzipped. These two are 98 % of what the sweep writes -- 5 MB per run, 1.7 GB
+    # over the full sweep -- and `collect_results` reads NEITHER: the checkpoint
+    # is the source of truth, and the notebook draws every figure from that.
+    # They are kept because a finer analysis needs the per-interval trajectory,
+    # but there is no reason to keep them uncompressed at 12x the size.
+    # pandas infers the codec from the suffix on the way back in, so
+    # `pd.read_csv(path)` still just works.
+    df_fc_csv_path = os.path.join(out_dir, f"df_fc_{dataset_name}.csv.gz")
+    df_pk_csv_path = os.path.join(out_dir, f"df_pk_{dataset_name}.csv.gz")
 
     # F2 - the previous run lost `Ausgrid 138` (the FIRST id in DATASET_IDS)
     # here, with "Cannot save file into a non-existent directory", and run_all
@@ -2043,8 +2277,8 @@ def run_pipeline_for_file(file_path: str,
     os.makedirs(out_dir, exist_ok=True)
     kpi_table.to_csv(kpi_csv_path, encoding="utf-8-sig")
     # raw time series also kept, useful for finer analysis later
-    df_fc.to_csv(df_fc_csv_path, encoding="utf-8-sig")
-    df_pk.to_csv(df_pk_csv_path, encoding="utf-8-sig")
+    df_fc.to_csv(df_fc_csv_path, encoding="utf-8-sig", compression="gzip")
+    df_pk.to_csv(df_pk_csv_path, encoding="utf-8-sig", compression="gzip")
     pd.DataFrame(rule_rows).to_csv(
         os.path.join(out_dir, f"rules_{dataset_name}.csv"),
         index=False, encoding="utf-8-sig")
@@ -2265,14 +2499,147 @@ def arm_tariff(name):
     return next(a["tariff"] for a in STUDY_ARMS if a["name"] == name)
 
 
+def _run_arms_parallel(data_dir, output_root, dataset_ids, filename_template,
+                       arms, n_jobs, kwargs):
+    """The sweep, households in parallel. Same results, same checkpoints."""
+    from joblib import Parallel, delayed
+
+    if dataset_ids is not None:
+        files = [os.path.join(data_dir, filename_template.format(id=i))
+                 for i in dataset_ids]
+        missing = [f for f in files if not os.path.isfile(f)]
+        if missing:
+            print("!!! Files not found (check name/path):")
+            for m in missing:
+                print(f"    - {m}")
+        files = [f for f in files if os.path.isfile(f)]
+    else:
+        files = sorted(glob.glob(os.path.join(data_dir, "*.csv")))
+    if not files:
+        raise FileNotFoundError(f"No files found in {data_dir}")
+
+    if n_jobs < 0:
+        n_jobs = max(1, (os.cpu_count() or 1) + 1 + n_jobs)
+    n_jobs = min(n_jobs, len(files))
+    log_dir = os.path.join(output_root, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+
+    # One thread per worker in every numeric library underneath. HiGHS, BLAS and
+    # cmdstan each default to "as many threads as there are cores", so ten
+    # workers on fourteen cores would ask for a hundred and forty and spend the
+    # difference on contention. The solver is already single-threaded by
+    # `make_solver`; this covers everything else.
+    for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                 "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+        os.environ[_var] = "1"
+
+    print(f"\n{'#' * 70}")
+    print(f"### PARALLEL SWEEP: {len(arms)} arms x {len(files)} households "
+          f"= {len(arms) * len(files)} runs, {n_jobs} workers")
+    print(f"### solver {SOLVER_NAME}; per-household logs under {log_dir}/")
+    print(f"{'#' * 70}\n", flush=True)
+
+    t0 = datetime.datetime.now()
+    batches = Parallel(n_jobs=n_jobs, backend="loky", verbose=10)(
+        delayed(_household_all_arms)(f, output_root, arms, log_dir, kwargs)
+        for f in files)
+    elapsed = (datetime.datetime.now() - t0).total_seconds()
+
+    rows = [r for batch in batches for r in batch]
+    failed = [r for r in rows if "error" in r]
+    ok = [r for r in rows if "error" not in r]
+
+    allrows = pd.DataFrame(ok)
+    if not allrows.empty:
+        allrows = allrows.sort_values(
+            ["arm", "dataset"], key=lambda s: s.map(ARM_ORDER.index)
+            if s.name == "arm" else s)
+        path = os.path.join(output_root, "summary_all_arms.csv")
+        allrows.to_csv(path, index=False, encoding="utf-8-sig")
+        print(f"\nAll arms: {path}")
+
+    print(f"\n=== {len(ok)}/{len(rows)} runs succeeded in "
+          f"{elapsed / 60:.1f} min on {n_jobs} workers ===")
+    if failed:
+        # Loud, last, and impossible to scroll past: a partial summary that
+        # looks complete is how N=29 got reported as N=30.
+        fp = os.path.join(output_root, "failed_runs.csv")
+        pd.DataFrame(failed).to_csv(fp, index=False, encoding="utf-8-sig")
+        print("\n" + "!" * 70)
+        print(f"!!! {len(failed)} RUN(S) FAILED - THE SWEEP IS INCOMPLETE")
+        for r in failed[:20]:
+            print(f"!!!   {r['arm']:18s} {r['dataset']:14s} {r['error']}")
+        if len(failed) > 20:
+            print(f"!!!   ... and {len(failed) - 20} more")
+        print(f"!!! details: {fp}   per-household logs: {log_dir}/")
+        print("!" * 70)
+    if not ok:
+        raise RuntimeError("no arm produced any result")
+    return allrows
+
+
+def _household_all_arms(file_path, output_root, arms, log_dir, kwargs):
+    """Every arm for ONE household, in one process. The unit of parallelism.
+
+    The household, not the (arm, household) pair, is the unit on purpose. Both
+    caches are keyed per household -- Prophet's table and the forecast-blind
+    oracle -- so giving one worker every arm of one household means:
+
+      no races      two workers never touch the same cache key, so nothing has
+                    to be locked and no pre-warm pass is needed;
+      full reuse    the worker fits Prophet once and solves each of its (tariff,
+                    horizon) oracles once, then reads them for the remaining
+                    arms, exactly as the serial sweep does.
+
+    Splitting by (arm, household) instead would put eleven workers on one
+    household's cache at the same moment: each would miss, each would fit its
+    own Prophet, and the cheapest work in the study would be done eleven times.
+    """
+    name = os.path.splitext(os.path.basename(file_path))[0]
+    os.makedirs(log_dir, exist_ok=True)
+    rows = []
+    # One log per household. Ten workers printing to one stdout interleaves into
+    # something unreadable, and these prints are the run's audit trail -- the
+    # cache hits, the forecast skill, every rule's bill.
+    # buffering=1 -- line buffered. Without it Python holds 8 KB before touching
+    # the disk, and a log that only appears when the worker exits is no use
+    # during the hours it is running: `tail -f` shows an empty file for the whole
+    # sweep and there is no way to tell progress from a hang.
+    with open(os.path.join(log_dir, f"{name}.log"), "w", encoding="utf-8",
+              buffering=1) as fh:
+        with contextlib.redirect_stdout(fh), contextlib.redirect_stderr(fh):
+            for arm in arms:
+                spec = {k: v for k, v in arm.items() if k != "name"}
+                try:
+                    metrics = run_pipeline_for_file(
+                        file_path,
+                        output_root=os.path.join(output_root, arm["name"]),
+                        **{**kwargs, **spec})
+                    rows.append({"arm": arm["name"], **metrics})
+                except Exception as exc:          # one arm failing is not the run failing
+                    traceback.print_exc()
+                    rows.append({"arm": arm["name"], "dataset": name,
+                                 "error": f"{type(exc).__name__}: {exc}"})
+    return rows
+
+
 def run_arms(data_dir, output_root="results", dataset_ids=None,
-             filename_template="Ausgrid {id}.csv", arms=None, **kwargs):
+             filename_template="Ausgrid {id}.csv", arms=None, n_jobs=1, **kwargs):
     """Every arm over every dataset, into one long frame.
 
     Each (arm, dataset) is checkpointed independently, so an interrupted sweep
     resumes where it stopped rather than from the beginning.
+
+    `n_jobs > 1` runs households in parallel, one process each. PROCESSES, not
+    threads: `run_pipeline_for_file` sets the tariff calendar through module and
+    class globals (`_si_cas.nastavi_koledar`, `TariffCalculator.HOLIDAY_*`),
+    which is safe when each worker owns its own interpreter and a data race that
+    silently marks the wrong days non-working when they share one.
     """
     arms = arms or STUDY_ARMS
+    if n_jobs != 1:
+        return _run_arms_parallel(data_dir, output_root, dataset_ids,
+                                  filename_template, arms, n_jobs, kwargs)
     rows = []
     for arm in arms:
         spec = {k: v for k, v in arm.items() if k != "name"}

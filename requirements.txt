@@ -6,6 +6,7 @@ scikit-learn==1.9.0
 scipy==1.18.0
 seaborn==0.13.2
 PuLP==3.3.2
+highspy==1.15.1
 holidays==0.101
 xlsxwriter==3.2.9
 optuna==4.9.0
