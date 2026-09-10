@@ -34,6 +34,8 @@ import pandas as pd
 import pulp
 from prophet import Prophet
 
+import hbd_forecast as hbd
+
 
 @contextlib.contextmanager
 def _quiet_fit():
@@ -514,6 +516,36 @@ SIMPLE_KINDS = {
     "median14":    lambda f, spd: ClimatologyForecaster(f, spd, 14, "median"),
 }
 
+# Kinds that FIT on the training block and then read recent actuals to predict.
+# Separate from SIMPLE_KINDS because they need a third argument -- how many
+# leading rows of the frame are training -- and separate from PROPHET_KINDS
+# because they are not Prophet and do not take its params.
+#
+# This is the slot the roster did not have. Every SIMPLE_KIND reads the last
+# rows but fits nothing; Prophet fits but reads nothing at prediction time, so
+# inside a refit block its answer for tomorrow 08:00 is independent of what
+# happened at 07:00 today. `hbd` does both, which is the whole reason it is
+# worth adding: {kind: lambda frame, spd, n_train -> forecaster}.
+FITTED_KINDS = {
+    "hbd":          lambda f, spd, n: HbdForecaster(f, spd, n, use_ar=True),
+    # The paper's own ablation: identical object, AR stage switched off, so the
+    # gap between the two prices exactly what conditioning on the last 24 h buys
+    # and nothing else. Everything else -- features, quantile, refit cadence,
+    # clipping -- is held fixed by construction rather than by care.
+    "hbd_baseline": lambda f, spd, n: HbdForecaster(f, spd, n, use_ar=False),
+    # NOT the paper's method: the paper's second stage on the study's own best
+    # first stage. `hbd_median14` is a 14-day median at the same clock position
+    # -- byte-identical to `median14` when the AR is switched off, which is what
+    # makes the pair a clean control -- with the fitted residual AR on top.
+    #
+    # It is here because the measurement says the decomposition is the good idea
+    # and the Fourier basis is the weak part of it. If this beats `median14`,
+    # the reference's contribution ports onto this study's incumbent and the
+    # Fourier stage was never the point.
+    "hbd_median14": lambda f, spd, n: HbdForecaster(
+        f, spd, n, use_ar=True, baseline_kind="climatology"),
+}
+
 # A forecast has two channels and they are not equally hard, so these kinds hold
 # the consumption channel fixed and vary only the roof:
 # {kind: (consumption source, generation source)}.
@@ -545,6 +577,7 @@ HYBRID_KINDS = {
     "persist_pvtruth":  ("persistence", "truth"),
     "median14_pvtruth": ("median14", "truth"),
     "pvtruth_tuned":    ("prophet_tuned", "truth"),
+    "hbd_pvtruth":      ("hbd", "truth"),
 }
 
 # Every kind the study can run, in the order a figure should read them, with the
@@ -567,6 +600,10 @@ FORECAST_KIND_LABELS = {
     "persist_pvtruth":  "yesterday + perfect PV",
     "median14_pvtruth": "median of 14 d + perfect PV",
     "pvtruth_tuned":    "tuned Prophet + perfect PV",
+    "hbd":         "both: season + AR",
+    "hbd_baseline": "both: season only",
+    "hbd_median14": "both: median of 14 d + AR",
+    "hbd_pvtruth": "season + AR + perfect PV",
     "truth":       "both: perfect",
 }
 
@@ -746,6 +783,26 @@ def load_or_build_forecasts(dataset_name: str,
         "refit_every_days": refit_every_days,
         "kind": kind,
     }
+    # A fitted kind's settings are NOT in `forecaster.config()` -- the caller
+    # hands this function a Prophet object it will never use, because the real
+    # forecaster cannot be built until the frame is assembled below. Without
+    # this, two `hbd` runs at different quantiles or lookbacks share one cache
+    # entry and the second silently serves the first's forecasts. The `kind`
+    # string separates hbd from hbd_baseline and nothing else.
+    #
+    # Constructing the forecaster is cheap; it fits nothing until asked.
+    fitted_sources = [src for src in ([kind] if kind not in HYBRID_KINDS
+                                      else list(HYBRID_KINDS[kind]))
+                      if src in FITTED_KINDS]
+    if fitted_sources:
+        if history is None:
+            raise ValueError(
+                f"{kind!r} fits on the training block, so it needs `history=`")
+        probe_frame = pd.concat([history, df_sim])
+        cfg["fitted"] = {
+            src: FITTED_KINDS[src](probe_frame, H, len(history)).config()
+            for src in fitted_sources
+        }
     # Resolved here rather than as a default argument: a module-level constant
     # bound at def time cannot be overridden by reassigning the constant, which
     # makes the cache location impossible to redirect from a notebook.
@@ -775,6 +832,21 @@ def load_or_build_forecasts(dataset_name: str,
                                          anchors, H, freq)
             print(f"  [Forecaster] {source}: {len(table)} rows, nothing fitted")
             return table
+        if source in FITTED_KINDS:
+            # Same frame the simple kinds get -- history then simulation, one
+            # contiguous series -- plus where the training block ends. The
+            # forecaster fits on `frame.iloc[:n_train]` and reads strictly-past
+            # rows after it; nothing at or beyond an anchor is ever touched.
+            if history is None:
+                raise ValueError(
+                    f"{source!r} fits on the training block, so it needs "
+                    f"`history=` -- got None")
+            frame = pd.concat([history, df_sim])
+            table = build_forecast_table(
+                FITTED_KINDS[source](frame, H, len(history)), anchors, H, freq)
+            print(f"  [Forecaster] {source}: {len(table)} rows, "
+                  f"fit on {len(history)} training steps")
+            return table
         if source == "truth":
             table = build_forecast_table(TruthForecaster(df_sim, H), anchors, H, freq)
             print(f"  [Forecaster] truth: {len(table)} rows, nothing fitted")
@@ -786,7 +858,8 @@ def load_or_build_forecasts(dataset_name: str,
             raise ValueError(
                 f"unknown forecaster kind {source!r}; expected one of "
                 f"{sorted(PROPHET_KINDS)}, 'truth', a simple kind "
-                f"{sorted(SIMPLE_KINDS)}, or a hybrid {sorted(HYBRID_KINDS)}"
+                f"{sorted(SIMPLE_KINDS)}, a fitted kind {sorted(FITTED_KINDS)}, "
+                f"or a hybrid {sorted(HYBRID_KINDS)}"
             )
         if refit_every_days:
             return build_forecast_table_refit(
@@ -1782,6 +1855,13 @@ class _NaiveForecaster:
         """-> (consumption, generation) arrays of `horizon_steps` values."""
         raise NotImplementedError
 
+    def _column(self, col: str) -> np.ndarray:
+        """The frame's column as an array, converted once per forecaster."""
+        cache = self.__dict__.setdefault("_cols", {})
+        if col not in cache:
+            cache[col] = self.frame[col].to_numpy()
+        return cache[col]
+
     def predict_next_day(self, anchor_ts, horizon_steps: int = 48,
                          freq: str = "30min") -> pd.DataFrame:
         i = self._anchor_index(anchor_ts)
@@ -1946,12 +2026,342 @@ class ClimatologyForecaster(_NaiveForecaster):
             out.append(reduce(days, axis=0))
         return out[0], out[1]
 
-    def _column(self, col: str) -> np.ndarray:
-        """The frame's column as an array, converted once per forecaster."""
-        cache = self.__dict__.setdefault("_cols", {})
-        if col not in cache:
-            cache[col] = self.frame[col].to_numpy()
-        return cache[col]
+
+
+class HbdForecaster(_NaiveForecaster):
+    """Seasonal baseline plus residual AR, from cvxgrp/home-battery-dispatch.
+
+    See `hbd_forecast` for the method and for every place it departs from the
+    reference. This class is the study's adapter: it holds the fitted
+    parameters, decides when to refit, and serves `predict_next_day`.
+
+    It sits on `_NaiveForecaster` for one reason -- `_anchor_index` and the
+    strictly-past discipline that goes with it. That makes it the first
+    forecaster here that BOTH fits a model and reads recent actuals. Prophet
+    fits on an expanding window but reads nothing at prediction time, so within
+    a refit block its answer for tomorrow 08:00 does not depend on what happened
+    at 07:00 today; the naive kinds read the last rows but fit nothing. The AR
+    stage is exactly the missing term, and `use_ar=False` is the ablation that
+    prices it (the paper's own `baseline_only` sensitivity).
+
+    `frame` is history + simulation concatenated, exactly as SIMPLE_KINDS get
+    it, and `n_train` is how many leading rows of it are the training block.
+    Everything at or after `n_train` is simulation and is never fit on: a fit
+    for the block starting at step s uses `frame.iloc[:s]` only.
+    """
+
+    # The AR is fit for one day of horizon and one day of lookback. Beyond L the
+    # baseline stands alone, which is what lets a horizon longer than a day be
+    # served at all -- see `predict_next_day`.
+    LOOKBACK_DAYS = 1
+
+    def __init__(self, frame: pd.DataFrame, steps_per_day: int, n_train: int,
+                 eta_con: float = 0.5, eta_gen: float = 0.5,
+                 lambd: float = hbd.LAMBDA, n_harmonics: int = hbd.N_HARMONICS,
+                 use_ar: bool = True, baseline_kind: str = "fourier",
+                 climatology_days: int = 14, refit_every_days: int | None = None,
+                 ar_refit_every_days: int | None = None,
+                 max_ar_samples: int | None = 12000,
+                 lookback_days: int = LOOKBACK_DAYS):
+        super().__init__(frame, steps_per_day)
+        if n_train < 2 * steps_per_day:
+            raise ValueError(
+                f"n_train={n_train} is under two days; the baseline has an "
+                f"annual harmonic and needs a real training block")
+        self.n_train = int(n_train)
+        # Both channels default to the MEDIAN, which is not what the paper uses
+        # for load (eta=0.2). Deliberate: read `hbd_forecast._pinball` for the
+        # sign convention -- eta=0.2 there is the 80th percentile, a baseline
+        # biased high, chosen because their tariff punishes walking into a peak
+        # tier. Every other method in this study's roster is a median-ish
+        # estimator, so importing that bias into the headline arm would confound
+        # "the method is better" with "the forecast is biased", and the roster
+        # would no longer be like-for-like. The bias is a separate question with
+        # a separate experiment: the quantile sweep varies this knob on purpose.
+        self.eta = {"Energy_Consumption": float(eta_con),
+                    "Energy_Generation": float(eta_gen)}
+        self.lambd = float(lambd)
+        self.n_harmonics = int(n_harmonics)
+        self.use_ar = bool(use_ar)
+        # Which unconditional predictor stage 2 corrects. "fourier" is the
+        # paper's own and the faithful port. "climatology" is not in the paper:
+        # it swaps in the study's own best fit-free method (a `climatology_days`
+        # median at the same clock position) as stage 1.
+        #
+        # The reason it exists: the reference's transferable idea is the
+        # DECOMPOSITION -- an unconditional predictor plus a FITTED residual AR
+        # -- not the Fourier basis specifically. Measured on this data the
+        # Fourier stage is the weak half: on 5 households it scores +0.015 skill
+        # on consumption alone, against median14's +0.199, because a household's
+        # level is set by the last fortnight and not by where it sits in the
+        # year. The AR then adds +0.124 on top of it and still lands short. So
+        # the obvious experiment is the same AR on the stronger stage 1, and
+        # this switch is what runs it.
+        if baseline_kind not in ("fourier", "climatology"):
+            raise ValueError(
+                f"baseline_kind must be 'fourier' or 'climatology', "
+                f"got {baseline_kind!r}")
+        self.baseline_kind = baseline_kind
+        self.climatology_days = int(climatology_days)
+        # Measured, not assumed. On Ausgrid 1 over the full simulation year,
+        # refitting the seasonal stage on Prophet's 30-day expanding-window
+        # cadence scored con skill +0.140 / gen +0.071 in 308 s; fitting it once
+        # on the training block scored +0.139 / +0.070 in 216 s. The cadence
+        # buys nothing here and costs 40 % more, so the default is the paper's:
+        # fit once. Prophet needs the refit because its trend term extrapolates;
+        # a Fourier baseline has no trend to drift.
+        self.refit_every_days = refit_every_days
+        # None means "fit the AR once and keep it", which is what the paper
+        # does. It is a cost decision, not a modelling one: the baseline is ONE
+        # small QP, the AR is L of them, so refitting both on Prophet's 30-day
+        # cadence costs ~12x the AR fit for a second-order gain. Both cadences
+        # stay reachable so the expensive one remains an ablation.
+        self.ar_refit_every_days = ar_refit_every_days
+        # Also measured. The AR windows overlap at stride 1, so 35k of them
+        # carry far less information than 35k independent samples: subsampling
+        # to 12k scored con skill +0.140 / gen +0.071 against +0.138 / +0.072
+        # on all of them -- indistinguishable -- in 308 s against 1097 s. None
+        # uses every window, for anyone who would rather have the 3.6x.
+        self.max_ar_samples = max_ar_samples
+        self.M = int(lookback_days) * steps_per_day
+        self.L = steps_per_day
+        # Two caches, not one, because the two stages refit on different
+        # cadences and sharing a key makes the expensive one follow the cheap
+        # one. See `_ar`.
+        self._baselines: dict = {}
+        self._ars: dict = {}
+
+    def config(self) -> dict:
+        return {
+            "kind": "hbd" if self.use_ar else "hbd_baseline",
+            # Bumped whenever the METHOD changes in a way the other fields do
+            # not describe. The cache digest is built from this dict, so without
+            # it a bug fix leaves every table fitted by the broken code in place
+            # and silently serves it -- which is exactly what happened to the
+            # climatology baseline's causality fix, and the wrong numbers looked
+            # entirely plausible.
+            #   2: `_climatology_at` took a per-step causality wall. Before it,
+            #      in-sample residuals were measured against a baseline built
+            #      from t's FUTURE, so the AR was fit to correct residuals it
+            #      never meets at prediction time.
+            "version": 2,
+            "steps_per_day": self.spd,
+            "baseline_kind": self.baseline_kind,
+            "climatology_days": self.climatology_days,
+            "n_train": self.n_train,
+            "eta_con": self.eta["Energy_Consumption"],
+            "eta_gen": self.eta["Energy_Generation"],
+            "lambd": self.lambd,
+            "n_harmonics": self.n_harmonics,
+            "use_ar": self.use_ar,
+            "refit_every_days": self.refit_every_days,
+            "ar_refit_every_days": self.ar_refit_every_days,
+            "max_ar_samples": self.max_ar_samples,
+            "M": self.M,
+            "L": self.L,
+        }
+
+    # -- fitting -----------------------------------------------------------
+    def _fit_end(self, i: int, every_days: int | None) -> int:
+        """How many leading rows a forecast at index `i` may be fit on.
+
+        Rounded DOWN to a refit boundary so every anchor inside one block shares
+        one fit -- otherwise the cache is useless and every day refits. `None`
+        pins it to the training block, i.e. never refit.
+        """
+        if not every_days:
+            return self.n_train
+        block = int(every_days) * self.spd
+        return self.n_train + ((i - self.n_train) // block) * block
+
+    def _baseline(self, col: str, end: int) -> dict:
+        """Baseline for `col` fit on `frame.iloc[:end]`, cached per end."""
+        key = (col, end)
+        if key not in self._baselines:
+            y = self._column(col)[:end]
+            theta = self._cached_fit(
+                self._param_path(col, end, "baseline"),
+                lambda: hbd.train_baseline(
+                    y, self.spd, eta=self.eta[col], lambd=self.lambd,
+                    n_harmonics=self.n_harmonics, t0=0))
+            self._baselines[key] = {"theta": theta}
+        return self._baselines[key]
+
+    def _climatology_at(self, col: str, t: np.ndarray,
+                        before: int | None) -> np.ndarray:
+        """A `climatology_days` median at the same clock position, for steps `t`.
+
+        `before` is the causality wall: every row this reads is strictly before
+        it. The naive rule -- go back d whole days for d in 1..N -- is causal
+        only while the horizon stays inside one day, which is exactly the
+        assumption `ClimatologyForecaster` encodes by refusing a horizon longer
+        than a day. Here the source is walked back in whole days UNTIL it clears
+        the wall, so any horizon works and a 30-day forecast tiles the last
+        fortnight.
+
+        `before=None` means each step is its own wall, which is what fitting
+        wants: the residual at t must be measured against the baseline t would
+        have been given, using only what preceded t. Passing the end of the
+        training block instead makes `t - before` negative for every in-sample
+        row and walks the source FORWARD -- the baseline would then be fit
+        against values from t's future. In-block rather than a simulation leak,
+        but still wrong: the AR would learn to correct residuals that are not
+        the ones it meets at prediction time.
+        """
+        series = self._column(col)
+        spd, n = self.spd, self.climatology_days
+        wall = t if before is None else np.full(t.shape, before)
+        # Whole days back from t until the source clears the wall. For the
+        # in-sample and one-day-horizon cases this resolves to exactly t - spd.
+        base = t - ((t - wall) // spd + 1) * spd
+        idx = base[:, None] - np.arange(n)[None, :] * spd
+        if idx.min() < 0:
+            raise ValueError(
+                f"a {n}-day climatology baseline needs {n} days of history "
+                f"before step {int(t.min())}; only "
+                f"{int(base.min()) // spd + 1} available")
+        if (idx >= wall[:, None]).any():
+            raise AssertionError(
+                "climatology baseline read at or after its causality wall")
+        return np.median(series[idx], axis=1)
+
+    def _baseline_at(self, col: str, t: np.ndarray, end: int,
+                     before: int | None) -> np.ndarray:
+        """Stage 1 evaluated at absolute step indices `t`."""
+        if self.baseline_kind == "climatology":
+            return self._climatology_at(col, t, before)
+        return hbd.predict_baseline(
+            t, self._baseline(col, end)["theta"], self.spd, self.n_harmonics)
+
+    # Fitted parameters are cached to disk as well as in memory. The forecast
+    # cache one level up only stores a COMPLETED table, so a run interrupted
+    # part-way through a household throws away every fit it had done; at ~150 s
+    # per channel that is the difference between a sweep that resumes and one
+    # that restarts. Keyed on the config plus a digest of the exact training
+    # slice, so it cannot serve one household's parameters to another and does
+    # not need the dataset name plumbed in to say so.
+    PARAM_CACHE_DIR = os.environ.get(
+        "ERK_HBD_PARAM_CACHE",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "hbd_params"))
+
+    def _param_path(self, col: str, end: int, stage: str) -> str:
+        y = self._column(col)[:end]
+        key = config_digest({
+            "config": self.config(), "col": col, "end": int(end),
+            "stage": stage,
+            # The data itself, not just its length: two households share every
+            # other field.
+            "data": hashlib.sha256(np.ascontiguousarray(y)).hexdigest(),
+        })
+        os.makedirs(self.PARAM_CACHE_DIR, exist_ok=True)
+        return os.path.join(self.PARAM_CACHE_DIR, f"{stage}__{key}.npy")
+
+    @staticmethod
+    def _cached_fit(path: str, build):
+        """`build()`, memoised on disk, written atomically."""
+        if os.path.exists(path):
+            return np.load(path)
+        value = build()
+        # .npy suffix required -- see the note in hbd_forecast.train_ar_model.
+        tmp = f"{path}.{os.getpid()}.tmp.npy"
+        np.save(tmp, value)
+        os.replace(tmp, path)          # the sweep is multi-process
+        return value
+
+    def _ar(self, col: str, ar_end: int) -> np.ndarray | None:
+        """Gamma for `col`, cached per AR-refit block.
+
+        Keyed on `ar_end` ALONE, and fit against the baseline of the same
+        `ar_end` rather than whichever baseline the calling anchor is using.
+        The two cadences are independent on purpose -- the baseline is one small
+        QP and the AR is L of them -- and keying Gamma on the baseline's block
+        instead would silently refit the expensive stage every time the cheap
+        one moved, which is exactly the default configuration.
+        """
+        if not self.use_ar:
+            return None
+        key = (col, ar_end)
+        if key not in self._ars:
+            y = self._column(col)[:ar_end]
+            # The climatology baseline needs a fortnight of history before it
+            # can be evaluated, so the residual series starts there rather than
+            # at zero. The Fourier one is defined everywhere.
+            start = (self.climatology_days * self.spd
+                     if self.baseline_kind == "climatology" else 0)
+            t = np.arange(start, ar_end)
+            resid = y[start:] - self._baseline_at(col, t, ar_end, None)
+            whole = self._param_path(col, ar_end, "ar")
+            # Per-column checkpoints beside the whole-matrix one, so an
+            # interrupted fit resumes mid-channel rather than restarting it.
+            stem = whole[:-len(".npy")]
+            self._ars[key] = self._cached_fit(
+                whole,
+                lambda: hbd.train_ar_model(
+                    resid, self.M, self.L, eta=self.eta[col], lambd=self.lambd,
+                    max_samples=self.max_ar_samples,
+                    column_cache=lambda j: f"{stem}__col{j:03d}.npy"))
+        return self._ars[key]
+
+    def _range(self, col: str, end: int) -> tuple:
+        """The clip range: what the data up to `end` actually occupied.
+
+        Read off the series rather than off a fitted baseline, so it is defined
+        for both stage-1 kinds. The reference clips to `data.min()/max()` over
+        the WHOLE series, which reads the window it is forecasting.
+        """
+        y = self._column(col)[:end]
+        return float(np.min(y)), float(np.max(y))
+
+    # -- prediction --------------------------------------------------------
+    def _source_rows(self, i: int, horizon_steps: int) -> tuple:
+        need = self.M + (self.climatology_days * self.spd
+                         if self.baseline_kind == "climatology" else 0)
+        if i < need:
+            raise ValueError(
+                f"only {i} row(s) before index {i}; this forecaster needs "
+                f"{need} ({self.M} of lookback"
+                + (f" plus {self.climatology_days} days of climatology)"
+                   if self.baseline_kind == "climatology" else ")"))
+        end = self._fit_end(i, self.refit_every_days)
+        ar_end = self._fit_end(i, self.ar_refit_every_days)
+
+        out = []
+        for col in ("Energy_Consumption", "Energy_Generation"):
+            series = self._column(col)
+            # Strictly past: [i - M, i). The anchor interval itself is NOT read
+            # -- the reference seeds its vector with the realised value at the
+            # anchor, which here is the leak `leak_current_interval` measures.
+            # `i` is passed as the causality wall for both windows, so stage 1
+            # cannot reach the anchor either.
+            past = series[i - self.M:i]
+            past_bl = self._baseline_at(col, np.arange(i - self.M, i), end, i)
+            fut_bl = self._baseline_at(
+                col, np.arange(i, i + horizon_steps), end, i)
+            lo, hi = self._range(col, end)
+            out.append(hbd.compose_forecast(
+                past, past_bl, fut_bl, self._ar(col, ar_end), lo, hi))
+
+        return out[0], out[1]
+
+    def predict_next_day(self, anchor_ts, horizon_steps: int = 48,
+                         freq: str = "30min") -> pd.DataFrame:
+        """As `_NaiveForecaster`, but able to outrun the frame's own index.
+
+        The base class labels its output with `frame.index[i:i + horizon_steps]`,
+        which silently TRUNCATES a horizon that runs past the end of the data.
+        That is right for a method that can only copy rows it has; this one is a
+        function of the clock and can be evaluated arbitrarily far ahead, so the
+        stamps are generated instead. Nothing else changes.
+        """
+        i = self._anchor_index(anchor_ts)
+        idx = pd.date_range(start=self.frame.index[i], periods=horizon_steps,
+                            freq=freq)
+        con, gen = self._source_rows(i, horizon_steps)
+        return pd.DataFrame({
+            "ds": _naive(idx),
+            "yhat_con": np.clip(con, 0.0, None),
+            "yhat_gen": np.clip(gen, 0.0, None),
+        })
 
 
 # =====================================================================
@@ -2820,7 +3230,10 @@ def load_study_frames(file_path: str, *, H: int = 48, delta_t: float = 0.5,
 # The order the screen reports simple kinds in, and the roster it runs by
 # default: every fit-free source, cheapest bet first.
 BENCHMARK_KINDS = ["persistence", "weekly", "daytype",
-                   "mean3", "mean7", "median7", "median14"]
+                   "mean3", "mean7", "median7", "median14",
+                   # Fitted, and minutes rather than milliseconds each -- but
+                   # cached, and the cache is shared with the sweep's arms.
+                   "hbd_baseline", "hbd", "hbd_median14"]
 
 
 def forecast_benchmark(data_dir: str,
@@ -2859,11 +3272,13 @@ def forecast_benchmark(data_dir: str,
     kinds = list(BENCHMARK_KINDS if kinds is None else kinds)
     if dataset_ids is None:
         dataset_ids = study_units().index.tolist()
-    unknown = [k for k in kinds if k not in SIMPLE_KINDS and k != "truth"]
+    unknown = [k for k in kinds if k not in SIMPLE_KINDS
+               and k not in FITTED_KINDS and k != "truth"]
     if unknown:
         raise ValueError(
-            f"unknown forecaster kind(s) {unknown}; expected 'truth' or one of "
-            f"{sorted(SIMPLE_KINDS)}"
+            f"unknown forecaster kind(s) {unknown}; expected 'truth', a simple "
+            f"kind {sorted(SIMPLE_KINDS)}, or a fitted kind "
+            f"{sorted(FITTED_KINDS)}"
         )
 
     rows = []
@@ -2886,10 +3301,22 @@ def forecast_benchmark(data_dir: str,
 
         tables = {k: build_forecast_table(SIMPLE_KINDS[k](frame, H),
                                           anchors, H, "30min")
-                  for k in kinds if k != "truth"}
+                  for k in kinds if k in SIMPLE_KINDS}
         if "truth" in kinds:
             tables["truth"] = build_forecast_table(
                 TruthForecaster(ctrl, H), anchors, H, "30min")
+        # The fitted kinds go through the cache rather than being built inline
+        # like the fit-free ones. Two reasons, and the second is the important
+        # one: their fits cost minutes rather than milliseconds, and the cache
+        # key is the same config the sweep will ask for -- so screening a
+        # household here WARMS the table its MPC arm then reads instead of
+        # fitting the same model twice.
+        for k in kinds:
+            if k in FITTED_KINDS:
+                served, _ = load_or_build_forecasts(
+                    name, train, ctrl, H, "30min", EnergyForecaster(None, None),
+                    cache_dir=forecast_cache_dir, kind=k, history=train)
+                tables[k] = served.table
         if include_prophet:
             served, _ = load_or_build_forecasts(
                 name, train, ctrl, H, "30min",
@@ -3908,6 +4335,30 @@ STUDY_ARMS = [
      "forecaster_kind": "pvtruth_tuned",
      "forecaster_params_con": TUNED_PARAMS_CON,
      "forecaster_params_gen": TUNED_PARAMS_GEN},
+    # The ported baseline-plus-AR method (`HbdForecaster`). It is the first kind
+    # in the roster that both fits a model and conditions on the last 24 h, so
+    # it is run beside its own ablation rather than alone: `hbd_baseline` is the
+    # identical object with the AR stage off, and the gap between the two pairs
+    # is the only clean measurement of what that conditioning is worth in euros.
+    {"name": "AU_H24_hbd", "tariff": "AU", "control_horizon": 48,
+     "forecaster_kind": "hbd"},
+    {"name": "SI_H24_hbd", "tariff": "SI", "control_horizon": 48,
+     "forecaster_kind": "hbd"},
+    {"name": "AU_H24_hbd_baseline", "tariff": "AU", "control_horizon": 48,
+     "forecaster_kind": "hbd_baseline"},
+    {"name": "SI_H24_hbd_baseline", "tariff": "SI", "control_horizon": 48,
+     "forecaster_kind": "hbd_baseline"},
+    # And the channel split, so a win can be attributed to the load channel or
+    # the roof rather than to "the forecast".
+    {"name": "AU_H24_hbd_pvtruth", "tariff": "AU", "control_horizon": 48,
+     "forecaster_kind": "hbd_pvtruth"},
+    # The paper's SECOND stage on this study's own first stage. On the error
+    # axis this is the arm that actually beats `median14` -- the faithful port
+    # does not -- so it is the one the economic comparison most needs.
+    {"name": "AU_H24_hbd_median14", "tariff": "AU", "control_horizon": 48,
+     "forecaster_kind": "hbd_median14"},
+    {"name": "SI_H24_hbd_median14", "tariff": "SI", "control_horizon": 48,
+     "forecaster_kind": "hbd_median14"},
 ]
 
 

@@ -27,3 +27,7 @@ forecast_cache/
 # happened last, which for a smoke test is a 4-household 7-day panel dressed up
 # as the article. Export for the paper from a clean tree at the end.
 Results/Figures/
+
+# Fitted forecaster parameters: derived, per-household, and large.
+# Same reasoning as forecast_cache/ -- a cache, not a result.
+Yoann/hbd_params/

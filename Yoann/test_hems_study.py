@@ -224,6 +224,27 @@ def test_naive_forecasters():
     anchor = kw.index[anchor_i]
     built = {k: b(kw, H) for k, b in hs.SIMPLE_KINDS.items()}
 
+    # The fitted kinds belong in this test too, and are the reason it matters
+    # most: they are the only forecasters here that BOTH fit a model and read
+    # recent actuals, so they have two ways to peek instead of one. The upstream
+    # method this port comes from seeds its forecast with the realised value AT
+    # the anchor -- which is `leak_current_interval`, the thing this study keeps
+    # behind a flag and measures. If that seeding survived the port it would
+    # show up here and nowhere else.
+    #
+    # Fit on the first 10 days so the AR has a training block, and keep it tiny:
+    # this is a causality check, not an accuracy one.
+    fitted_kw = dict(n_train=10 * H, max_ar_samples=400, refit_every_days=None)
+    built.update({
+        "hbd":          hs.HbdForecaster(kw, H, use_ar=True, **fitted_kw),
+        "hbd_baseline": hs.HbdForecaster(kw, H, use_ar=False, **fitted_kw),
+    })
+
+    def rebuild(kind, frame):
+        if kind in hs.SIMPLE_KINDS:
+            return hs.SIMPLE_KINDS[kind](frame, H)
+        return hs.HbdForecaster(frame, H, use_ar=(kind == "hbd"), **fitted_kw)
+
     # --- causality. Poison everything from the anchor onwards; a forecaster
     # that reads any of it produces NaN, and NaN != NaN survives any comparison.
     poisoned = kw.copy()
@@ -232,12 +253,13 @@ def test_naive_forecasters():
     peeked = []
     for kind, fc in built.items():
         clean = fc.predict_next_day(anchor, H)
-        blind = hs.SIMPLE_KINDS[kind](poisoned, H).predict_next_day(anchor, H)
-        same = (clean[["yhat_con", "yhat_gen"]].to_numpy()
-                == blind[["yhat_con", "yhat_gen"]].to_numpy()).all()
+        blind = rebuild(kind, poisoned).predict_next_day(anchor, H)
+        same = np.allclose(clean[["yhat_con", "yhat_gen"]].to_numpy(),
+                           blind[["yhat_con", "yhat_gen"]].to_numpy(),
+                           equal_nan=False)
         if not same:
             peeked.append(kind)
-    check("naive forecasters: none reads at or after its anchor",
+    check("forecasters: none reads at or after its anchor",
           not peeked, f"peeked: {', '.join(peeked)}" if peeked else
           f"{len(built)} kinds blinded from {anchor}")
 
@@ -253,7 +275,7 @@ def test_naive_forecasters():
                    == kw.index[anchor_i:anchor_i + H].tz_localize(None)).all())
         if not ok:
             bad.append(kind)
-    check("naive forecasters: H rows, tz-naive ds, non-negative, named channels",
+    check("forecasters: H rows, tz-naive ds, non-negative, named channels",
           not bad, f"violated by: {', '.join(bad)}" if bad else f"{len(built)} kinds")
 
     # --- the lags are the lags the names claim.
