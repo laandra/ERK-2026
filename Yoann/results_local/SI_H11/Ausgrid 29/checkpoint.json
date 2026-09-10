@@ -13,18 +13,114 @@
       ]
     ],
     "control_horizon": 22,
-    "cycle_cost_eur_per_efc": null,
+    "cycle_cost_eur_per_efc": 0.416666666667,
     "delta_t": 0.5,
     "eff": 0.95,
+    "fixed_schedule_windows": [
+      [
+        "charge_hours",
+        [
+          13.0,
+          16.0
+        ]
+      ],
+      [
+        "discharge_hours",
+        [
+          16.0,
+          20.0
+        ]
+      ]
+    ],
     "forecaster_digest": "ad2fa80df5f3",
     "forecaster_kind": "prophet",
     "leak_current_interval": false,
-    "milp_exclusivity": "inverter",
+    "local_timezone": "naive",
+    "milp_exclusivity": "auto",
     "milp_parity": null,
     "n_sim": 365,
     "n_train": 730,
     "p_max": 1.5,
     "refit_every_days": 30,
+    "rule_params": [
+      [
+        "peak_shaving",
+        [
+          [
+            "margin",
+            1.2
+          ],
+          [
+            "q_peak",
+            0.95
+          ],
+          [
+            "window_days",
+            14
+          ]
+        ]
+      ],
+      [
+        "price_oracle",
+        [
+          [
+            "q_high",
+            0.98
+          ],
+          [
+            "q_low",
+            0.02
+          ],
+          [
+            "window_days",
+            30
+          ]
+        ]
+      ],
+      [
+        "price_rank_daily",
+        [
+          [
+            "max_share",
+            0.04
+          ]
+        ]
+      ],
+      [
+        "price_threshold",
+        [
+          [
+            "q_high",
+            0.98
+          ],
+          [
+            "q_low",
+            0.02
+          ],
+          [
+            "window_days",
+            14
+          ]
+        ]
+      ],
+      [
+        "self_consumption_peak_shaving",
+        [
+          [
+            "margin",
+            0.8
+          ],
+          [
+            "q_peak",
+            0.99
+          ],
+          [
+            "reserve_cap_frac",
+            0.5
+          ]
+        ]
+      ]
+    ],
     "smp_source": "column",
     "soc_init": 5.0,
     "soc_max_pct": 0.8,
@@ -34,48 +130,80 @@
     "tariff": "SI"
   },
   "metrics": {
-    "cost_no_battery": 304.52695158409904,
-    "cost_oracle": 257.9758046172476,
-    "cost_prophet": 304.10796608539664,
+    "cost_no_battery": 304.9851725481985,
+    "cost_oracle": 272.826512216535,
+    "cost_prophet": 299.91271252031527,
     "buy_no_battery": 3680.29,
-    "buy_oracle": 3091.535439376731,
-    "buy_prophet": 3789.980368068746,
+    "buy_oracle": 3200.66128566482,
+    "buy_prophet": 3632.376767492759,
     "sell_no_battery": 1039.942,
-    "sell_oracle": 298.7759996329638,
-    "sell_prophet": 1005.9683813254246,
-    "gross_oracle": 257.92818307899864,
-    "energy_oracle": 242.5524587656998,
-    "power_oracle": 15.3757243131,
-    "fixed_oracle": 133.81901119180492,
-    "termadj_oracle": 0.04762153824896717,
-    "peakkw_oracle": 4.696000000000001,
-    "efc_oracle": 149.04532,
-    "gross_prophet": 304.0316902331977,
-    "energy_prophet": 285.0554189088981,
-    "power_prophet": 18.9762713244,
-    "fixed_prophet": 133.81901119180492,
-    "termadj_prophet": 0.07627585219892934,
-    "peakkw_prophet": 4.670601040550318,
-    "efc_prophet": 140.84820631535385,
+    "sell_oracle": 504.75443851108014,
+    "sell_prophet": 950.4161978334096,
+    "gross_oracle": 272.84076122159956,
+    "energy_oracle": 261.80813954549944,
+    "power_oracle": 11.032621676100003,
+    "fixed_oracle": 147.43301319567757,
+    "termadj_oracle": -0.014249005064600787,
+    "peakkw_oracle": 4.566,
+    "efc_oracle": 53.9721277631579,
+    "gross_prophet": 299.95399097709833,
+    "energy_prophet": 288.3133674964987,
+    "power_prophet": 11.640623480600004,
+    "fixed_prophet": 151.64407307347406,
+    "termadj_prophet": -0.04127845678308058,
+    "peakkw_prophet": 5.142,
+    "efc_prophet": 40.07589011728713,
+    "cost_milp_full": 244.7482011838661,
+    "gross_milp_full": 244.44353074420042,
+    "energy_milp_full": 236.8542522805005,
+    "power_milp_full": 7.5892784635,
+    "fixed_milp_full": 97.30794207311213,
+    "termadj_milp_full": 0.3046704396656647,
+    "peakkw_milp_full": 3.066,
+    "efc_milp_full": 100.00103684210526,
     "efc_no_battery": 0.0,
-    "cost_self_consumption": 253.37085772004244,
+    "fixed_no_battery": 150.67325627579697,
+    "cost_self_consumption": 253.16756583944266,
     "efc_self_consumption": 90.3545420000003,
-    "cost_fixed_schedule": 283.9392717655846,
-    "efc_fixed_schedule": 210.03661581999896,
-    "cost_delayed_pv_charge": 253.7844640745425,
+    "fixed_self_consumption": 146.14042307098268,
+    "cost_fixed_schedule": 273.2042950824056,
+    "efc_fixed_schedule": 98.52181904000014,
+    "fixed_fixed_schedule": 145.19921073751328,
+    "cost_delayed_pv_charge": 253.5797182639427,
     "efc_delayed_pv_charge": 89.80538471097027,
-    "cost_price_threshold": 281.4422922503437,
-    "efc_price_threshold": 157.56654014999967,
-    "cost_price_rank_daily": 266.75353842684365,
-    "efc_price_rank_daily": 197.74241178012426,
-    "cost_peak_shaving": 293.57907562346566,
-    "efc_peak_shaving": 17.619249358949897,
-    "cost_self_consumption_peak_shaving": 256.26494743768325,
-    "efc_self_consumption_peak_shaving": 92.41191080670748,
-    "cost_tariff_arbitrage": 277.52500099544363,
-    "efc_tariff_arbitrage": 194.16557004665088,
-    "cost_price_oracle": 281.29644730574364,
-    "efc_price_oracle": 155.29001888499974,
+    "fixed_delayed_pv_charge": 146.14042307098268,
+    "cost_price_threshold": 259.19761560074255,
+    "efc_price_threshold": 108.3636028500003,
+    "fixed_price_threshold": 144.60619776514184,
+    "cost_price_rank_daily": 254.1613032453422,
+    "efc_price_rank_daily": 109.27351258837521,
+    "fixed_price_rank_daily": 145.21337941369464,
+    "cost_peak_shaving": 286.3129427148726,
+    "efc_peak_shaving": 30.154922892058096,
+    "fixed_peak_shaving": 114.84541872080827,
+    "cost_self_consumption_peak_shaving": 256.73227585569936,
+    "efc_self_consumption_peak_shaving": 91.45606023317816,
+    "fixed_self_consumption_peak_shaving": 123.42258173751947,
+    "cost_tariff_arbitrage": 276.9310155039538,
+    "efc_tariff_arbitrage": 204.826935522664,
+    "fixed_tariff_arbitrage": 122.19297886600955,
+    "cost_price_oracle": 255.79562655444218,
+    "efc_price_oracle": 108.07623833312516,
+    "fixed_price_oracle": 146.76663727408828,
+    "total_delayed_pv_charge": 437.13905163116306,
+    "total_fixed_schedule": 459.4542637532523,
+    "total_milp_full": 383.72324194118875,
+    "total_no_battery": 455.65842882399545,
+    "total_oracle": 442.747911980195,
+    "total_peak_shaving": 413.72291264070503,
+    "total_price_oracle": 447.59402980066596,
+    "total_price_rank_daily": 444.9053129041931,
+    "total_price_threshold": 448.9553145533845,
+    "total_prophet": 468.25507314265894,
+    "total_self_consumption": 436.9557147437588,
+    "total_self_consumption_peak_shaving": 418.26154935704307,
+    "total_tariff_arbitrage": 484.46855083774005,
+    "full_period_bound_is_exact": true,
     "gen_mae": 0.14312892207443978,
     "gen_rmse": 0.28554971967796333,
     "gen_nmae": 0.6016833173877851,

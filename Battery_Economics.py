@@ -71,12 +71,35 @@ def present_value_factor(rate, years):
     return (1.0 - (1.0 + rate) ** -years) / rate
 
 
-def irr(capex, annual_savings, years, lo=-0.95, hi=5.0, tol=1e-9):
-    """Rate where the NPV of a level annuity equals capex. NaN when the capital
-    is never repaid within the service life, even undiscounted."""
+def irr(capex, annual_savings, years, lo=-0.999, hi=5.0, tol=1e-12):
+    """Rate where the NPV of a level annuity equals capex. Signed: may be < 0.
+
+    A NEGATIVE IRR is an answer, not an error. It is what a pack that never
+    repays its capital within its service life earns -- 217 EUR/a on 3500 EUR
+    over 12 years is -5.2 %/a -- and it is the only figure that ranks two
+    controllers that both lose money. `present_value_factor` is defined and
+    strictly decreasing across the whole of r > -1, so the root is there to be
+    found; the search simply used to stop above it.
+
+    What used to happen: an early return on `annual_savings * years < capex`
+    -- exactly the "does not repay undiscounted" case -- sent every such pack
+    back as NaN, and `lo=-0.95` truncated whatever was left. On this study that
+    is not an edge case, it is most of the table: a 10 kWh pack saving 46 EUR/a
+    is uneconomic by a factor of six, and NaN reported that as "no answer"
+    rather than as "-19 %/a".
+
+    NaN is now reserved for the case where no rate solves it at all:
+
+      capex <= 0            nothing to recover; an IRR is not defined.
+      annual_savings <= 0   NPV(r) = savings * pvf(r) - capex is negative for
+                            every r > -1, because pvf is positive throughout.
+                            No root exists -- this is "never, at any discount
+                            rate", which is a different statement from a large
+                            negative rate and must not be rendered as one.
+      npv(lo) < 0           the root is below -99.9 %/a, where pvf already
+                            exceeds 1e30 and the answer is numerical noise.
+    """
     if capex <= 0 or annual_savings <= 0:
-        return np.nan
-    if annual_savings * max(1.0, years) < capex:
         return np.nan
     npv = lambda r: annual_savings * present_value_factor(r, years) - capex
     if npv(lo) < 0:
@@ -236,7 +259,20 @@ def battery_economics(savings_eur, capacity_kwh, efc_per_year, *,
 # ---------------------------------------------------------------------------
 assert abs(irr(1000.0, 200.0, 10) - 0.15098) < 1e-4, "IRR solver is off"
 assert abs(irr(1000.0, 100.0, 10)) < 1e-6, "IRR of a break-even annuity should be 0"
-assert np.isnan(irr(1000.0, 50.0, 10)), "Never-repaid capital should be NaN"
+# Capital that is NOT repaid inside the life has a negative IRR, and the solver
+# has to return it rather than NaN -- 50 EUR/a on 1000 EUR over 10 years is a
+# real -11.0 %/a, and it is what most of the HEMS study's controllers earn.
+# Checked against the root of the annuity directly, so the assertion is a
+# property of the answer and not a transcribed constant.
+_r = irr(1000.0, 50.0, 10)
+assert _r < 0, "an annuity that does not repay undiscounted has a NEGATIVE IRR"
+assert abs(50.0 * present_value_factor(_r, 10) - 1000.0) < 1e-6, "IRR is not a root"
+assert abs(_r - (-0.10956)) < 1e-4, "negative-IRR branch moved"
+# The one case that genuinely has no root: pvf > 0 for every r > -1, so a
+# non-positive annuity can never reach a positive capex at any discount rate.
+assert np.isnan(irr(1000.0, 0.0, 10)), "a zero annuity has no IRR"
+assert np.isnan(irr(1000.0, -20.0, 10)), "a negative annuity has no IRR"
+assert np.isnan(irr(0.0, 200.0, 10)), "no capital, no IRR"
 assert abs(present_value_factor(0.05, 10) - 7.72173) < 1e-4
 assert abs(capital_recovery_factor(0.05, 12) - 0.11283) < 1e-4
 assert abs(annualized_cost_factor(0.05, 12, 0.0) - capital_recovery_factor(0.05, 12)) < 1e-12

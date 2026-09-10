@@ -83,6 +83,31 @@ except ZoneInfoNotFoundError:
 
 TZ_UTC = dt.timezone.utc
 
+# Ura, ob kateri se berejo bloki, dnevi in tarifna okna. Privzeto slovenska.
+#
+# Separate from TZ_SI, which stays what its name says. The block schedule is a
+# STRUCTURE -- "these hours of the local day cost this much" -- and it is only
+# meaningful against the local clock of the household it is applied to. Applying
+# it to an Australian profile through a Ljubljana clock reads the wrong hour of
+# that household's day, exactly as SI public holidays would mark the wrong days
+# non-working, which is what `nastavi_koledar` already exists to prevent.
+#
+# The Ausgrid arm of the HEMS study is the case that forced this: its rules read
+# `local_hour` off `v_lokalni_cas` while its tariff is priced on
+# Australia/Sydney, so a clock rule and the bill it is scored against were
+# ~9 hours apart on the same interval.
+#
+# `None` is the third setting, and the one that arm actually needs: THE INDEX IS
+# ALREADY LOCAL. Some profiles are published as local wall-clock readings and
+# then carry a UTC suffix they never earned -- the Ausgrid files are stamped
+# `Timestamp_UTC` with `+00:00` but step forward an hour on the first Sunday in
+# October and back on the first Sunday in April, which is NSW daylight saving
+# sitting in the data. Converting such a series to anything shifts it away from
+# the clock it was recorded on; the only correct move is to read the hour off
+# the stamp and convert nothing.
+NAIVNI_LOKALNI_CAS = None
+TZ_LOKALNI = TZ_SI
+
 # Privzeto: Slovenija, severna polobla. Blokovni razporedi so definirani glede
 # na "delovni / dela prost dan" in "visja / nizka sezona", ne glede na koledar
 # dolocene drzave -- zato je mogoce isto tarifno strukturo uporabiti na profilu
@@ -97,22 +122,55 @@ PODROCJE_PRAZNIKOV = None                              # npr. "NSW"
 VISJA_SEZONA_MESECI = frozenset({11, 12, 1, 2})        # nov, dec, jan, feb
 
 
-def nastavi_koledar(drzava=None, podrocje=None, visja_sezona_meseci=None):
+def nastavi_koledar(drzava=None, podrocje=None, visja_sezona_meseci=None,
+                    casovni_pas=None):
     """Premakni koledar na drugo drzavo / poloblo. Vrne prejsnjo nastavitev.
 
-    Returns the previous (country, subdivision, months) so a caller can restore
-    it -- these are module-level, so a study that changes them changes them for
-    everything in the process.
+    Returns the previous (country, subdivision, months, timezone) so a caller
+    can restore it -- these are module-level, so a study that changes them
+    changes them for everything in the process.
+
+    `casovni_pas` is the clock the blocks, days and tariff windows are read on:
+    an IANA name, a tzinfo, the string "naive" for a series whose stamps are
+    already local, or None to leave it unchanged. It travels with the calendar
+    rather than in a setter of its own because the two are one decision -- a
+    profile from another country needs both its holidays and its clock, and
+    moving one without the other is the failure this argument was added for.
+
+    "naive" cannot be spelled as None here, because None already means "leave
+    it"; that is why it is a string.
     """
-    global DRZAVA_PRAZNIKOV, PODROCJE_PRAZNIKOV, VISJA_SEZONA_MESECI
-    prej = (DRZAVA_PRAZNIKOV, PODROCJE_PRAZNIKOV, VISJA_SEZONA_MESECI)
+    global DRZAVA_PRAZNIKOV, PODROCJE_PRAZNIKOV, VISJA_SEZONA_MESECI, TZ_LOKALNI
+    prej = (DRZAVA_PRAZNIKOV, PODROCJE_PRAZNIKOV, VISJA_SEZONA_MESECI, TZ_LOKALNI)
     if drzava is not None:
         DRZAVA_PRAZNIKOV, PODROCJE_PRAZNIKOV = drzava, podrocje
     elif podrocje is not None:
         PODROCJE_PRAZNIKOV = podrocje
     if visja_sezona_meseci is not None:
         VISJA_SEZONA_MESECI = frozenset(visja_sezona_meseci)
+    if casovni_pas is not None:
+        TZ_LOKALNI = _tzinfo(casovni_pas)
     return prej
+
+
+def _tzinfo(tz):
+    """A tzinfo from a name or a tzinfo, with the Ljubljana fallback preserved.
+
+    Returns None for "naive" -- the stamps are already local, convert nothing.
+    """
+    if isinstance(tz, str) and tz.lower() == "naive":
+        return NAIVNI_LOKALNI_CAS
+    if isinstance(tz, dt.tzinfo):
+        return tz
+    if tz == "Europe/Ljubljana":
+        return TZ_SI                     # may be the no-tzdata fallback
+    try:
+        return ZoneInfo(str(tz))
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(
+            f"no tzdata for {tz!r}; install the `tzdata` package or pass a "
+            f"tzinfo object"
+        ) from exc
 
 
 @lru_cache(maxsize=None)
@@ -134,10 +192,16 @@ def je_visja_sezona(d: dt.date) -> bool:
 
 
 def v_lokalni_cas(utc_date: dt.datetime) -> dt.datetime:
-    """Naive datetime se obravnava kot UTC; vrne čas v Europe/Ljubljana."""
+    """Naive datetime se obravnava kot UTC; vrne cas v TZ_LOKALNI.
+
+    Privzeto Europe/Ljubljana; `nastavi_koledar(casovni_pas=...)` ga premakne.
+    Pri `casovni_pas="naive"` je zig ze lokalni in se ne pretvarja.
+    """
+    if TZ_LOKALNI is NAIVNI_LOKALNI_CAS:
+        return utc_date.replace(tzinfo=None)
     if utc_date.tzinfo is None:
         utc_date = utc_date.replace(tzinfo=TZ_UTC)
-    return utc_date.astimezone(TZ_SI)
+    return utc_date.astimezone(TZ_LOKALNI)
 
 
 # ---------------------------------------------------------------------------

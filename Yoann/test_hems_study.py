@@ -210,6 +210,343 @@ def test_wear_cost():
           f"{be.cycle_cost_eur_per_efc(10.0):.4f} EUR/EFC")
 
 
+def test_naive_forecasters():
+    """F9. A fit-free forecaster must read the past and only the past.
+
+    The naive roster is the study's control group: every claim of the form
+    "Prophet is/is not worth it" is a comparison against these. A baseline that
+    peeks is not a weak forecaster, it is a strong one wearing the wrong label,
+    and it would make the expensive model look worse than it is. So causality is
+    checked by measurement here rather than by reading the slice arithmetic.
+    """
+    _, kw = load(n_days=40)
+    anchor_i = 20 * H                       # 20 days of history behind it
+    anchor = kw.index[anchor_i]
+    built = {k: b(kw, H) for k, b in hs.SIMPLE_KINDS.items()}
+
+    # --- causality. Poison everything from the anchor onwards; a forecaster
+    # that reads any of it produces NaN, and NaN != NaN survives any comparison.
+    poisoned = kw.copy()
+    poisoned.iloc[anchor_i:, poisoned.columns.get_indexer(
+        ["Energy_Consumption", "Energy_Generation"])] = np.nan
+    peeked = []
+    for kind, fc in built.items():
+        clean = fc.predict_next_day(anchor, H)
+        blind = hs.SIMPLE_KINDS[kind](poisoned, H).predict_next_day(anchor, H)
+        same = (clean[["yhat_con", "yhat_gen"]].to_numpy()
+                == blind[["yhat_con", "yhat_gen"]].to_numpy()).all()
+        if not same:
+            peeked.append(kind)
+    check("naive forecasters: none reads at or after its anchor",
+          not peeked, f"peeked: {', '.join(peeked)}" if peeked else
+          f"{len(built)} kinds blinded from {anchor}")
+
+    # --- the contract every caller relies on.
+    bad = []
+    for kind, fc in built.items():
+        day = fc.predict_next_day(anchor, H)
+        ok = (list(day.columns) == ["ds", "yhat_con", "yhat_gen"]
+              and len(day) == H
+              and pd.DatetimeIndex(day["ds"]).tz is None
+              and (day[["yhat_con", "yhat_gen"]].to_numpy() >= 0).all()
+              and (pd.DatetimeIndex(day["ds"])
+                   == kw.index[anchor_i:anchor_i + H].tz_localize(None)).all())
+        if not ok:
+            bad.append(kind)
+    check("naive forecasters: H rows, tz-naive ds, non-negative, named channels",
+          not bad, f"violated by: {', '.join(bad)}" if bad else f"{len(built)} kinds")
+
+    # --- the lags are the lags the names claim.
+    for kind, days in (("persistence", 1), ("weekly", 7)):
+        day = built[kind].predict_next_day(anchor, H)
+        src = kw.iloc[anchor_i - days * H:anchor_i - days * H + H]
+        check(f"{kind}: copies the day {days} day(s) before the anchor",
+              np.allclose(day["yhat_con"], src["Energy_Consumption"])
+              and np.allclose(day["yhat_gen"], src["Energy_Generation"]))
+
+    # --- day-type match: the source day is the same type as the anchor day, and
+    # it is the most recent such day.
+    wrong = []
+    for offset in range(7):                 # one anchor per weekday
+        a_i = anchor_i + offset * H
+        a = kw.index[a_i]
+        day = built["daytype"].predict_next_day(a, H)
+        lag = next((d for d in range(1, 8)
+                    if np.allclose(day["yhat_con"],
+                                   kw["Energy_Consumption"]
+                                   .iloc[a_i - d * H:a_i - d * H + H])), None)
+        weekend = kw.index[a_i].dayofweek in (5, 6)
+        if lag is None or (kw.index[a_i - lag * H].dayofweek in (5, 6)) != weekend:
+            wrong.append(f"{a:%a}")
+    check("daytype: weekday from weekday, weekend from weekend",
+          not wrong, f"mismatched on {', '.join(wrong)}" if wrong else
+          "7 consecutive anchors, each matched within 7 days")
+
+    # --- climatology: the median rejects one anomalous day, the mean does not.
+    idx = pd.date_range("2012-01-01 00:30", periods=15 * H, freq="30min",
+                        tz="UTC")
+    shape = np.tile(np.linspace(0.2, 1.2, H), 15)
+    synth = pd.DataFrame({"SMP": 0.1, "Energy_Consumption": shape,
+                          "Energy_Generation": shape}, index=idx)
+    a_i = 14 * H
+    synth.iloc[(a_i - 3 * H):(a_i - 2 * H),
+               synth.columns.get_indexer(["Energy_Consumption",
+                                          "Energy_Generation"])] = 50.0
+    normal = np.linspace(0.2, 1.2, H)
+    med = hs.ClimatologyForecaster(synth, H, 7, "median").predict_next_day(
+        synth.index[a_i], H)
+    avg = hs.ClimatologyForecaster(synth, H, 7, "mean").predict_next_day(
+        synth.index[a_i], H)
+    check("median7: one anomalous day does not move the forecast",
+          np.allclose(med["yhat_gen"], normal),
+          f"max deviation {np.abs(med['yhat_gen'] - normal).max():.3e}")
+    check("mean7: the same day does move it -- the two are not the same method",
+          not np.allclose(avg["yhat_gen"], normal),
+          f"mean is {avg['yhat_gen'].mean():.2f} vs {normal.mean():.2f} kW")
+
+    # --- an unregistered kind must fail loudly. It used to fall through to
+    # Prophet, so a typo'd arm ran a whole sweep and reported Prophet's numbers
+    # under a name nobody had implemented.
+    import tempfile
+    raised = False
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            hs.load_or_build_forecasts(
+                "unit-test", kw.iloc[:10 * H], kw.iloc[10 * H:], H, "30min",
+                hs.EnergyForecaster(), cache_dir=tmp, kind="no-such-method",
+                history=kw.iloc[:10 * H])
+    except ValueError:
+        raised = True
+    check("an unknown forecaster kind raises instead of serving Prophet", raised)
+
+
+def test_one_clock(kwh):
+    """F10. The rules and the tariff must read the SAME clock, and it must be
+    the household's own.
+
+    Two conversions were stacked on a series that needed neither. The Ausgrid
+    files are stamped `Timestamp_UTC` with a `+00:00` suffix they never earned:
+    they are local NSW wall-clock readings, DST included -- measured, the PV
+    centroid steps 12.49 -> 13.13 on 2012-10-07 and 13.12 -> 12.32 on
+    2013-04-07, the first Sunday in October and the first Sunday in April.
+    `TariffCalculator` then converted them to Australia/Sydney (+10/+11 h) and
+    `si_cas` gave every rule a Europe/Ljubljana clock (+1/+2 h), so a clock rule
+    and the bill it was scored against sat ~9 hours apart on the same interval.
+
+    Two things are checked, and the second is the one that bit: that the rules'
+    clock is the stamp, and that the EA025 peak rate lands on the evening.
+    """
+    import si_cas as sc
+    sc.nastavi_koledar(drzava="AU", podrocje="NSW", visja_sezona_meseci={5, 6, 7, 8},
+                       casovni_pas="naive")
+    hs.TariffCalculator.LOCAL_TZ = None
+    hs.TariffCalculator.HOLIDAY_COUNTRY, hs.TariffCalculator.HOLIDAY_SUBDIV = "AU", "NSW"
+
+    env = make_env(kwh)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        sig = rbc.build_signals(env, n_steps=len(kwh))
+    stamp_hour = kwh.index.hour + kwh.index.minute / 60.0
+    check("the rules' clock is the household's own stamp, unconverted",
+          np.allclose(sig.local_hour, stamp_hour),
+          f"max drift {np.max(np.abs(sig.local_hour - stamp_hour)):.2f} h")
+
+    imp = np.asarray(hs.build_rate_vectors(
+        "AU", env, kwh.index, kwh["SMP"].values, 30)[0], dtype=float)
+    hour = np.floor(sig.local_hour).astype(int)
+    by_hour = pd.Series(imp).groupby(hour).mean()
+    dearest = set(by_hour.nlargest(6).index)
+    check("the EA025 peak rate lands on local 15:00-21:00",
+          dearest == {15, 16, 17, 18, 19, 20}, f"dearest hours {sorted(dearest)}")
+    # And the roof is overhead at midday, which is the physical cross-check that
+    # says the clock is the right one rather than merely a consistent one.
+    peak_gen = int(pd.Series(sig.generation).groupby(hour).mean().idxmax())
+    check("PV generation peaks around local noon", 11 <= peak_gen <= 14,
+          f"peak at {peak_gen}:00")
+
+
+def test_rules_read_the_price_they_pay(kwh):
+    """F14. A price rule must decide against the tariff it is billed under.
+
+    `rbc.build_signals` derived `sig.import_rate` from `env.pricing_scheme`,
+    which the Ausgrid arm also sets to `si_samooskrba` -- its environment exists
+    for the battery and the calendar, not for its prices. So `price_threshold`,
+    `price_rank_daily`, `tariff_arbitrage` and `price_oracle` ranked their
+    intervals on a Slovenian dynamic list while paying Ausgrid EA025, and could
+    not see the 0.0270 / 0.0720 / 0.2360 network steps that are the whole of
+    that tariff's signal. Measured on 90 days: the two series correlate 0.44,
+    and the rules were worth ~9x more once shown the right one.
+    """
+    for tariff in ("AU", "SI"):
+        env = make_env(kwh)
+        rates = hs.build_rate_vectors(tariff, env, kwh.index, kwh["SMP"].values, 30)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            sig = rbc.build_signals(env, n_steps=len(kwh), rates=rates)
+        check(f"{tariff}: the rules' price signal IS the arm's delivered rate",
+              np.allclose(sig.import_rate, np.asarray(rates[0][:len(kwh)])),
+              f"worst gap {np.max(np.abs(sig.import_rate - np.asarray(rates[0][:len(kwh)]))):.2e}")
+
+    # And the settlement charges what the rule was shown. `price_interval` on SI
+    # and `make_au_settlement` on AU are different functions; the check that
+    # matters is that neither is fed a series the rule never saw.
+    env = make_env(kwh)
+    au = hs.build_rate_vectors("AU", env, kwh.index, kwh["SMP"].values, 30)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        env_derived = rbc.build_signals(env, n_steps=len(kwh))
+        arm = rbc.build_signals(env, n_steps=len(kwh), rates=au)
+    check("AU: the old env-derived signal was a different series entirely",
+          np.corrcoef(env_derived.import_rate, arm.import_rate)[0, 1] < 0.9,
+          f"correlation {np.corrcoef(env_derived.import_rate, arm.import_rate)[0, 1]:.2f}, "
+          f"means {env_derived.import_rate.mean():.4f} vs {arm.import_rate.mean():.4f}")
+
+
+def test_tuned_parameters_reach_the_rules(kwh):
+    """F15. What `RULE_PARAMS` says a rule is tuned to, the rule must be built with.
+
+    A tuning table nothing reads is worse than none: it documents a claim about
+    the study that the study does not implement.
+    """
+    for tariff in ("AU", "SI"):
+        built = {p.name: p for p in hs.rule_roster(tariff)}
+        for name, params in hs.RULE_PARAMS.get(tariff, {}).items():
+            pol = built.get(name)
+            if pol is None:
+                check(f"{tariff}: {name} is tuned but not on this roster", False)
+                continue
+            wrong = {k: (getattr(pol, k, None), v) for k, v in params.items()
+                     if getattr(pol, k, None) != v}
+            check(f"{tariff}: {name} is built with its tuned parameters",
+                  not wrong, str(wrong) if wrong else "")
+    fs = {p.name: p for p in hs.rule_roster("AU")}["fixed_schedule"]
+    check("AU: fixed_schedule is built with its tuned windows",
+          (fs.charge_hours, fs.discharge_hours)
+          == (hs.FIXED_SCHEDULE_WINDOWS["AU"]["charge_hours"],
+              hs.FIXED_SCHEDULE_WINDOWS["AU"]["discharge_hours"]))
+
+
+def test_discharge_window_is_live(kwh):
+    """F11. `FixedSchedule.discharge_hours` must change the answer.
+
+    It could not. Outside both windows the rule fell back to
+    `_self_consumption`, and `_cover_load` is a strict subset of that -- so the
+    pack was already emptied into whatever deficit came first, and naming a
+    discharge window moved no discharge into it. Measured over 60 days, sliding
+    that window across the day changed the discharge timing in 1 interval of
+    2880 and the bill by 0.82 EUR; with `hold_between` it moves the bill by
+    58.80. The ratio is the invariant, not either number.
+    """
+    env = make_env(kwh)
+    rates = hs.build_rate_vectors("AU", env, kwh.index, kwh["SMP"].values, 30)
+    settle = hs.build_settlement("AU", env, rates, DELTA_T)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        sig = rbc.build_signals(env, n_steps=len(kwh))
+
+    def cost(dis, hold=True):
+        pol = rbc.FixedSchedule(charge_hours=(11.0, 15.0), discharge_hours=dis,
+                                respect_peak=False, hold_between=hold)
+        return rbc.run_policy(env, pol, signals=sig, settle=settle,
+                              soc_init_kwh=4.0)["Cost_EUR_Closed"]
+
+    peak_window, off_window = cost((15.0, 21.0)), cost((2.0, 6.0))
+    check("moving the discharge window moves the bill",
+          abs(peak_window - off_window) > 0.01,
+          f"peak {peak_window:.2f} vs off-peak {off_window:.2f} EUR")
+    check("discharging into the EA025 peak beats discharging off-peak",
+          peak_window < off_window)
+    # The old behaviour stays reachable, and stays nearly deaf to the window,
+    # which is the evidence that `hold_between` is what makes it mean anything.
+    old_spread = abs(cost((15.0, 21.0), hold=False) - cost((2.0, 6.0), hold=False))
+    new_spread = abs(peak_window - off_window)
+    check("hold_between is what the discharge window acts through",
+          new_spread > 10 * max(old_spread, 1e-9),
+          f"old behaviour spreads {old_spread:.2f} EUR, new one {new_spread:.2f}")
+
+
+def test_wear_reaches_the_objective(kwh, kw):
+    """F12. A wear price must change what the MILP DOES, not just what is
+    reported.
+
+    `cycle_cost_eur_per_efc` was set on the environment, recorded in the run
+    config and described as a shadow price "in its objective", while
+    `UpstreamMILPScheduler.solve` built its objective out of `buy` and `sell`
+    alone. Turning it on changed the checkpoint key and nothing else.
+    """
+    rates = None
+    cycled = {}
+    for rate in (0.0, 5.0):
+        env = hs.align_envelope(
+            hs.build_study_env(kwh, delta_t=DELTA_T, H=H,
+                               cycle_cost_eur_per_efc=(rate or None), **BATTERY),
+            BATTERY["p_max"], BATTERY["eff"], DELTA_T)
+        rates = hs.build_rate_vectors("AU", env, kwh.index, kwh["SMP"].values, 30)
+        sched = hs.UpstreamMILPScheduler(
+            env, delta_t=DELTA_T, parity=False, exclusivity="auto",
+            allow_spill=False, metering_bounds=True, **BATTERY)
+        out = sched.solve(
+            soc_init=5.0, buy_rate=list(rates[0][:H]), sell_rate=list(rates[1][:H]),
+            p_gen=list(kw["Energy_Generation"].values[:H]),
+            p_con=list(kw["Energy_Consumption"].values[:H]))
+        cycled[rate] = sum(out["x_ch"]) * DELTA_T
+    check("a wear price makes the MILP cycle less",
+          cycled[5.0] < cycled[0.0] - 1e-6,
+          f"{cycled[0.0]:.3f} kWh charged unpriced, {cycled[5.0]:.3f} kWh at 5 EUR/EFC")
+
+
+def test_full_period_is_a_bound(kwh):
+    """F13. The whole-period solve must be below everything it is the bound for.
+
+    It is the denominator of every `gain_share_pct`, so a controller beating it
+    is not an interesting result, it is a missing term in its objective. Two
+    were missing when it was first written, and both are checked here by the
+    fact that this passes: the terminal close-out (priced at the evaluator's own
+    mean rate, not the arm's) and, on SI, the endogenous contract, which
+    `settle_trajectory` was not converging for the MILP arms.
+
+    SI is checked on a THREE-MONTH slice, not the ten-day one. Below the
+    contract lag no month in the window reads its line from another month in it,
+    so the solve cannot price its own standing charge while the rules converge
+    theirs by re-running -- and it loses by 0.79 EUR for that reason alone. The
+    study's arms are 365 days; `full_period_bound_check` reports the short case
+    as a note rather than claiming a bound it cannot have.
+    """
+    for tariff, window in (("AU", kwh), ("SI", load(n_days=92)[0])):
+        env = make_env(window)
+        kwh = window
+        rates = hs.build_rate_vectors(tariff, env, kwh.index, kwh["SMP"].values, 30)
+        settle = hs.build_settlement(tariff, env, rates, DELTA_T)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            sig = rbc.build_signals(env, n_steps=len(kwh))
+        soc_min = BATTERY["battery_cap"] * BATTERY["soc_min_pct"]
+
+        full = hs.solve_full_period(
+            env, rates, tariff, n_steps=len(kwh), soc_init_kwh=5.0,
+            delta_t=DELTA_T, soc_min_kwh=soc_min,
+            closeout_rate=float(np.mean(sig.import_rate)), verbose=False)
+        net = (np.asarray(full["p_buy"]) - np.asarray(full["p_sell"])) * DELTA_T
+        s = hs.settle_trajectory(env, net, settle, sig, soc_start=5.0,
+                                 soc_end=full["soc_plan"][-1])
+        efc = (sum(full["x_ch"]) * DELTA_T * BATTERY["eff"]
+               + sum(full["x_dis"]) * DELTA_T / BATTERY["eff"]) / (2 * BATTERY["battery_cap"])
+        wear = float(env.cycle_cost_eur_per_efc or 0.0)
+        opt = s["Cost_EUR_Closed"] + wear * efc + (
+            s["Fixed_EUR"] if tariff == "SI" else 0.0)
+
+        metrics, _ = hs.run_rules(env, settle, tariff, signals=sig, soc_init_kwh=4.0)
+        worst = None
+        for name in sorted(k[5:] for k in metrics if k.startswith("cost_")):
+            total = metrics[f"cost_{name}"] + wear * metrics[f"efc_{name}"] + (
+                metrics[f"fixed_{name}"] if tariff == "SI" else 0.0)
+            if worst is None or total < worst[1]:
+                worst = (name, total)
+        check(f"{tariff}: the whole-period solve bounds every rule",
+              opt <= worst[1] + 0.01,
+              f"optimum {opt:.2f} vs best rule {worst[0]} {worst[1]:.2f}")
+
+
 if __name__ == "__main__":
     kwh, kw = load()
     print(f"Ausgrid 127, {len(kwh)} steps ({len(kwh) // H} days)\n")
@@ -221,6 +558,13 @@ if __name__ == "__main__":
     test_si_settlement_matches_upstream(kwh)
     test_rules_stay_in_the_envelope(kwh)
     test_shared_starting_soc(kwh)
+    test_naive_forecasters()
+    test_one_clock(kwh)
+    test_rules_read_the_price_they_pay(kwh)
+    test_tuned_parameters_reach_the_rules(kwh)
+    test_discharge_window_is_live(kwh)
+    test_wear_reaches_the_objective(kwh, kw)
+    test_full_period_is_a_bound(kwh)
     print(f"\n{len(_passed)} passed, {len(_failed)} failed")
     if _failed:
         print("FAILED: " + ", ".join(_failed))

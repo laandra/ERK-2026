@@ -212,8 +212,25 @@ class Signals:
         return float(self.consumption[idx] - self.generation[idx])
 
 
-def build_signals(env, n_steps=None):
-    """The signal bundle for one household-environment."""
+def build_signals(env, n_steps=None, rates=None):
+    """The signal bundle for one household-environment.
+
+    `rates` is the arm's own `(import, export, constant)` triple, in EUR per kWh
+    for the first two. Pass it whenever the study is not priced by the SI
+    schemes, and it is not optional in that case:
+
+    Every price-reading rule decides against `sig.import_rate`, and the
+    settlement closes the pack out at its mean. Built here from
+    `interval_rate_vectors`, that is always the SLOVENIAN delivered rate,
+    because it is derived from `env.pricing_scheme` -- which the Ausgrid arm
+    also sets to `si_samooskrba`, since its environment exists for the battery
+    and the calendar rather than for its prices. So on that arm `price_threshold`,
+    `price_rank_daily`, `tariff_arbitrage` and `price_oracle` chose their
+    intervals against a Slovenian dynamic list while being billed Ausgrid EA025,
+    and were blind to the 0.0270 / 0.0720 / 0.2360 network steps that are the
+    whole of that tariff's signal. A controller cannot be scored on a price it
+    was never shown.
+    """
     n_steps = int(env.episode_length if n_steps is None else n_steps)
     dates = env.dataset.index[:n_steps]
 
@@ -228,11 +245,20 @@ def build_signals(env, n_steps=None):
     _, _, day_idx_t = day_calendar(dates)
     day_idx = np.asarray(day_idx_t, dtype=int)
 
-    pricing_options = dict(env.pricing_options or {})
-    import_rates, export_rates, _ = interval_rate_vectors(
-        env, dates, env.arr_price[:n_steps], pricing_options,
-        int(round(env.interval_minutes)),
-    )
+    if rates is None:
+        pricing_options = dict(env.pricing_options or {})
+        import_rates, export_rates, _ = interval_rate_vectors(
+            env, dates, env.arr_price[:n_steps], pricing_options,
+            int(round(env.interval_minutes)),
+        )
+    else:
+        import_rates = np.asarray(rates[0], dtype=float)[:n_steps]
+        export_rates = np.asarray(rates[1], dtype=float)[:n_steps]
+        if len(import_rates) != n_steps or len(export_rates) != n_steps:
+            raise ValueError(
+                f"rates cover {len(import_rates)}/{len(export_rates)} of "
+                f"{n_steps} steps; a rule reading past the end of its own price "
+                f"series is the bug this check exists for")
     # The same floor the MILP applies: on a dynamic list SIPX can drive the
     # delivered import rate negative, and an uncapped credit would make the
     # buy/sell round trip pay for itself out of nothing.
@@ -375,22 +401,38 @@ class SelfConsumption(Policy):
 class FixedSchedule(Policy):
     """A clock, and nothing but the clock.
 
-    Charge at full rate through the night window, discharge into the evening
+    Charge at full rate through the charge window, discharge into the discharge
     window, soak the PV surplus in between. It reads no price at all, which is
     the point: on a flat list it is the whole of what a battery can do, and on a
     dynamic one it is what ignoring the price signal costs.
 
     The windows are half-open in LOCAL time, and may wrap midnight.
+
+    `hold_between` is what makes the discharge window mean anything. Without it
+    the rule falls back to `_self_consumption` outside both windows, and
+    `_cover_load` is a strict SUBSET of that -- so the pack was already emptied
+    into whatever deficit came first, and naming a discharge window could not
+    move a single kWh of discharge INTO it. Measured over 60 days, moving that
+    window right across the day changed when the pack discharged in 1 interval
+    of 2880; its only real effect was to stop the pack soaking PV surplus while
+    the window was open, worth 0.82 EUR against a 412 EUR bill.
+
+    With it on, the rule still soaks surplus outside the windows but will not
+    SPEND the pack there, so charge survives to the window it was scheduled for
+    and the schedule is an actual schedule -- the same four windows then spread
+    the bill over 58.80 EUR instead of 0.82. Set it False to recover the old
+    behaviour and reproduce published numbers.
     """
 
     name = "fixed_schedule"
     label = "Fixed schedule"
 
     def __init__(self, charge_hours=(1.0, 5.0), discharge_hours=(18.0, 22.0),
-                 respect_peak=True):
+                 respect_peak=True, hold_between=True):
         self.charge_hours = charge_hours
         self.discharge_hours = discharge_hours
         self.respect_peak = respect_peak
+        self.hold_between = hold_between
 
     @staticmethod
     def _in_window(hour, window):
@@ -405,6 +447,11 @@ class FixedSchedule(Policy):
             return _grid_charge_room(sig, idx, hi, peak_state, self.respect_peak)
         if self._in_window(hour, self.discharge_hours):
             return _cover_load(sig, idx, lo)
+        if self.hold_between:
+            # Soak surplus, spend nothing: the pack is being kept for the
+            # discharge window, which is the only thing that makes that window
+            # a decision rather than a comment.
+            return min(sig.surplus[idx], hi) if sig.surplus[idx] > _EPS else 0.0
         return _self_consumption(sig, idx, lo, hi)
 
 
@@ -825,7 +872,7 @@ def make_policy(name, **kwargs):
 # The runner: execute a rule and price it exactly as the MILP is priced
 # ---------------------------------------------------------------------------
 def run_policy(env, policy, n_steps=None, signals=None, keep_traces=False,
-               settle=None, soc_init_kwh=None):
+               settle=None, soc_init_kwh=None, rates=None):
     """Execute one controller over the horizon and return its priced trajectory.
 
     The accounting is the MILP runner's, interval for interval, with the solve
@@ -850,7 +897,8 @@ def run_policy(env, policy, n_steps=None, signals=None, keep_traces=False,
     """
     if getattr(env, "agreed_power_from_dispatch", False):
         hours = env.interval_minutes / 60.0
-        base = build_signals(env, n_steps) if signals is None else signals
+        base = (build_signals(env, n_steps, rates=rates)
+                if signals is None else signals)
         spent = {"seconds": 0.0}
 
 
@@ -879,7 +927,7 @@ def run_policy(env, policy, n_steps=None, signals=None, keep_traces=False,
 
     out = _run_policy_once(env, policy, n_steps=n_steps, signals=signals,
                            keep_traces=keep_traces, settle=settle,
-                           soc_init_kwh=soc_init_kwh)
+                           soc_init_kwh=soc_init_kwh, rates=rates)
     out.pop("_net_trace", None)
     out["Agreed_Power_Iters"] = 1
     out["Agreed_Power_Converged"] = True
@@ -887,10 +935,10 @@ def run_policy(env, policy, n_steps=None, signals=None, keep_traces=False,
 
 
 def _run_policy_once(env, policy, n_steps=None, signals=None, keep_traces=False,
-                     settle=None, soc_init_kwh=None):
+                     settle=None, soc_init_kwh=None, rates=None):
     """One pass of the rule under the contract currently in force."""
     settle = price_interval if settle is None else settle
-    sig = build_signals(env, n_steps) if signals is None else signals
+    sig = build_signals(env, n_steps, rates=rates) if signals is None else signals
     n_steps = sig.n_steps
     policy.reset(sig)
 
