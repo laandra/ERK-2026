@@ -77,3 +77,409 @@ Tariff: AU | import rate -0.0106..0.6508 EUR/kWh
 Native granularity (30 min): 52608 steps
 Training: 35040 steps (730 days)
 Simulation: 17520 steps (365 days)
+Tariff: SI | import rate 0.0002..0.2806 EUR/kWh
+  [checkpoint] already complete under this configuration; skipping
+
+======================================================================
+=== Dataset: Ausgrid 148 ===
+======================================================================
+Native granularity (30 min): 52608 steps
+Training: 35040 steps (730 days)
+Simulation: 17520 steps (365 days)
+Tariff: AU | import rate -0.0106..0.6508 EUR/kWh
+  [checkpoint] already complete under this configuration; skipping
+
+======================================================================
+=== Dataset: Ausgrid 148 ===
+======================================================================
+Native granularity (30 min): 52608 steps
+Training: 35040 steps (730 days)
+Simulation: 17520 steps (365 days)
+Tariff: SI | import rate 0.0002..0.2806 EUR/kWh
+  [checkpoint] already complete under this configuration; skipping
+
+======================================================================
+=== Dataset: Ausgrid 148 ===
+======================================================================
+Native granularity (30 min): 52608 steps
+Training: 35040 steps (730 days)
+Simulation: 17520 steps (365 days)
+Tariff: AU | import rate -0.0106..0.6508 EUR/kWh
+  [checkpoint] already complete under this configuration; skipping
+
+======================================================================
+=== Dataset: Ausgrid 148 ===
+======================================================================
+Native granularity (30 min): 52608 steps
+Training: 35040 steps (730 days)
+Simulation: 17520 steps (365 days)
+Tariff: SI | import rate 0.0002..0.2806 EUR/kWh
+  [checkpoint] already complete under this configuration; skipping
+
+======================================================================
+=== Dataset: Ausgrid 148 ===
+======================================================================
+Native granularity (30 min): 52608 steps
+Training: 35040 steps (730 days)
+Simulation: 17520 steps (365 days)
+Tariff: AU | import rate -0.0106..0.6508 EUR/kWh
+  [checkpoint] already complete under this configuration; skipping
+
+======================================================================
+=== Dataset: Ausgrid 148 ===
+======================================================================
+Native granularity (30 min): 52608 steps
+Training: 35040 steps (730 days)
+Simulation: 17520 steps (365 days)
+Tariff: SI | import rate 0.0002..0.2806 EUR/kWh
+  [checkpoint] already complete under this configuration; skipping
+
+======================================================================
+=== Dataset: Ausgrid 148 ===
+======================================================================
+Native granularity (30 min): 52608 steps
+Training: 35040 steps (730 days)
+Simulation: 17520 steps (365 days)
+Tariff: AU | import rate -0.0106..0.6508 EUR/kWh
+  [checkpoint] already complete under this configuration; skipping
+
+======================================================================
+=== Dataset: Ausgrid 148 ===
+======================================================================
+Native granularity (30 min): 52608 steps
+Training: 35040 steps (730 days)
+Simulation: 17520 steps (365 days)
+Tariff: SI | import rate 0.0002..0.2806 EUR/kWh
+  [checkpoint] already complete under this configuration; skipping
+
+======================================================================
+=== Dataset: Ausgrid 148 ===
+======================================================================
+Native granularity (30 min): 52608 steps
+Training: 35040 steps (730 days)
+Simulation: 17520 steps (365 days)
+Tariff: AU | import rate -0.0106..0.6508 EUR/kWh
+  [checkpoint] already complete under this configuration; skipping
+
+======================================================================
+=== Dataset: Ausgrid 148 ===
+======================================================================
+Native granularity (30 min): 52608 steps
+Training: 35040 steps (730 days)
+Simulation: 17520 steps (365 days)
+Tariff: SI | import rate 0.0002..0.2806 EUR/kWh
+  [checkpoint] already complete under this configuration; skipping
+
+======================================================================
+=== Dataset: Ausgrid 148 ===
+======================================================================
+Native granularity (30 min): 52608 steps
+Training: 35040 steps (730 days)
+Simulation: 17520 steps (365 days)
+Tariff: AU | import rate -0.0106..0.6508 EUR/kWh
+  [checkpoint] already complete under this configuration; skipping
+
+======================================================================
+=== Dataset: Ausgrid 148 ===
+======================================================================
+Native granularity (30 min): 52608 steps
+Training: 35040 steps (730 days)
+Simulation: 17520 steps (365 days)
+Tariff: SI | import rate 0.0002..0.2806 EUR/kWh
+  [checkpoint] already complete under this configuration; skipping
+
+======================================================================
+=== Dataset: Ausgrid 148 ===
+======================================================================
+Native granularity (30 min): 52608 steps
+Training: 35040 steps (730 days)
+Simulation: 17520 steps (365 days)
+Tariff: AU | import rate -0.0106..0.6508 EUR/kWh
+  [checkpoint] already complete under this configuration; skipping
+
+======================================================================
+=== Dataset: Ausgrid 148 ===
+======================================================================
+Native granularity (30 min): 52608 steps
+Training: 35040 steps (730 days)
+Simulation: 17520 steps (365 days)
+Tariff: SI | import rate 0.0002..0.2806 EUR/kWh
+  [checkpoint] already complete under this configuration; skipping
+
+======================================================================
+=== Dataset: Ausgrid 148 ===
+======================================================================
+Native granularity (30 min): 52608 steps
+Training: 35040 steps (730 days)
+Simulation: 17520 steps (365 days)
+Tariff: AU | import rate -0.0106..0.6508 EUR/kWh
+  [Forecaster] hbd: 17568 rows, fit on 35040 training steps
+  [Forecaster] cached 17568 rows -> Ausgrid 148__82c8fb88dd79.csv.gz
+
+--- Reactive mode (consumption + generation via Prophet) ---
+Simulated steps: 17520 | Reopt.: 17520
+
+--- Oracle mode (all real data) + rule-based controllers (AU) ---
+  [oracle] cache hit Ausgrid 148__a9f0fe3816e4 (17520 steps, 8 rules, whole-period solve included) -- nothing re-solved
+  no_battery                       1176.20 EUR   EFC    0.0   peak  6.57 kW
+  self_consumption                 1013.49 EUR   EFC   89.2   peak  6.57 kW
+  fixed_schedule                    945.91 EUR   EFC  123.8   peak  6.36 kW
+  delayed_pv_charge                1013.50 EUR   EFC   89.2   peak  6.57 kW
+  price_threshold                   894.87 EUR   EFC  236.6   peak  6.25 kW
+  price_rank_daily                  889.48 EUR   EFC  239.1   peak  6.25 kW
+  tariff_arbitrage                  962.17 EUR   EFC  225.2   peak  6.25 kW
+  price_oracle                      891.31 EUR   EFC  236.6   peak  6.25 kW
+vs no battery 1176.20 vs MPC oracle 905.48 vs whole-period optimum 906.07 EUR
+Forecast day-ahead nMAE: gen 0.402 | con 0.516 | skill vs seasonal-naive: gen +0.067 con +0.106
+                                                   No battery Perfect foresight Forecast (Prophet)
+KPI                                                                                               
+Total cost                                            1176.20  904.68 (-23.1 %)  1013.19 (-13.9 %)
+Regret vs perfect foresight (% of no-battery cost)          —     0.00 (+0.0 %)    108.51 (+9.2 %)
+Energy bought (kWh)                                    6218.9  5396.5 (-13.2 %)    6073.9 (-2.3 %)
+Energy sold (kWh)                                       988.9    25.1 (-97.5 %)    705.8 (-28.6 %)
+
+Results saved to: /Users/summerscholl/Documents/ERK-2026/Yoann/results_local/AU_H24_hbd/Ausgrid 148/
+
+======================================================================
+=== Dataset: Ausgrid 148 ===
+======================================================================
+Native granularity (30 min): 52608 steps
+Training: 35040 steps (730 days)
+Simulation: 17520 steps (365 days)
+Tariff: SI | import rate 0.0002..0.2806 EUR/kWh
+  [Forecaster] cache hit Ausgrid 148__82c8fb88dd79.csv.gz (17568 rows) -- Prophet not fitted
+
+--- Reactive mode (consumption + generation via Prophet) ---
+Simulated steps: 17520 | Reopt.: 17520
+
+--- Oracle mode (all real data) + rule-based controllers (SI) ---
+  [oracle] cache hit Ausgrid 148__053047476861 (17520 steps, 10 rules, whole-period solve included) -- nothing re-solved
+  no_battery                        513.80 EUR   EFC    0.0   peak  6.57 kW
+  self_consumption                  462.60 EUR   EFC   89.2   peak  6.57 kW
+  fixed_schedule                    480.27 EUR   EFC   91.0   peak  6.36 kW
+  delayed_pv_charge                 462.61 EUR   EFC   89.2   peak  6.57 kW
+  price_threshold                   463.52 EUR   EFC  113.7   peak  6.57 kW
+  price_rank_daily                  464.13 EUR   EFC  110.2   peak  6.57 kW
+  peak_shaving                      493.11 EUR   EFC   28.7   peak  5.27 kW
+  self_consumption_peak_shaving     455.46 EUR   EFC   91.1   peak  5.07 kW
+  tariff_arbitrage                  482.14 EUR   EFC  213.1   peak  6.36 kW
+  price_oracle                      461.82 EUR   EFC  111.3   peak  6.57 kW
+vs no battery 513.80 vs MPC oracle 458.18 vs whole-period optimum 455.71 EUR
+Forecast day-ahead nMAE: gen 0.402 | con 0.516 | skill vs seasonal-naive: gen +0.067 con +0.106
+                                                   No battery Perfect foresight Forecast (Prophet)
+KPI                                                                                               
+Total cost                                             490.13  432.50 (-11.8 %)    471.12 (-3.9 %)
+Regret vs perfect foresight (% of no-battery cost)          —     0.00 (+0.0 %)     38.62 (+7.9 %)
+Energy bought (kWh)                                    6218.9  5361.4 (-13.8 %)    5985.6 (-3.8 %)
+Energy sold (kWh)                                       988.9    37.6 (-96.2 %)    674.8 (-31.8 %)
+
+Results saved to: /Users/summerscholl/Documents/ERK-2026/Yoann/results_local/SI_H24_hbd/Ausgrid 148/
+
+======================================================================
+=== Dataset: Ausgrid 148 ===
+======================================================================
+Native granularity (30 min): 52608 steps
+Training: 35040 steps (730 days)
+Simulation: 17520 steps (365 days)
+Tariff: AU | import rate -0.0106..0.6508 EUR/kWh
+  [Forecaster] hbd_baseline: 17568 rows, fit on 35040 training steps
+  [Forecaster] cached 17568 rows -> Ausgrid 148__762c7414f8f0.csv.gz
+
+--- Reactive mode (consumption + generation via Prophet) ---
+Simulated steps: 17520 | Reopt.: 17520
+
+--- Oracle mode (all real data) + rule-based controllers (AU) ---
+  [oracle] cache hit Ausgrid 148__a9f0fe3816e4 (17520 steps, 8 rules, whole-period solve included) -- nothing re-solved
+  no_battery                       1176.20 EUR   EFC    0.0   peak  6.57 kW
+  self_consumption                 1013.49 EUR   EFC   89.2   peak  6.57 kW
+  fixed_schedule                    945.91 EUR   EFC  123.8   peak  6.36 kW
+  delayed_pv_charge                1013.50 EUR   EFC   89.2   peak  6.57 kW
+  price_threshold                   894.87 EUR   EFC  236.6   peak  6.25 kW
+  price_rank_daily                  889.48 EUR   EFC  239.1   peak  6.25 kW
+  tariff_arbitrage                  962.17 EUR   EFC  225.2   peak  6.25 kW
+  price_oracle                      891.31 EUR   EFC  236.6   peak  6.25 kW
+vs no battery 1176.20 vs MPC oracle 905.48 vs whole-period optimum 906.07 EUR
+Forecast day-ahead nMAE: gen 0.462 | con 0.570 | skill vs seasonal-naive: gen -0.073 con +0.013
+                                                   No battery Perfect foresight Forecast (Prophet)
+KPI                                                                                               
+Total cost                                            1176.20  904.68 (-23.1 %)  1015.11 (-13.7 %)
+Regret vs perfect foresight (% of no-battery cost)          —     0.00 (+0.0 %)    110.44 (+9.4 %)
+Energy bought (kWh)                                    6218.9  5396.5 (-13.2 %)    6054.1 (-2.7 %)
+Energy sold (kWh)                                       988.9    25.1 (-97.5 %)    694.7 (-29.8 %)
+
+Results saved to: /Users/summerscholl/Documents/ERK-2026/Yoann/results_local/AU_H24_hbd_baseline/Ausgrid 148/
+
+======================================================================
+=== Dataset: Ausgrid 148 ===
+======================================================================
+Native granularity (30 min): 52608 steps
+Training: 35040 steps (730 days)
+Simulation: 17520 steps (365 days)
+Tariff: SI | import rate 0.0002..0.2806 EUR/kWh
+  [Forecaster] cache hit Ausgrid 148__762c7414f8f0.csv.gz (17568 rows) -- Prophet not fitted
+
+--- Reactive mode (consumption + generation via Prophet) ---
+Simulated steps: 17520 | Reopt.: 17520
+
+--- Oracle mode (all real data) + rule-based controllers (SI) ---
+  [oracle] cache hit Ausgrid 148__053047476861 (17520 steps, 10 rules, whole-period solve included) -- nothing re-solved
+  no_battery                        513.80 EUR   EFC    0.0   peak  6.57 kW
+  self_consumption                  462.60 EUR   EFC   89.2   peak  6.57 kW
+  fixed_schedule                    480.27 EUR   EFC   91.0   peak  6.36 kW
+  delayed_pv_charge                 462.61 EUR   EFC   89.2   peak  6.57 kW
+  price_threshold                   463.52 EUR   EFC  113.7   peak  6.57 kW
+  price_rank_daily                  464.13 EUR   EFC  110.2   peak  6.57 kW
+  peak_shaving                      493.11 EUR   EFC   28.7   peak  5.27 kW
+  self_consumption_peak_shaving     455.46 EUR   EFC   91.1   peak  5.07 kW
+  tariff_arbitrage                  482.14 EUR   EFC  213.1   peak  6.36 kW
+  price_oracle                      461.82 EUR   EFC  111.3   peak  6.57 kW
+vs no battery 513.80 vs MPC oracle 458.18 vs whole-period optimum 455.71 EUR
+Forecast day-ahead nMAE: gen 0.462 | con 0.570 | skill vs seasonal-naive: gen -0.073 con +0.013
+                                                   No battery Perfect foresight Forecast (Prophet)
+KPI                                                                                               
+Total cost                                             490.13  432.50 (-11.8 %)    469.73 (-4.2 %)
+Regret vs perfect foresight (% of no-battery cost)          —     0.00 (+0.0 %)     37.23 (+7.6 %)
+Energy bought (kWh)                                    6218.9  5361.4 (-13.8 %)    5964.3 (-4.1 %)
+Energy sold (kWh)                                       988.9    37.6 (-96.2 %)    653.0 (-34.0 %)
+
+Results saved to: /Users/summerscholl/Documents/ERK-2026/Yoann/results_local/SI_H24_hbd_baseline/Ausgrid 148/
+
+======================================================================
+=== Dataset: Ausgrid 148 ===
+======================================================================
+Native granularity (30 min): 52608 steps
+Training: 35040 steps (730 days)
+Simulation: 17520 steps (365 days)
+Tariff: AU | import rate -0.0106..0.6508 EUR/kWh
+  [Forecaster] hbd_median14: 17568 rows, fit on 35040 training steps
+  [Forecaster] cached 17568 rows -> Ausgrid 148__5630ec0a0dcf.csv.gz
+
+--- Reactive mode (consumption + generation via Prophet) ---
+Simulated steps: 17520 | Reopt.: 17520
+
+--- Oracle mode (all real data) + rule-based controllers (AU) ---
+  [oracle] cache hit Ausgrid 148__a9f0fe3816e4 (17520 steps, 8 rules, whole-period solve included) -- nothing re-solved
+  no_battery                       1176.20 EUR   EFC    0.0   peak  6.57 kW
+  self_consumption                 1013.49 EUR   EFC   89.2   peak  6.57 kW
+  fixed_schedule                    945.91 EUR   EFC  123.8   peak  6.36 kW
+  delayed_pv_charge                1013.50 EUR   EFC   89.2   peak  6.57 kW
+  price_threshold                   894.87 EUR   EFC  236.6   peak  6.25 kW
+  price_rank_daily                  889.48 EUR   EFC  239.1   peak  6.25 kW
+  tariff_arbitrage                  962.17 EUR   EFC  225.2   peak  6.25 kW
+  price_oracle                      891.31 EUR   EFC  236.6   peak  6.25 kW
+vs no battery 1176.20 vs MPC oracle 905.48 vs whole-period optimum 906.07 EUR
+Forecast day-ahead nMAE: gen 0.374 | con 0.458 | skill vs seasonal-naive: gen +0.130 con +0.207
+                                                   No battery Perfect foresight Forecast (Prophet)
+KPI                                                                                               
+Total cost                                            1176.20  904.68 (-23.1 %)  1008.22 (-14.3 %)
+Regret vs perfect foresight (% of no-battery cost)          —     0.00 (+0.0 %)    103.54 (+8.8 %)
+Energy bought (kWh)                                    6218.9  5396.5 (-13.2 %)    5968.4 (-4.0 %)
+Energy sold (kWh)                                       988.9    25.1 (-97.5 %)    594.4 (-39.9 %)
+
+Results saved to: /Users/summerscholl/Documents/ERK-2026/Yoann/results_local/AU_H24_hbd_median14/Ausgrid 148/
+
+======================================================================
+=== Dataset: Ausgrid 148 ===
+======================================================================
+Native granularity (30 min): 52608 steps
+Training: 35040 steps (730 days)
+Simulation: 17520 steps (365 days)
+Tariff: SI | import rate 0.0002..0.2806 EUR/kWh
+  [Forecaster] cache hit Ausgrid 148__5630ec0a0dcf.csv.gz (17568 rows) -- Prophet not fitted
+
+--- Reactive mode (consumption + generation via Prophet) ---
+Simulated steps: 17520 | Reopt.: 17520
+
+--- Oracle mode (all real data) + rule-based controllers (SI) ---
+  [oracle] cache hit Ausgrid 148__053047476861 (17520 steps, 10 rules, whole-period solve included) -- nothing re-solved
+  no_battery                        513.80 EUR   EFC    0.0   peak  6.57 kW
+  self_consumption                  462.60 EUR   EFC   89.2   peak  6.57 kW
+  fixed_schedule                    480.27 EUR   EFC   91.0   peak  6.36 kW
+  delayed_pv_charge                 462.61 EUR   EFC   89.2   peak  6.57 kW
+  price_threshold                   463.52 EUR   EFC  113.7   peak  6.57 kW
+  price_rank_daily                  464.13 EUR   EFC  110.2   peak  6.57 kW
+  peak_shaving                      493.11 EUR   EFC   28.7   peak  5.27 kW
+  self_consumption_peak_shaving     455.46 EUR   EFC   91.1   peak  5.07 kW
+  tariff_arbitrage                  482.14 EUR   EFC  213.1   peak  6.36 kW
+  price_oracle                      461.82 EUR   EFC  111.3   peak  6.57 kW
+vs no battery 513.80 vs MPC oracle 458.18 vs whole-period optimum 455.71 EUR
+Forecast day-ahead nMAE: gen 0.374 | con 0.458 | skill vs seasonal-naive: gen +0.130 con +0.207
+                                                   No battery Perfect foresight Forecast (Prophet)
+KPI                                                                                               
+Total cost                                             490.13  432.50 (-11.8 %)    466.22 (-4.9 %)
+Regret vs perfect foresight (% of no-battery cost)          —     0.00 (+0.0 %)     33.72 (+6.9 %)
+Energy bought (kWh)                                    6218.9  5361.4 (-13.8 %)    5898.6 (-5.2 %)
+Energy sold (kWh)                                       988.9    37.6 (-96.2 %)    570.2 (-42.3 %)
+
+Results saved to: /Users/summerscholl/Documents/ERK-2026/Yoann/results_local/SI_H24_hbd_median14/Ausgrid 148/
+
+======================================================================
+=== Dataset: Ausgrid 148 ===
+======================================================================
+Native granularity (30 min): 52608 steps
+Training: 35040 steps (730 days)
+Simulation: 17520 steps (365 days)
+Tariff: AU | import rate -0.0106..0.6508 EUR/kWh
+  [Forecaster] hbd_median14: 17568 rows, fit on 35040 training steps
+  [Forecaster] truth: 17568 rows, nothing fitted
+  [Forecaster] hbd_median14_pvtruth: consumption from hbd_median14, generation from truth
+  [Forecaster] cached 17568 rows -> Ausgrid 148__d034d81fc513.csv.gz
+
+--- Reactive mode (consumption + generation via Prophet) ---
+Simulated steps: 17520 | Reopt.: 17520
+
+--- Oracle mode (all real data) + rule-based controllers (AU) ---
+  [oracle] cache hit Ausgrid 148__a9f0fe3816e4 (17520 steps, 8 rules, whole-period solve included) -- nothing re-solved
+  no_battery                       1176.20 EUR   EFC    0.0   peak  6.57 kW
+  self_consumption                 1013.49 EUR   EFC   89.2   peak  6.57 kW
+  fixed_schedule                    945.91 EUR   EFC  123.8   peak  6.36 kW
+  delayed_pv_charge                1013.50 EUR   EFC   89.2   peak  6.57 kW
+  price_threshold                   894.87 EUR   EFC  236.6   peak  6.25 kW
+  price_rank_daily                  889.48 EUR   EFC  239.1   peak  6.25 kW
+  tariff_arbitrage                  962.17 EUR   EFC  225.2   peak  6.25 kW
+  price_oracle                      891.31 EUR   EFC  236.6   peak  6.25 kW
+vs no battery 1176.20 vs MPC oracle 905.48 vs whole-period optimum 906.07 EUR
+Forecast day-ahead nMAE: gen 0.000 | con 0.458 | skill vs seasonal-naive: gen +1.000 con +0.207
+                                                   No battery Perfect foresight Forecast (Prophet)
+KPI                                                                                               
+Total cost                                            1176.20  904.68 (-23.1 %)   992.68 (-15.6 %)
+Regret vs perfect foresight (% of no-battery cost)          —     0.00 (+0.0 %)     88.00 (+7.5 %)
+Energy bought (kWh)                                    6218.9  5396.5 (-13.2 %)    5843.3 (-6.0 %)
+Energy sold (kWh)                                       988.9    25.1 (-97.5 %)    470.9 (-52.4 %)
+
+Results saved to: /Users/summerscholl/Documents/ERK-2026/Yoann/results_local/AU_H24_hbd_median14_pvtruth/Ausgrid 148/
+
+======================================================================
+=== Dataset: Ausgrid 148 ===
+======================================================================
+Native granularity (30 min): 52608 steps
+Training: 35040 steps (730 days)
+Simulation: 17520 steps (365 days)
+Tariff: SI | import rate 0.0002..0.2806 EUR/kWh
+  [Forecaster] cache hit Ausgrid 148__d034d81fc513.csv.gz (17568 rows) -- Prophet not fitted
+
+--- Reactive mode (consumption + generation via Prophet) ---
+Simulated steps: 17520 | Reopt.: 17520
+
+--- Oracle mode (all real data) + rule-based controllers (SI) ---
+  [oracle] cache hit Ausgrid 148__053047476861 (17520 steps, 10 rules, whole-period solve included) -- nothing re-solved
+  no_battery                        513.80 EUR   EFC    0.0   peak  6.57 kW
+  self_consumption                  462.60 EUR   EFC   89.2   peak  6.57 kW
+  fixed_schedule                    480.27 EUR   EFC   91.0   peak  6.36 kW
+  delayed_pv_charge                 462.61 EUR   EFC   89.2   peak  6.57 kW
+  price_threshold                   463.52 EUR   EFC  113.7   peak  6.57 kW
+  price_rank_daily                  464.13 EUR   EFC  110.2   peak  6.57 kW
+  peak_shaving                      493.11 EUR   EFC   28.7   peak  5.27 kW
+  self_consumption_peak_shaving     455.46 EUR   EFC   91.1   peak  5.07 kW
+  tariff_arbitrage                  482.14 EUR   EFC  213.1   peak  6.36 kW
+  price_oracle                      461.82 EUR   EFC  111.3   peak  6.57 kW
+vs no battery 513.80 vs MPC oracle 458.18 vs whole-period optimum 455.71 EUR
+Forecast day-ahead nMAE: gen 0.000 | con 0.458 | skill vs seasonal-naive: gen +1.000 con +0.207
+                                                   No battery Perfect foresight Forecast (Prophet)
+KPI                                                                                               
+Total cost                                             490.13  432.50 (-11.8 %)    457.45 (-6.7 %)
+Regret vs perfect foresight (% of no-battery cost)          —     0.00 (+0.0 %)     24.95 (+5.1 %)
+Energy bought (kWh)                                    6218.9  5361.4 (-13.8 %)    5751.8 (-7.5 %)
+Energy sold (kWh)                                       988.9    37.6 (-96.2 %)    426.5 (-56.9 %)
+
+Results saved to: /Users/summerscholl/Documents/ERK-2026/Yoann/results_local/SI_H24_hbd_median14_pvtruth/Ausgrid 148/

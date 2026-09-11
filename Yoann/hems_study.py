@@ -578,6 +578,11 @@ HYBRID_KINDS = {
     "median14_pvtruth": ("median14", "truth"),
     "pvtruth_tuned":    ("prophet_tuned", "truth"),
     "hbd_pvtruth":      ("hbd", "truth"),
+    # The same question asked of the method that actually wins the error axis.
+    # Paired with the plain `hbd_median14` arm, the difference is what a perfect
+    # roof forecast is still worth once the load channel is as good as this
+    # study can make it -- the upper bound on what is left in the PV channel.
+    "hbd_median14_pvtruth": ("hbd_median14", "truth"),
 }
 
 # Every kind the study can run, in the order a figure should read them, with the
@@ -603,6 +608,7 @@ FORECAST_KIND_LABELS = {
     "hbd":         "both: season + AR",
     "hbd_baseline": "both: season only",
     "hbd_median14": "both: median of 14 d + AR",
+    "hbd_median14_pvtruth": "median of 14 d + AR, perfect PV",
     "hbd_pvtruth": "season + AR + perfect PV",
     "truth":       "both: perfect",
 }
@@ -4348,10 +4354,6 @@ STUDY_ARMS = [
      "forecaster_kind": "hbd_baseline"},
     {"name": "SI_H24_hbd_baseline", "tariff": "SI", "control_horizon": 48,
      "forecaster_kind": "hbd_baseline"},
-    # And the channel split, so a win can be attributed to the load channel or
-    # the roof rather than to "the forecast".
-    {"name": "AU_H24_hbd_pvtruth", "tariff": "AU", "control_horizon": 48,
-     "forecaster_kind": "hbd_pvtruth"},
     # The paper's SECOND stage on this study's own first stage. On the error
     # axis this is the arm that actually beats `median14` -- the faithful port
     # does not -- so it is the one the economic comparison most needs.
@@ -4359,6 +4361,13 @@ STUDY_ARMS = [
      "forecaster_kind": "hbd_median14"},
     {"name": "SI_H24_hbd_median14", "tariff": "SI", "control_horizon": 48,
      "forecaster_kind": "hbd_median14"},
+    # Both tariffs, because the regret figure only shows a kind that has an arm
+    # on every tariff in the panel -- an AU-only arm is computed and then
+    # silently dropped from the comparison it was added for.
+    {"name": "AU_H24_hbd_median14_pvtruth", "tariff": "AU", "control_horizon": 48,
+     "forecaster_kind": "hbd_median14_pvtruth"},
+    {"name": "SI_H24_hbd_median14_pvtruth", "tariff": "SI", "control_horizon": 48,
+     "forecaster_kind": "hbd_median14_pvtruth"},
 ]
 
 
