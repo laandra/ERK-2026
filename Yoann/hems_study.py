@@ -25,6 +25,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 import traceback
 import warnings
 from zoneinfo import ZoneInfo
@@ -3674,6 +3675,17 @@ def run_pipeline_for_file(file_path: str,
     out_dir = os.path.join(output_root, dataset_name)
     os.makedirs(out_dir, exist_ok=True)
 
+    # What this arm COSTS TO RUN, wall clock, written into the checkpoint beside
+    # what it earns. An arm is a method, and a method a household could deploy
+    # has a compute budget as well as a bill -- but until this was stored the
+    # only record of it was the mtime of the checkpoint file, so `arm_runtimes`
+    # had to reconstruct it from the gaps between them. Started here rather than
+    # below the checkpoint gate so it covers the whole run, which is what a
+    # mtime difference covers and what makes the two comparable. A run served
+    # from the checkpoint stores nothing: the arm was not executed, and a
+    # skipped run recorded as 0.2 s would read as a method that costs nothing.
+    _t_start = time.perf_counter()
+
     print(f"\n{'='*70}\n=== Dataset: {dataset_name} ===\n{'='*70}")
 
     # Resume: a finished dataset is skipped only if it was finished under THIS
@@ -4073,6 +4085,11 @@ def run_pipeline_for_file(file_path: str,
 
     print(f"\nResults saved to: {out_dir}/")
 
+    # Everything above, including the forecast fit, the ~35k LP solves and the
+    # CSVs just written. Recorded under contention when the sweep runs in
+    # parallel -- `arm_runtimes` says so, because a per-arm time measured with
+    # ten workers on the machine is not the time the arm takes alone.
+    kpi_raw = {**kpi_raw, "runtime_s": time.perf_counter() - _t_start}
     write_checkpoint(out_dir, cfg, kpi_raw)
 
     return {"dataset": dataset_name, **kpi_raw}
@@ -4708,6 +4725,93 @@ def collect_results(output_root=None, arms=None) -> pd.DataFrame:
     order = {a: i for i, a in enumerate(ARM_ORDER)}
     df["_ord"] = df["arm"].map(order).fillna(len(order))
     return df.sort_values(["_ord", "dataset"]).drop(columns="_ord").reset_index(drop=True)
+
+
+def arm_runtimes(output_root=None, arms=None, cap_s: float = 1800.0) -> pd.DataFrame:
+    """What each arm cost to RUN: seconds per household, most expensive first.
+
+    Two sources, and the frame says which one each row came from:
+
+      measured        `runtime_s`, written into the checkpoint by the run that
+                      produced it. Exact.
+      reconstructed   the gap between consecutive checkpoint mtimes within one
+                      household. `_household_all_arms` gives one worker every
+                      arm of one household IN ARM ORDER, so an arm's checkpoint
+                      is written when it finishes and the previous arm's when it
+                      started -- the difference is that arm's wall time. This is
+                      what recovers the sweep that ran before `runtime_s`
+                      existed; it is an estimate, and two gaps are not
+                      recoverable at all:
+
+                        - the FIRST arm of each household has no predecessor to
+                          subtract, and
+                        - an arm whose predecessor was served from a checkpoint
+                          written in an earlier session measures the gap between
+                          sessions, not the work. Those are dropped by `cap_s`
+                          rather than reported as an arm that took three days.
+
+                      An arm with no recoverable gap in any household comes back
+                      with n = 0 and NaN times, which is the honest answer.
+
+    The times are WALL CLOCK UNDER CONTENTION -- the sweep runs `n_jobs`
+    households at once, each pinned to one thread -- so they rank arms against
+    each other on the machine that ran them; they are not the time an arm would
+    take alone on an idle box.
+
+    A caching effect is real and visible here, not noise to be averaged out: the
+    first arm to need a forecaster or a forecast-blind oracle pays for it and
+    every later arm reading the same cache does not. That is why `SI_H24` and
+    the first `hbd` arm of each pair stand so far above their twins.
+    """
+    output_root = RESULTS_DIR if output_root is None else output_root
+    rows = []
+    for path in sorted(glob.glob(os.path.join(output_root, "*", "*", "checkpoint.json"))):
+        arm = os.path.basename(os.path.dirname(os.path.dirname(path)))
+        if arms is not None and arm not in arms:
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                saved = json.load(fh)
+        except (ValueError, OSError):
+            continue
+        rows.append({"arm": arm,
+                     "dataset": os.path.basename(os.path.dirname(path)),
+                     "written_at": os.path.getmtime(path),
+                     "recorded_s": saved.get("metrics", {}).get("runtime_s", np.nan)})
+    if not rows:
+        return pd.DataFrame()
+    runs = pd.DataFrame(rows).sort_values(["dataset", "written_at"])
+
+    # The gap to the previous checkpoint IN THE SAME HOUSEHOLD. Across
+    # households it would be the gap between two unrelated workers.
+    gap = runs.groupby("dataset")["written_at"].diff()
+    runs["gap_s"] = gap.where((gap > 0) & (gap < cap_s))
+    runs["runtime_s"] = runs["recorded_s"].fillna(runs["gap_s"])
+    runs["source"] = np.where(runs["recorded_s"].notna(), "measured", "reconstructed")
+
+    out = (runs.groupby("arm")
+           .agg(households=("runtime_s", "count"),
+                median_s=("runtime_s", "median"),
+                mean_s=("runtime_s", "mean"),
+                min_s=("runtime_s", "min"),
+                max_s=("runtime_s", "max"),
+                # NaN, not 0.0, when nothing was recovered: an arm with no
+                # time on record did not take no time.
+                total_min=("runtime_s", lambda s: s.sum() / 60.0 if s.notna().any() else np.nan))
+           .reset_index())
+    src = (runs[runs["runtime_s"].notna()].groupby("arm")["source"]
+           .agg(lambda s: "measured" if (s == "measured").all()
+                else "reconstructed" if (s == "reconstructed").all() else "mixed"))
+    out["source"] = out["arm"].map(src).fillna("unrecoverable")
+    out["tariff"] = out["arm"].map(arm_tariff)
+    out["forecaster"] = out["arm"].map(
+        {a["name"]: a.get("forecaster_kind", "prophet") for a in STUDY_ARMS})
+    # Most expensive on top; an arm with no time at all goes last rather than
+    # sorting as if it were instant.
+    return (out.sort_values("median_s", ascending=False, na_position="last")
+            .reset_index(drop=True)[["arm", "tariff", "forecaster", "households",
+                                     "median_s", "mean_s", "min_s", "max_s",
+                                     "total_min", "source"]])
 
 
 def controller_columns(df: pd.DataFrame) -> list:
