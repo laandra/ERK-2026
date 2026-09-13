@@ -396,8 +396,9 @@ def test_rules_read_the_price_they_pay(kwh):
     `price_rank_daily`, `tariff_arbitrage` and `price_oracle` ranked their
     intervals on a Slovenian dynamic list while paying Ausgrid EA025, and could
     not see the 0.0270 / 0.0720 / 0.2360 network steps that are the whole of
-    that tariff's signal. Measured on 90 days: the two series correlate 0.44,
-    and the rules were worth ~9x more once shown the right one.
+    that tariff's signal. Measured on the fixture window below: the two series
+    correlate 0.66 -- the number this test prints, and the one the notebook's
+    caveats quote -- and the rules were worth ~9x more once shown the right one.
     """
     for tariff in ("AU", "SI"):
         env = make_env(kwh)

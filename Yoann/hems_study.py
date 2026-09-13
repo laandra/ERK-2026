@@ -18,6 +18,7 @@ Entry points:
     hems_study.collect_results()    what the sweep wrote, as one long frame
 """
 
+import collections
 import contextlib
 import datetime
 import glob
@@ -600,8 +601,18 @@ FORECAST_KIND_LABELS = {
     "median14":    "both: median of 14 d",
     "pvnaive":     "PV: yesterday",
     "pvmedian14":  "PV: median of 14 d",
-    "prophet":     "PV: Prophet",
-    "prophet_tuned":    "Prophet, tuned",
+    # "both", NOT "PV". The `PV:` prefix in this dict means "the GENERATION
+    # channel is X, consumption is still Prophet" -- that is what `pvnaive`,
+    # `pvmedian14` and `pvtruth` are, and they are `HYBRID_KINDS` entries with
+    # ("prophet", other) for exactly that reason. `prophet` is a PROPHET_KINDS
+    # entry: `channel_table` is called once with it and `build_forecast_table_refit`
+    # fills BOTH yhat_con and yhat_gen from Prophet. It is also the default kind,
+    # i.e. `AU_H24`/`SI_H24`, the reference arms everything else is measured
+    # against -- so labelling the study's own subject "PV: Prophet" made it read
+    # as one of the PV-channel variants and the baseline appeared to be missing
+    # from the regret figure entirely.
+    "prophet":     "both: Prophet",
+    "prophet_tuned":    "both: Prophet, tuned",
     "pvtruth":     "PV: perfect",
     "persist_pvtruth":  "yesterday + perfect PV",
     "median14_pvtruth": "median of 14 d + perfect PV",
@@ -3289,6 +3300,7 @@ def forecast_benchmark(data_dir: str,
         )
 
     rows = []
+    n_anchors = 0
     for ident in dataset_ids:
         path = os.path.join(data_dir, filename_template.format(id=ident))
         if not os.path.isfile(path):
@@ -3302,6 +3314,7 @@ def forecast_benchmark(data_dir: str,
         # Anchors over df_ctrl and scoring on df_sim, exactly as the pipeline
         # does: the lookahead tail is forecast but never scored.
         anchors = list(ctrl.index[::H])
+        n_anchors = len(anchors)
         # History ahead of the simulation, so day 1 of a 14-day method is built
         # from real data rather than from itself.
         frame = pd.concat([train, ctrl])
@@ -3348,6 +3361,19 @@ def forecast_benchmark(data_dir: str,
     out = pd.DataFrame(rows)
     if out.empty:
         raise FileNotFoundError(f"no household files read from {data_dir}")
+    # WHAT WINDOW THIS WAS SCORED OVER, carried in the file. Unlike a run
+    # checkpoint, this CSV had no config beside it, so a notebook that loaded it
+    # instead of recomputing described it with whatever `N_SIM` happened to be
+    # set to in a cell above -- and would have gone on printing "365 simulated
+    # days" over a table scored on 90. The caller can now check rather than
+    # assume, and `n_anchors` is stored because it is the number of forecast
+    # DAYS (n_sim plus the one anchor whose horizon runs past the scored
+    # window), which is not the same as `n_sim` and was reported as if it were.
+    for col, val in (("n_sim", n_sim), ("n_train", n_train),
+                     ("steps_per_day", H), ("start_ts", start_ts),
+                     ("n_anchors", n_anchors),
+                     ("include_prophet", bool(include_prophet))):
+        out[col] = val
     # Ordered so a printed pivot reads in the roster's order, not alphabetically.
     order = [k for k in FORECAST_KIND_LABELS if k in set(out["kind"])]
     out["kind"] = pd.Categorical(out["kind"], categories=order, ordered=True)
@@ -3359,6 +3385,45 @@ def forecast_benchmark(data_dir: str,
     out.to_csv(out_path, index=False)
     print(f"[benchmark] {len(out)} rows -> {out_path}")
     return out
+
+
+PROVENANCE_COLUMNS = ("n_sim", "n_train", "steps_per_day", "start_ts",
+                      "n_anchors", "include_prophet", "refit_every_days")
+
+
+def provenance(df: pd.DataFrame, **expected) -> str:
+    """What window a cached scoring table was produced over, as one line.
+
+    `forecast_benchmark` and `tune_prophet` write a CSV that a notebook may
+    LOAD instead of recomputing. A run checkpoint carries the config it was
+    produced under and `collect_results` drops a stale one; these two tables had
+    no config at all, so the cell that loaded them described the numbers with
+    whatever `N_SIM` was set to in a cell above and could not have noticed a
+    disagreement. Pass the values the caller believes hold and any that differ
+    are named in the returned string rather than left to be assumed.
+
+    A file written before this existed carries no provenance columns and says
+    so, which is the honest answer for it.
+    """
+    have = {c: df[c].dropna().unique() for c in PROVENANCE_COLUMNS if c in df}
+    if not have:
+        return ("no provenance in this file -- it predates the columns, so what "
+                "window it was scored over is not recoverable from it; delete it "
+                "and rescore to find out")
+    parts, mismatch = [], []
+    for col, vals in have.items():
+        # More than one value in a column means rows from two different runs
+        # were concatenated into one file, which no reader would suspect.
+        shown = vals[0] if len(vals) == 1 else f"MIXED{sorted(vals)}"
+        parts.append(f"{col}={shown}")
+        if col in expected and len(vals) == 1 and vals[0] != expected[col]:
+            mismatch.append(f"{col}: file says {vals[0]}, caller says "
+                            f"{expected[col]}")
+    line = ", ".join(parts)
+    if mismatch:
+        line += "\n  ! DISAGREES WITH THIS NOTEBOOK -- " + "; ".join(mismatch)
+        line += "\n  ! delete the CSV and rescore, or trust the file over the cell"
+    return line
 
 
 def benchmark_ranking(bench: pd.DataFrame) -> pd.DataFrame:
@@ -3488,6 +3553,16 @@ def tune_prophet(data_dir: str,
         rows = [r for chunk in out for r in chunk]
 
     df = pd.DataFrame(rows)
+    # The window this screen was run over, carried in the file for the same
+    # reason as in `forecast_benchmark`: a notebook that loads the CSV rather
+    # than recomputing it has no other way to know, and the screen deliberately
+    # uses a SHORTER window and FEWER households than the arms do -- so a
+    # reader told "365 days, 30 households" by a cell above would read this
+    # table against the wrong sample.
+    for col, val in (("n_sim", n_sim), ("n_train", n_train),
+                     ("steps_per_day", H), ("start_ts", start_ts),
+                     ("refit_every_days", refit_every_days)):
+        df[col] = val
     order = [c for c in grid if c in set(df["config"])]
     df["config"] = pd.Categorical(df["config"], categories=order, ordered=True)
     df = df.sort_values(["dataset", "config", "channel"]).reset_index(drop=True)
@@ -3806,7 +3881,16 @@ def run_pipeline_for_file(file_path: str,
                    if f"cost_{pol.name}" not in cached]
         if not missing:
             print("  [checkpoint] already complete under this configuration; skipping")
-            return {"dataset": dataset_name, **cached}
+            # `run_status`: this arm was READ, not executed. Without it the
+            # sweep cannot tell the two apart and reports a directory of cache
+            # hits as work -- "930/930 runs succeeded in 1.2 min on 10 workers",
+            # fifteen cells above a runtime table that says the same sweep cost
+            # 22.5 h of household-arm time. Both numbers were right; nothing
+            # said they were measuring different things.
+            #
+            # It is NOT written into the checkpoint -- it is a property of one
+            # invocation, not of the result -- so it cannot invalidate one.
+            return {"dataset": dataset_name, **cached, "run_status": "cached"}
         # A checkpoint written before one of these rules existed. They need no
         # forecast and no LP, so they are recomputed in seconds and merged rather
         # than discarding MILP results that are still perfectly valid. The tag
@@ -3819,7 +3903,8 @@ def run_pipeline_for_file(file_path: str,
                              soc_init_kwh=soc_init - battery_cap * soc_min_pct)
         cached = {**cached, **extra}
         write_checkpoint(out_dir, cfg, cached)
-        return {"dataset": dataset_name, **cached}
+        # The rules were recomputed; the MILP -- the expensive part -- was not.
+        return {"dataset": dataset_name, **cached, "run_status": "backfilled"}
 
     forecaster = EnergyForecaster(forecaster_params_con, forecaster_params_gen)
     fc_table, fc_cache_path = load_or_build_forecasts(
@@ -4092,7 +4177,7 @@ def run_pipeline_for_file(file_path: str,
     kpi_raw = {**kpi_raw, "runtime_s": time.perf_counter() - _t_start}
     write_checkpoint(out_dir, cfg, kpi_raw)
 
-    return {"dataset": dataset_name, **kpi_raw}
+    return {"dataset": dataset_name, **kpi_raw, "run_status": "computed"}
 
 
 # =====================================================================
@@ -4233,6 +4318,19 @@ def study_units(path: str | None = None, k: int = 30) -> pd.DataFrame:
     the study can answer -- which, with a flat list of ids, it could not.
     """
     path = CLUSTERING_CSV if path is None else path
+    if not os.path.isfile(path):
+        # Said here rather than let out as a pandas FileNotFoundError twenty
+        # frames down. This is the FIRST thing the notebook calls and the first
+        # thing `collect_results` calls, so a missing file breaks every cell at
+        # once with a traceback that names neither the study nor the fix -- and
+        # it has already happened once, when `../Andraz` was renamed.
+        raise FileNotFoundError(
+            f"the clustering that defines the study households is not at\n"
+            f"  {path}\n"
+            f"Every household id, and therefore every result, is derived from "
+            f"it. Point `hs.CLUSTERING_CSV` at the file or pass `path=`; it is "
+            f"`user_ids_sorted_by_cluster_{k}.csv` from the k-means sweep."
+        )
     df = pd.read_csv(path)
     picked = df[df["rank_in_cluster"] == 1].sort_values("cluster")
     if len(picked) != k:
@@ -4516,8 +4614,23 @@ def _run_arms_parallel(data_dir, output_root, dataset_ids, filename_template,
         allrows.to_csv(path, index=False, encoding="utf-8-sig")
         print(f"\nAll arms: {path}")
 
+    # WHAT the elapsed time bought. A sweep whose checkpoints are all valid
+    # finishes in a minute because it executed nothing, and reporting that as
+    # "930/930 runs succeeded in 1.2 min" reads as a machine forty times faster
+    # than the one `arm_runtimes` measured. Split the count so the wall clock
+    # can only ever be read against the work it actually covers.
+    status = collections.Counter(r.get("run_status", "computed") for r in ok)
     print(f"\n=== {len(ok)}/{len(rows)} runs succeeded in "
           f"{elapsed / 60:.1f} min on {n_jobs} workers ===")
+    print("    " + ", ".join(
+        f"{status[k]} {lbl}" for k, lbl in
+        (("computed", "computed"), ("backfilled", "backfilled (rules only)"),
+         ("cached", "served from checkpoints")) if status[k]))
+    if not status["computed"] and not status["backfilled"]:
+        print(f"    Nothing was executed: every run was already on disk under "
+              f"this configuration, so the {elapsed / 60:.1f} min above is the "
+              f"cost of READING {len(ok)} checkpoints, not of producing them.\n"
+              f"    What producing them cost is `arm_runtimes`.")
     if failed:
         # Loud, last, and impossible to scroll past: a partial summary that
         # looks complete is how N=29 got reported as N=30.
@@ -4751,7 +4864,15 @@ def arm_runtimes(output_root=None, arms=None, cap_s: float = 1800.0) -> pd.DataF
                           rather than reported as an arm that took three days.
 
                       An arm with no recoverable gap in any household comes back
-                      with n = 0 and NaN times, which is the honest answer.
+                      with n = 0 and NaN times, which is the honest answer. The
+                      `source` column separates the two reasons -- no predecessor
+                      is `unrecoverable`, every gap rejected is `cross-session`.
+
+    THE TIMES CAN COME FROM DIFFERENT SITTINGS, and `sessions` says how many.
+    Arms added to `STUDY_ARMS` later are run in a later session, against caches
+    the earlier arms already warmed, so their reconstructed times are not
+    comparable with the earlier arms' on the cache argument below. `dropped`
+    counts the gaps `cap_s` rejected, which is where those boundaries are.
 
     The times are WALL CLOCK UNDER CONTENTION -- the sweep runs `n_jobs`
     households at once, each pinned to one thread -- so they rank arms against
@@ -4760,8 +4881,11 @@ def arm_runtimes(output_root=None, arms=None, cap_s: float = 1800.0) -> pd.DataF
 
     A caching effect is real and visible here, not noise to be averaged out: the
     first arm to need a forecaster or a forecast-blind oracle pays for it and
-    every later arm reading the same cache does not. That is why `SI_H24` and
-    the first `hbd` arm of each pair stand so far above their twins.
+    every later arm reading the same cache does not. That is why `SI_H24` stands
+    above the SI arms after it in `ARM_ORDER` -- it pays for the SI oracle -- and
+    why, WITHIN the later hbd session, `AU_H24_hbd_median14` stands above the
+    hbd arms after it. Those two are not each other's peers: they are the cache
+    payers of two different sittings, which is exactly what `sessions` is for.
     """
     output_root = RESULTS_DIR if output_root is None else output_root
     rows = []
@@ -4789,6 +4913,32 @@ def arm_runtimes(output_root=None, arms=None, cap_s: float = 1800.0) -> pd.DataF
     runs["runtime_s"] = runs["recorded_s"].fillna(runs["gap_s"])
     runs["source"] = np.where(runs["recorded_s"].notna(), "measured", "reconstructed")
 
+    # WHY a gap is missing, which the single "unrecoverable" label used to hide.
+    # The two cases are not the same failure and do not have the same fix:
+    #
+    #   no predecessor   the arm is first in ARM_ORDER, so there is no earlier
+    #                    checkpoint in that household to subtract. Nothing can
+    #                    recover it except recording `runtime_s`.
+    #   over cap_s       there IS a predecessor and the gap was rejected as a
+    #                    session boundary. On this sweep every one of
+    #                    `AU_H24_hbd`'s thirty gaps is ~237 000 s -- 2.7 days --
+    #                    because the hbd arms were added in a LATER session than
+    #                    the arms before them in ARM_ORDER. `cap_s` is right to
+    #                    reject them, but it means the surviving rows come from
+    #                    two different sessions with two different cache states,
+    #                    and a single ranked table presents them as comparable.
+    #                    `sessions` below is how a reader sees that.
+    runs["dropped_over_cap"] = gap.notna() & runs["gap_s"].isna() & runs["recorded_s"].isna()
+    # Which sitting each checkpoint was written in: consecutive writes more than
+    # `cap_s` apart are different sessions. Kept per arm, because the number a
+    # reader needs is not "how many" -- no arm straddles a boundary -- but
+    # WHICH, so two arms measured days apart against different cache states
+    # cannot be read off one ranked table as peers.
+    order = runs.sort_values("written_at")
+    runs["session"] = (order["written_at"].diff().gt(cap_s).cumsum()
+                       .reindex(runs.index))
+    runs["ran_on"] = pd.to_datetime(runs["written_at"], unit="s")
+
     out = (runs.groupby("arm")
            .agg(households=("runtime_s", "count"),
                 median_s=("runtime_s", "median"),
@@ -4797,12 +4947,21 @@ def arm_runtimes(output_root=None, arms=None, cap_s: float = 1800.0) -> pd.DataF
                 max_s=("runtime_s", "max"),
                 # NaN, not 0.0, when nothing was recovered: an arm with no
                 # time on record did not take no time.
-                total_min=("runtime_s", lambda s: s.sum() / 60.0 if s.notna().any() else np.nan))
+                total_min=("runtime_s", lambda s: s.sum() / 60.0 if s.notna().any() else np.nan),
+                dropped=("dropped_over_cap", "sum"),
+                sessions=("session", "nunique"),
+                ran_on=("ran_on", "median"))
            .reset_index())
+    out["ran_on"] = out["ran_on"].dt.strftime("%Y-%m-%d")
     src = (runs[runs["runtime_s"].notna()].groupby("arm")["source"]
            .agg(lambda s: "measured" if (s == "measured").all()
                 else "reconstructed" if (s == "reconstructed").all() else "mixed"))
+    # "unrecoverable" only where there was nothing to subtract at all. An arm
+    # whose every gap was REJECTED is a different statement -- the work happened,
+    # in a session this reconstruction cannot see across -- so it says so.
     out["source"] = out["arm"].map(src).fillna("unrecoverable")
+    out.loc[out["source"].eq("unrecoverable") & out["dropped"].gt(0),
+            "source"] = "cross-session"
     out["tariff"] = out["arm"].map(arm_tariff)
     out["forecaster"] = out["arm"].map(
         {a["name"]: a.get("forecaster_kind", "prophet") for a in STUDY_ARMS})
@@ -4811,7 +4970,8 @@ def arm_runtimes(output_root=None, arms=None, cap_s: float = 1800.0) -> pd.DataF
     return (out.sort_values("median_s", ascending=False, na_position="last")
             .reset_index(drop=True)[["arm", "tariff", "forecaster", "households",
                                      "median_s", "mean_s", "min_s", "max_s",
-                                     "total_min", "source"]])
+                                     "total_min", "ran_on", "sessions",
+                                     "dropped", "source"]])
 
 
 def controller_columns(df: pd.DataFrame) -> list:
@@ -4934,9 +5094,11 @@ def summarize(df: pd.DataFrame, reference="no_battery") -> pd.DataFrame:
     # and false on SI, where the dogovorjena moc is endogenous -- `price_interval`
     # says so in as many words -- so a peak shaver trades a larger energy bill
     # for a smaller contract and comes out ahead on a measure that cannot see the
-    # contract. Measured on this sweep: `self_consumption_peak_shaving` beat the
-    # optimum on `saving_net_of_wear` in 30 household-arms, by up to 6.5 %, while
-    # never once beating it on the total. Both columns are kept -- the energy
+    # contract. Measured on the 930 household-arms of this sweep:
+    # `self_consumption_peak_shaving` beat the optimum on `saving_net_of_wear`
+    # in 45 of them, by up to 6.5 %, and `oracle` in a further 14 by up to
+    # 0.15 %, while neither ever beat it on the total. Both columns are kept --
+    # the energy
     # bill is what a reader compares across tariffs -- but the SHARE divides by
     # the total, because a share of a ceiling has to be a share of the thing the
     # ceiling is a ceiling on.
