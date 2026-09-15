@@ -16,7 +16,8 @@ import warnings
 import numpy as np
 import pandas as pd
 
-import hems_study as hs
+import hems_study as hs          # first: it puts the repo root on sys.path
+import Battery_Economics as be
 import Rule_Based_Control as rbc
 from Basic_Functions import cumulative_interval_price_series
 from MILP_Household import build_household_env
@@ -570,6 +571,187 @@ def test_full_period_is_a_bound(kwh):
               f"optimum {opt:.2f} vs best rule {worst[0]} {worst[1]:.2f}")
 
 
+def test_accounting_rate_survives_a_zero_dispatch_rate():
+    """A no-degradation arm must still be BILLED for the cycles it spends.
+
+    `cycle_cost_eur_per_efc` is the shadow price in the MILP objective and the
+    no-wear arms set it to 0 on purpose. `summarize` used to read that same
+    number back as the accounting rate, which would report `wear_eur = 0` for
+    exactly the arm that cycles hardest and hand it the best NPV in the study.
+    The two rates are now separate and only a POSITIVE dispatch rate is ever
+    read back -- zero is the one value that cannot mean "a different pack price".
+    """
+    cap, efc = 10.0, 300.0
+    physical = be.cycle_cost_eur_per_efc(cap)
+
+    def _summarized(solved, reported=None):
+        row = {"arm": "X", "dataset": "d", "tariff": "SI", "cluster": 0,
+               "battery_cap": cap,
+               "cycle_cost_eur_per_efc": solved,
+               "cost_no_battery": 1000.0, "cost_milp_full": 800.0,
+               "cost_oracle": 800.0,
+               "efc_no_battery": 0.0, "efc_milp_full": efc, "efc_oracle": efc}
+        if reported is not None:
+            row["cycle_cost_reporting_eur_per_efc"] = reported
+        out = hs.summarize(pd.DataFrame([row]))
+        return out[out["controller"] == "milp_full"].iloc[0]
+
+    priced = _summarized(physical)
+    check("a priced arm bills wear at the rate it solved under",
+          abs(priced["wear_eur"] - physical * efc) < 1e-9,
+          f"{priced['wear_eur']:.2f} EUR at {physical:.4f}/EFC")
+
+    nowear = _summarized(0.0)
+    check("a ZERO dispatch rate does not zero the reported wear",
+          abs(nowear["wear_eur"] - physical * efc) < 1e-9,
+          f"wear_eur {nowear['wear_eur']:.2f}, not 0.00")
+    check("the no-wear arm is flagged as unpriced in its objective",
+          bool(nowear["wear_priced_in_objective"]) is False
+          and bool(priced["wear_priced_in_objective"]) is True)
+
+    # A genuinely different PACK PRICE is still honoured -- the case the
+    # original rule was written for.
+    other = _summarized(2.0 * physical)
+    check("a different positive pack price is still read back",
+          abs(other["wear_eur"] - 2.0 * physical * efc) < 1e-9)
+
+    # And an explicit accounting rate wins over both.
+    named = _summarized(0.0, reported=1.5)
+    check("an explicitly recorded accounting rate wins",
+          abs(named["wear_eur"] - 1.5 * efc) < 1e-9)
+
+
+def test_the_totals_are_billed_at_the_pack_price():
+    """`total_*` carries real wear even when the objective was charged none.
+
+    The comparison money and the objective are two different quantities on a
+    no-degradation arm, and `full_period_bound_check` writes both. With one rate
+    for both, the no-wear arm's `total_*` has no wear term in it, `saving_total`
+    becomes a bill-only saving, and the hardest-cycling controller in the study
+    lands at the top of a chart whose axis reads "net of wear".
+    """
+    physical = be.cycle_cost_eur_per_efc(10.0)
+    metrics = {"cost_no_battery": 1000.0, "efc_no_battery": 0.0,
+               "cost_milp_full": 800.0, "efc_milp_full": 400.0,
+               "cost_self_consumption": 900.0, "efc_self_consumption": 100.0}
+
+    priced = hs.full_period_bound_check(dict(metrics), "AU", physical,
+                                        reporting_cycle_cost_eur_per_efc=physical)
+    nowear = hs.full_period_bound_check(dict(metrics), "AU", 0.0,
+                                        reporting_cycle_cost_eur_per_efc=physical)
+    check("a no-wear arm still BILLS its cycles in total_*",
+          abs(nowear["total_milp_full"] - priced["total_milp_full"]) < 1e-9,
+          f"{nowear['total_milp_full']:.2f} == {priced['total_milp_full']:.2f}")
+    check("and that total is the bill plus the wear, not the bill",
+          abs(nowear["total_milp_full"] - (800.0 + physical * 400.0)) < 1e-9)
+    # Omitting the reporting rate keeps the old single-rate behaviour, which is
+    # what every call written before the no-wear arms existed relies on.
+    legacy = hs.full_period_bound_check(dict(metrics), "AU", physical)
+    check("one rate given, one rate used",
+          abs(legacy["total_milp_full"] - priced["total_milp_full"]) < 1e-9)
+
+
+
+def test_a_rule_has_no_objective_to_price():
+    """`wear_priced_in_objective` is about the MILP, not about the arm.
+
+    No rule-based controller consults a wear price in any arm, so tagging one
+    with the arm's shadow price would say something false about eight rows in
+    ten.
+    """
+    out = hs.summarize(pd.DataFrame([{
+        "arm": "X", "dataset": "d", "tariff": "SI", "cluster": 0,
+        "battery_cap": 10.0,
+        "cycle_cost_eur_per_efc": be.cycle_cost_eur_per_efc(10.0),
+        "cost_no_battery": 1000.0, "cost_milp_full": 800.0,
+        "cost_oracle": 800.0, "cost_self_consumption": 900.0,
+        "efc_no_battery": 0.0, "efc_milp_full": 200.0, "efc_oracle": 200.0,
+        "efc_self_consumption": 150.0}]))
+    by = out.set_index("controller")["wear_priced_in_objective"]
+    check("the MILP is priced, the rule beside it is not",
+          bool(by["milp_full"]) is True
+          and bool(by["self_consumption"]) is False)
+
+
+def test_lifetime_is_the_npv_without_the_capital():
+    """`npv == lifetime_saving - capex`, exactly, on every priced row.
+
+    The lifetime figures and the NPV figures have to be the same statement with
+    and without the capital subtracted, or the two versions of a chart disagree
+    with each other for no reason a reader can see.
+    """
+    long = hs.summarize(hs.collect_results(hs.RESULTS_DIR))
+    if long.empty:
+        check("lifetime saving is the NPV plus the capital", True, "no sweep")
+        return
+    for suffix in ("", "_pack_only"):
+        m = long["npv" + suffix].notna()
+        d = ((long.loc[m, "lifetime_saving" + suffix]
+              - long.loc[m, "capex" + suffix]) - long.loc[m, "npv" + suffix])
+        check(f"lifetime_saving{suffix or ' (pack+install)'} is the NPV "
+              f"plus the capital",
+              float(d.abs().max()) < 1e-6,
+              f"max |diff| {float(d.abs().max()):.2e} over {int(m.sum())} rows")
+    # ROI is that NPV as a share of the capital, which is what makes the two
+    # tariffs comparable on one axis.
+    m = long["roi_pct"].notna() & (long["capex"] > 0)
+    d = 100.0 * long.loc[m, "npv"] / long.loc[m, "capex"] - long.loc[m, "roi_pct"]
+    check("roi_pct is the NPV as a percentage of capex",
+          float(d.abs().max()) < 1e-9)
+
+
+def test_regret_share_is_guarded_and_paired():
+    """Regret as a share of the achievable gain, per household, NaN where there
+    is none to take a share of."""
+    out = hs.summarize(pd.DataFrame([
+        # A household perfect foresight wins 200 on; the forecast wins 150, so
+        # it threw away 50 of 200 = 25 %.
+        {"arm": "X", "dataset": "a", "tariff": "SI", "cluster": 0,
+         "battery_cap": 10.0,
+         "cost_no_battery": 1000.0, "cost_oracle": 800.0, "cost_prophet": 850.0,
+         "cost_milp_full": 800.0, "efc_no_battery": 0.0, "efc_oracle": 100.0,
+         "efc_prophet": 100.0, "efc_milp_full": 100.0},
+        # A household the battery wins nothing on: no share to take.
+        {"arm": "X", "dataset": "b", "tariff": "SI", "cluster": 1,
+         "battery_cap": 10.0,
+         "cost_no_battery": 1000.0, "cost_oracle": 1000.0, "cost_prophet": 1010.0,
+         "cost_milp_full": 1000.0, "efc_no_battery": 0.0, "efc_oracle": 100.0,
+         "efc_prophet": 100.0, "efc_milp_full": 100.0},
+    ]))
+    got = out.set_index(["dataset", "controller"])["regret_pct_of_gain"]
+    check("regret as a share of the achievable gain",
+          abs(got[("a", "prophet")] - 25.0) < 1e-9,
+          f"{got[('a', 'prophet')]:.1f} % of 200")
+    check("perfect foresight has no regret against itself",
+          abs(got[("a", "oracle")]) < 1e-9)
+    check("a household with nothing to win has no share",
+          pd.isna(got[("b", "prophet")]))
+
+
+def test_the_no_wear_arms_are_a_controlled_pair():
+    """Each no-degradation arm differs from its twin in the objective alone."""
+    by = {a["name"]: a for a in hs.STUDY_ARMS}
+    for nowear, twin in (("AU_H24_nowear", "AU_H24"), ("SI_H24_nowear", "SI_H24"),
+                         ("AU_H11_nowear", "AU_H11"), ("SI_H11_nowear", "SI_H11")):
+        check(f"{nowear} is in the roster", nowear in by)
+        if nowear not in by:
+            continue
+        a = {k: v for k, v in by[nowear].items() if k != "name"}
+        b = {k: v for k, v in by[twin].items() if k != "name"}
+        check(f"{nowear} differs from {twin} in the objective alone",
+              a.pop("cycle_cost_eur_per_efc", None) == 0.0 and a == b,
+              f"{a} vs {b}")
+    # And it must not be mistaken for a forecast variant: it carries no
+    # `forecaster_kind`, so it defaults to "prophet" exactly like the twin.
+    for tariff in ("AU", "SI"):
+        arms = set(hs.forecast_arms(tariff).values())
+        check(f"{tariff}: the no-wear arm stays out of the forecast comparison",
+              not any(a.endswith("_nowear") for a in arms),
+              ", ".join(sorted(arms)) if any(a.endswith("_nowear") for a in arms)
+              else "")
+
+
+
 if __name__ == "__main__":
     kwh, kw = load()
     print(f"Ausgrid 127, {len(kwh)} steps ({len(kwh) // H} days)\n")
@@ -588,6 +770,12 @@ if __name__ == "__main__":
     test_discharge_window_is_live(kwh)
     test_wear_reaches_the_objective(kwh, kw)
     test_full_period_is_a_bound(kwh)
+    test_accounting_rate_survives_a_zero_dispatch_rate()
+    test_a_rule_has_no_objective_to_price()
+    test_the_totals_are_billed_at_the_pack_price()
+    test_lifetime_is_the_npv_without_the_capital()
+    test_regret_share_is_guarded_and_paired()
+    test_the_no_wear_arms_are_a_controlled_pair()
     print(f"\n{len(_passed)} passed, {len(_failed)} failed")
     if _failed:
         print("FAILED: " + ", ".join(_failed))

@@ -718,6 +718,11 @@ def arm_label(name: str, delta_t: float = 0.5) -> str:
     parts = [spec["tariff"], f"MPC-MILP {horizon}", forecast_kind_label(kind)]
     if spec.get("leak_current_interval"):
         parts.append("current-interval leak")
+    # The objective, where it is not the study's default. An arm whose MILP does
+    # not pay for its cycles is a different method from one whose MILP does, and
+    # the label is the only place a reader of a table meets the difference.
+    if "cycle_cost_eur_per_efc" in spec and not spec["cycle_cost_eur_per_efc"]:
+        parts.append("no degradation term")
     return " \u00b7 ".join(parts)
 
 
@@ -3251,7 +3256,17 @@ BENCHMARK_KINDS = ["persistence", "weekly", "daytype",
                    "mean3", "mean7", "median7", "median14",
                    # Fitted, and minutes rather than milliseconds each -- but
                    # cached, and the cache is shared with the sweep's arms.
-                   "hbd_baseline", "hbd", "hbd_median14"]
+                   "hbd_baseline", "hbd", "hbd_median14",
+                   # THE TUNED PROPHET, which had a full-year ARM and no
+                   # full-roster error number: the only error figure it carried
+                   # was the 8-household/90-day screen `tune_prophet` runs, and
+                   # that screen is deliberately over a different window from
+                   # this table, so the two could not be read against each
+                   # other. Reading it here costs nothing -- the tuned arms have
+                   # already cached its tables for all 30 households -- and it
+                   # is the row that says whether tuning bought back the gap to
+                   # seasonal-naive on the sample the study actually reports.
+                   "prophet_tuned"]
 
 
 def forecast_benchmark(data_dir: str,
@@ -3291,12 +3306,13 @@ def forecast_benchmark(data_dir: str,
     if dataset_ids is None:
         dataset_ids = study_units().index.tolist()
     unknown = [k for k in kinds if k not in SIMPLE_KINDS
-               and k not in FITTED_KINDS and k != "truth"]
+               and k not in FITTED_KINDS and k not in PROPHET_KINDS
+               and k != "truth"]
     if unknown:
         raise ValueError(
             f"unknown forecaster kind(s) {unknown}; expected 'truth', a simple "
-            f"kind {sorted(SIMPLE_KINDS)}, or a fitted kind "
-            f"{sorted(FITTED_KINDS)}"
+            f"kind {sorted(SIMPLE_KINDS)}, a fitted kind "
+            f"{sorted(FITTED_KINDS)}, or a Prophet kind {sorted(PROPHET_KINDS)}"
         )
 
     rows = []
@@ -3314,7 +3330,11 @@ def forecast_benchmark(data_dir: str,
         # Anchors over df_ctrl and scoring on df_sim, exactly as the pipeline
         # does: the lookahead tail is forecast but never scored.
         anchors = list(ctrl.index[::H])
-        n_anchors = len(anchors)
+        # max, not "whichever household was read last". Every household in the
+        # study shares one window, so they agree today; a file short by a day
+        # would otherwise decide the number written into the provenance column
+        # for all of them, silently.
+        n_anchors = max(n_anchors, len(anchors))
         # History ahead of the simulation, so day 1 of a 14-day method is built
         # from real data rather than from itself.
         frame = pd.concat([train, ctrl])
@@ -3337,7 +3357,25 @@ def forecast_benchmark(data_dir: str,
                     name, train, ctrl, H, "30min", EnergyForecaster(None, None),
                     cache_dir=forecast_cache_dir, kind=k, history=train)
                 tables[k] = served.table
-        if include_prophet:
+        # The Prophet kinds, from cache for the same reason: a miss FITS, which
+        # is the cost this function exists to avoid. Which settings each kind
+        # carries is `PROPHET_KIND_PARAMS`, and it has to be the arm's own pair
+        # or the digest misses and the tuned model is refit from scratch -- Stan
+        # for an hour against a second of CSV.
+        #
+        # `include_prophet` predates the roster carrying a Prophet kind at all
+        # and still means what it meant: add the DEFAULT Prophet. `prophet_tuned`
+        # comes in through `kinds`, like every other method.
+        for k in kinds:
+            if k in PROPHET_KINDS:
+                _con_p, _gen_p = PROPHET_KIND_PARAMS[k]
+                served, _ = load_or_build_forecasts(
+                    name, train, ctrl, H, "30min",
+                    EnergyForecaster(_con_p, _gen_p),
+                    cache_dir=forecast_cache_dir,
+                    refit_every_days=30, kind=k, history=train)
+                tables[k] = served.table
+        if include_prophet and "prophet" not in tables:
             served, _ = load_or_build_forecasts(
                 name, train, ctrl, H, "30min",
                 EnergyForecaster(None, None), cache_dir=forecast_cache_dir,
@@ -3614,7 +3652,9 @@ def best_prophet_params(tuning: pd.DataFrame,
 
 def full_period_bound_check(metrics: dict, tariff: str,
                             cycle_cost_eur_per_efc: float | None,
-                            bound_is_exact: bool = True) -> dict:
+                            bound_is_exact: bool = True,
+                            reporting_cycle_cost_eur_per_efc: float | None = None
+                            ) -> dict:
     """Is the whole-period solve actually below everything it is the bound for?
 
     A denominator nobody can name is worse than no denominator, and a "ceiling"
@@ -3646,12 +3686,28 @@ def full_period_bound_check(metrics: dict, tariff: str,
 
     Returns the totals it computed, so they land in the checkpoint rather than
     being recomputed differently downstream.
+
+    TWO RATES, and the difference is the whole no-degradation arm. The BOUND is
+    a property of the objective, so it is checked at the rate the MILP was
+    actually charged (`cycle_cost_eur_per_efc`) -- an optimum that paid nothing
+    for its cycles is a lower bound on a total that also charges nothing for
+    them, and on no other. The totals WRITTEN OUT are the study's comparison
+    money, so they are billed at the rate the pack costs
+    (`reporting_cycle_cost_eur_per_efc`), which is the same number on every arm
+    but the no-wear ones.
+
+    Getting this wrong is not subtle. With one rate for both, the no-degradation
+    arm writes `total_*` with no wear term in it at all, `saving_total` for those
+    rows becomes a bill-only saving, and the controller that cycles hardest in
+    the whole study appears at the TOP of a chart whose axis says "net of wear".
     """
     rate = float(cycle_cost_eur_per_efc or 0.0)
+    report_rate = (rate if reporting_cycle_cost_eur_per_efc is None
+                   else float(reporting_cycle_cost_eur_per_efc))
     names = sorted(k[len("cost_"):] for k in metrics if k.startswith("cost_"))
 
-    def total(name):
-        t = float(metrics[f"cost_{name}"]) + rate * float(
+    def total(name, at_rate):
+        t = float(metrics[f"cost_{name}"]) + at_rate * float(
             metrics.get(f"efc_{name}", 0.0) or 0.0)
         if tariff == "SI":
             t += float(metrics.get(f"fixed_{name}", 0.0) or 0.0)
@@ -3660,12 +3716,14 @@ def full_period_bound_check(metrics: dict, tariff: str,
     # `fixed_*` is only written for the three MILP arms; the rules carry it in
     # their own rows. Where it is absent the term is zero for every controller
     # alike, so the comparison stays like for like.
-    totals = {f"total_{n}": total(n) for n in names}
-    ref = totals["total_milp_full"]
+    totals = {f"total_{n}": total(n, report_rate) for n in names}
+    # The bound, on the objective's own terms.
+    objective = {n: total(n, rate) for n in names}
+    ref = objective["milp_full"]
     # One cent of slack: HiGHS is pinned to a zero gap but the settlement walks
     # the trajectory through a different arithmetic path than the objective did.
-    beaten = {n: totals[f"total_{n}"] for n in names
-              if n != "milp_full" and totals[f"total_{n}"] < ref - 0.01}
+    beaten = {n: objective[n] for n in names
+              if n != "milp_full" and objective[n] < ref - 0.01}
     if beaten and not bound_is_exact:
         print(f"  [full period] not a bound on this horizon -- too short for the "
               f"contract lag, so the solve cannot price its own standing charge. "
@@ -3708,6 +3766,7 @@ def run_pipeline_for_file(file_path: str,
                            milp_parity: bool = True,
                            milp_exclusivity: str = "auto",
                            cycle_cost_eur_per_efc: float | str | None = "auto",
+                           cycle_cost_reporting_eur_per_efc: float | str = "auto",
                            holiday_country: str = "AU",
                            holiday_subdiv: str | None = "NSW",
                            high_season_months: tuple = (5, 6, 7, 8),
@@ -3740,11 +3799,36 @@ def run_pipeline_for_file(file_path: str,
     # the objective it is a decision, which is what it always was.
     #
     # Pass 0.0 for the old unpriced behaviour, or a float to price it directly.
+    import Battery_Economics as _be
     if cycle_cost_eur_per_efc == "auto":
-        import Battery_Economics as _be
         cycle_cost_eur_per_efc = _be.cycle_cost_eur_per_efc(battery_cap)
     cycle_cost_eur_per_efc = (
         None if not cycle_cost_eur_per_efc else float(cycle_cost_eur_per_efc))
+
+    # WHAT THE CYCLES COST, as opposed to what the MILP was told they cost.
+    # These were one number until the no-degradation arm needed them to be two.
+    #
+    # `cycle_cost_eur_per_efc` is a DISPATCH parameter: it is the shadow price in
+    # the objective, and setting it to 0 is the experiment -- "what does a
+    # controller do when nobody charges it for pack life". The pack still wears.
+    # `summarize` used to read the solved rate back out of the checkpoint and
+    # report `wear_eur` at it, which is right while the two agree and catastrophic
+    # when they do not: a no-wear arm would report zero wear, and the controller
+    # that cycles hardest would come out cheapest on `saving_net_of_wear`,
+    # `saving_total`, the NPV and every figure built on them.
+    #
+    # So the accounting rate is resolved from the PACK, always, and travels in
+    # the checkpoint beside the dispatch rate. On every arm but the no-wear ones
+    # the two are the same number and nothing moves.
+    if cycle_cost_reporting_eur_per_efc == "auto":
+        cycle_cost_reporting_eur_per_efc = _be.cycle_cost_eur_per_efc(battery_cap)
+    cycle_cost_reporting_eur_per_efc = float(cycle_cost_reporting_eur_per_efc)
+    if battery_cap > 0 and not cycle_cost_reporting_eur_per_efc > 0:
+        raise ValueError(
+            "cycle_cost_reporting_eur_per_efc must be > 0 for a sized pack: it "
+            "is what the cycles COST, not what the MILP was charged for them. "
+            "Pass cycle_cost_eur_per_efc=0.0 for a no-degradation objective."
+        )
 
     dataset_name = os.path.splitext(os.path.basename(file_path))[0]
     out_dir = os.path.join(output_root, dataset_name)
@@ -3786,6 +3870,11 @@ def run_pipeline_for_file(file_path: str,
         # than saying something false.
         milp_parity=bool(milp_parity) if milp_exclusivity == "binary" else None,
         cycle_cost_eur_per_efc=cycle_cost_eur_per_efc,
+        # NOT in the config, deliberately. The config is the checkpoint KEY, and
+        # this rate changes no dispatch -- adding it here would invalidate all
+        # 930 existing runs to record a number that is a pure function of
+        # `battery_cap`, which is already in the key. It travels in the metrics
+        # instead, where `collect_results` picks it up as a column.
         leak_current_interval=bool(leak_current_interval),
         forecaster_kind=forecaster_kind,
         refit_every_days=refit_every_days,
@@ -4127,6 +4216,7 @@ def run_pipeline_for_file(file_path: str,
           f"vs whole-period optimum {kpi_raw['cost_milp_full']:.2f} EUR")
     kpi_raw.update(full_period_bound_check(
         kpi_raw, tariff, cycle_cost_eur_per_efc,
+        reporting_cycle_cost_eur_per_efc=cycle_cost_reporting_eur_per_efc,
         bound_is_exact=(tariff != "SI"
                         or _agreed_power_is_endogenous_in_lp(env, len(sig.import_rate)))))
     # Forecast quality alongside the cost, because a forecasting-in-the-loop
@@ -4174,7 +4264,13 @@ def run_pipeline_for_file(file_path: str,
     # CSVs just written. Recorded under contention when the sweep runs in
     # parallel -- `arm_runtimes` says so, because a per-arm time measured with
     # ten workers on the machine is not the time the arm takes alone.
-    kpi_raw = {**kpi_raw, "runtime_s": time.perf_counter() - _t_start}
+    kpi_raw = {**kpi_raw, "runtime_s": time.perf_counter() - _t_start,
+               # What the cycles this run spent are WORTH, as opposed to what
+               # the objective was charged for them. Equal on every arm but the
+               # no-degradation ones; `summarize` bills `wear_eur` at this and
+               # never at the dispatch rate. See the note where it is resolved.
+               "cycle_cost_reporting_eur_per_efc":
+                   cycle_cost_reporting_eur_per_efc}
     write_checkpoint(out_dir, cfg, kpi_raw)
 
     return {"dataset": dataset_name, **kpi_raw, "run_status": "computed"}
@@ -4383,6 +4479,17 @@ def dataset_ids(path: str | None = None, k: int = 30) -> list:
 TUNED_PARAMS_CON = {"changepoint_prior_scale": 0.001}
 TUNED_PARAMS_GEN = {"growth": "flat"}
 
+# Which Prophet settings each PROPHET_KIND means, as (consumption, generation).
+# It lives here rather than beside `PROPHET_KINDS` because it names the tuned
+# tables above; `forecast_benchmark` resolves it at call time. The arms take
+# their params from their own `STUDY_ARMS` entry -- this is the same pair, in
+# the one place a caller holding only the KIND string can look it up, so a
+# screen and an arm cannot score two different models under one name.
+PROPHET_KIND_PARAMS = {
+    "prophet":       (None, None),
+    "prophet_tuned": (TUNED_PARAMS_CON, TUNED_PARAMS_GEN),
+}
+
 STUDY_ARMS = [
     {"name": "AU_H24",          "tariff": "AU", "control_horizon": 48},
     {"name": "AU_H11",          "tariff": "AU", "control_horizon": 22},
@@ -4483,6 +4590,37 @@ STUDY_ARMS = [
      "forecaster_kind": "hbd_median14_pvtruth"},
     {"name": "SI_H24_hbd_median14_pvtruth", "tariff": "SI", "control_horizon": 48,
      "forecaster_kind": "hbd_median14_pvtruth"},
+
+    # THE MILP WITH NO DEGRADATION TERM. `cycle_cost_eur_per_efc = 0` takes the
+    # wear shadow price out of the objective (`wear_objective_terms` reads it off
+    # the env and contributes nothing at zero), so the three MILP controllers in
+    # these arms -- `prophet`, `oracle` and `milp_full` -- optimise the bill
+    # alone. Everything else is the H24/H11 spec unchanged, which is what makes
+    # the pair a controlled comparison: same battery, same tariff, same forecast,
+    # same evaluator, one term removed.
+    #
+    # It is the ablation the study was missing. Every result above is stated
+    # under an objective that already prices pack life, so "the MILP saves less
+    # than a price rule on the energy bill" has two possible causes -- the
+    # horizon, or the wear term -- and nothing separated them. These arms do.
+    #
+    # The rules re-run here too and are expected to be IDENTICAL to their H24/H11
+    # rows: no rule consults a wear price. That is the control, and a rule that
+    # moves between an arm and its no-wear twin is a bug, not a result.
+    #
+    # The pack still wears. `cycle_cost_reporting_eur_per_efc` stays at the pack
+    # price, so `wear_eur`, `saving_net_of_wear`, `saving_total` and every NPV
+    # bill these arms for the cycles they spend at the same rate as everyone
+    # else. See the note in `summarize`: a solved rate of zero is the one value
+    # that is never read back as an accounting rate.
+    {"name": "AU_H24_nowear", "tariff": "AU", "control_horizon": 48,
+     "cycle_cost_eur_per_efc": 0.0},
+    {"name": "SI_H24_nowear", "tariff": "SI", "control_horizon": 48,
+     "cycle_cost_eur_per_efc": 0.0},
+    {"name": "AU_H11_nowear", "tariff": "AU", "control_horizon": 22,
+     "cycle_cost_eur_per_efc": 0.0},
+    {"name": "SI_H11_nowear", "tariff": "SI", "control_horizon": 22,
+     "cycle_cost_eur_per_efc": 0.0},
 ]
 
 
@@ -4501,6 +4639,15 @@ def forecast_arms(tariff: str, control_horizon: int = 48) -> dict:
         if a["tariff"] != tariff or a.get("control_horizon") != control_horizon:
             continue
         if a.get("leak_current_interval"):
+            continue
+        # Same trap, second instance. The no-degradation arms carry no
+        # `forecaster_kind` either, so they default to "prophet" exactly like
+        # `AU_H24` and would answer "which arm shows me Prophet?" with whichever
+        # of the two `setdefault` happened to see first -- i.e. with the roster
+        # order, which is not a decision anyone made. They differ in their
+        # OBJECTIVE, not their forecast, so they have no business in a
+        # forecast-quality comparison at all.
+        if "cycle_cost_eur_per_efc" in a:
             continue
         out.setdefault(a.get("forecaster_kind", "prophet"), a["name"])
     return out
@@ -4872,7 +5019,9 @@ def arm_runtimes(output_root=None, arms=None, cap_s: float = 1800.0) -> pd.DataF
     Arms added to `STUDY_ARMS` later are run in a later session, against caches
     the earlier arms already warmed, so their reconstructed times are not
     comparable with the earlier arms' on the cache argument below. `dropped`
-    counts the gaps `cap_s` rejected, which is where those boundaries are.
+    counts the gaps `cap_s` rejected ON ROWS WITH NO RECORDED TIME -- a run that
+    stored its own `runtime_s` needs no gap and has lost nothing -- which is
+    where those boundaries are.
 
     The times are WALL CLOCK UNDER CONTENTION -- the sweep runs `n_jobs`
     households at once, each pinned to one thread -- so they rank arms against
@@ -5073,14 +5222,51 @@ def summarize(df: pd.DataFrame, reference="no_battery") -> pd.DataFrame:
     ).to_numpy()
     default_rate = np.where(np.isfinite(caps), be.CAPEX_EUR_PER_KWH * caps
                             / be.BATTERY_CYCLE_LIMIT_EFC, np.nan)
+    #
+    # THE DISPATCH RATE IS NOT THE ACCOUNTING RATE, and conflating them is how
+    # the no-degradation arm would have read as the cheapest controller in the
+    # study. `cycle_cost_eur_per_efc` is the shadow price the MILP was charged;
+    # the no-wear arms set it to 0 on purpose. The pack wears regardless, so a
+    # solved rate of 0 must NOT be read back as "these cycles were free" -- that
+    # would zero `wear_eur`, `saving_net_of_wear` and `saving_total`, and hand
+    # the hardest-cycling controller in the sweep the best NPV on every figure.
+    #
+    # A solved rate that is POSITIVE and different is still honoured, which is
+    # the case the original rule was written for: a sweep at another pack price
+    # optimised against that price, and reporting its wear at another one would
+    # price a decision against a cost nobody made it under. Zero is the one
+    # value that cannot mean "a different pack price".
+    #
+    # Preference order: the rate the run recorded for accounting, then a
+    # positive dispatch rate, then the pack's own price. The first is absent
+    # from every checkpoint written before the no-wear arms existed, and the
+    # third reproduces exactly what those rows reported.
+    report_rate = np.full(len(key), np.nan)
+    if "cycle_cost_reporting_eur_per_efc" in df:
+        report_rate = pd.to_numeric(
+            df.set_index(KEY_COLUMNS)["cycle_cost_reporting_eur_per_efc"]
+            .reindex(key), errors="coerce").to_numpy()
+    solved_rate = np.full(len(key), np.nan)
     if "cycle_cost_eur_per_efc" in df:
         solved_rate = pd.to_numeric(
             df.set_index(KEY_COLUMNS)["cycle_cost_eur_per_efc"].reindex(key),
             errors="coerce").to_numpy()
-        rate = np.where(np.isfinite(solved_rate), solved_rate, default_rate)
-    else:
-        rate = default_rate
+    rate = np.where(
+        np.isfinite(report_rate) & (report_rate > 0), report_rate,
+        np.where(np.isfinite(solved_rate) & (solved_rate > 0), solved_rate,
+                 default_rate))
     long["wear_eur"] = long["efc"] * rate
+    # Both rates on the row, so "was this controller charged for its cycles?"
+    # is a column rather than a thing you have to know about the arm.
+    long["wear_rate_charged"] = np.where(np.isfinite(solved_rate), solved_rate, 0.0)
+    long["wear_rate_accounted"] = rate
+    # Only the MILP family HAS an objective to price wear into. A rule-based
+    # controller has none in any arm, so flagging it by the arm's shadow price
+    # would say something false about eight rows in ten.
+    _has_objective = long["controller"].map(
+        lambda c: controller_family(c) in ("MPC", "MILP"))
+    long["wear_priced_in_objective"] = np.where(
+        _has_objective, long["wear_rate_charged"] > 0, False)
     long["saving_net_of_wear"] = long["saving"] - long["wear_eur"].fillna(0.0)
 
     # THE quantity the whole-period solve minimises, and therefore the only one
@@ -5117,13 +5303,34 @@ def summarize(df: pd.DataFrame, reference="no_battery") -> pd.DataFrame:
             long["controller"].map(pick).to_numpy(), totals)[rows] \
             if len(totals) else np.nan
         base_total = indexed[f"total_{reference}"].reindex(key).to_numpy()
+        long["baseline_cost_total"] = base_total
         long["saving_total"] = base_total - long["cost_total"]
         opt_gain = base_total - indexed["total_milp_full"].reindex(key).to_numpy()
         with np.errstate(divide="ignore", invalid="ignore"):
             long["gain_share_net_pct"] = np.where(
                 opt_gain > 1e-9, 100.0 * long["saving_total"] / opt_gain, np.nan)
+            # THE RANKING METRIC, AS A PERCENTAGE. `saving_pct` -- the one the
+            # comparison figure has always drawn -- is a share of the ENERGY
+            # BILL alone, and the whole-period optimum is not a ceiling on it:
+            # the optimum pays for its cycles and a price rule does not, so on
+            # AU three rules outscore the "optimum" by up to 6.6 % of the gain.
+            # A figure that labels a row "optimum" and then draws three rows
+            # past it is not reporting a result, it is reporting the wrong
+            # column. This is the share of the quantity the solve actually
+            # minimises -- bill, standing charge and wear -- which is the only
+            # one the label is true of.
+            long["saving_total_pct"] = np.where(
+                base_total > 1e-9, 100.0 * long["saving_total"] / base_total,
+                np.nan)
+            # Wear on the same denominator, so a dumbbell of the two reads in
+            # one unit on both tariffs: "this controller earns 9 % of the bill
+            # and spends 4 % of it on pack life".
+            long["wear_pct"] = np.where(
+                base_total > 1e-9, 100.0 * long["wear_eur"] / base_total, np.nan)
     else:
         long["cost_total"] = long["saving_total"] = long["gain_share_net_pct"] = np.nan
+        long["saving_total_pct"] = long["wear_pct"] = np.nan
+        long["baseline_cost_total"] = np.nan
 
     # ------------------------------------------------------------------
     # Lifetime economics: is the pack worth buying at all?
@@ -5136,7 +5343,7 @@ def summarize(df: pd.DataFrame, reference="no_battery") -> pd.DataFrame:
     # positive savings reads as "which of these to buy"; the NPV says the honest
     # thing, which is "none of them at this quote", and the IRR says by how far.
     #
-    # Wear is charged ONCE, as cash, at the rate the sweep solved under:
+    # Wear is charged ONCE, as cash, at the rate the PACK costs:
     #
     #   annual   `saving_total` -- the operating saving (energy bill, plus on SI
     #            the standing charge the controller's own peaks agreed to) minus
@@ -5146,11 +5353,21 @@ def summarize(df: pd.DataFrame, reference="no_battery") -> pd.DataFrame:
     #   life     the 12 y calendar band, with `cycle_limit_efc=None`. The cycle
     #            limit is deliberately OFF: `battery_economics` would otherwise
     #            charge wear a second time, as a shortened service life, on top
-    #            of the cash already subtracted. It costs nothing here in any
-    #            case -- the hardest-cycling controller in this sweep books
-    #            ~225 EFC/a, i.e. 6000/225 = 27 y of cycle life against a 12 y
-    #            calendar band, so cycles never bind. `cycle_life_y` is kept as
-    #            a column so that stays checkable rather than asserted.
+    #            of the cash already subtracted.
+    #
+    #            THIS IS NOW LOAD-BEARING, where it used to be free. While every
+    #            arm priced wear in its objective the hardest cycler booked
+    #            ~272 EFC/a, i.e. 6000/272 = 22 y of cycle life against a 12 y
+    #            calendar band, so the calendar bound every row and the choice
+    #            cost nothing. The no-degradation arms are the case that can
+    #            break that: a MILP that pays nothing to cycle has no reason to
+    #            stop, and above 500 EFC/a cycles bind first. `cycle_life_y` is
+    #            on every row so this is checkable rather than asserted, and
+    #            `life_binds_on_cycles` says outright where it has happened.
+    #            Where it does, the NPV below UNDERSTATES the cost of cycling --
+    #            the cash is charged but the shortened life is not -- and the
+    #            figures say so rather than quietly discounting a 12 y annuity
+    #            from a pack that is dead in eight.
     #   capex    the pack, IN THE ARM'S OWN CURRENCY -- a NPV is a quote against
     #            a bill, and on AU the bill is AUD. See `ARM_CURRENCY_PER_EUR`,
     #            which also records where the sweep did NOT convert.
@@ -5180,10 +5397,13 @@ def summarize(df: pd.DataFrame, reference="no_battery") -> pd.DataFrame:
     # therefore decides whether a controller has an IRR at all, so both are
     # computed and neither is allowed to be the silent default.
     caps_priced = np.where(long["controller"].to_numpy() == reference, 0.0, caps)
-    for col in ("cycle_life_y", "service_life_y"):
+    for col in ("cycle_life_y", "service_life_y", "pv_factor", "lifetime_wear",
+                "lifetime_saving_operating"):
         long[col] = np.nan
     for suffix, fixed_eur in (("", be.CAPEX_FIXED_EUR), ("_pack_only", 0.0)):
-        for col in ("npv", "irr_pct", "payback_y", "capex"):
+        for col in ("npv", "irr_pct", "payback_y", "capex", "roi_pct",
+                    "break_even_capex", "lifetime_saving",
+                    "lifetime_saving_undisc"):
             long[col + suffix] = np.nan
         for tariff, per_eur in ARM_CURRENCY_PER_EUR.items():
             m = (long["tariff"] == tariff).to_numpy()
@@ -5201,6 +5421,47 @@ def summarize(df: pd.DataFrame, reference="no_battery") -> pd.DataFrame:
             long.loc[m, "irr_pct" + suffix] = econ["IRR_pct"]
             long.loc[m, "payback_y" + suffix] = econ["Payback_y"]
             long.loc[m, "capex" + suffix] = econ["Capex_EUR"]
+            # THE NPV AS A PERCENTAGE OF THE CAPITAL IT IS A RETURN ON.
+            # `battery_economics` has computed this all along and `summarize`
+            # threw it away, so every lifetime figure had to be drawn in money
+            # -- which puts AU and SI on two axes that cannot be compared, over
+            # a pack that is the same pack quoted twice. As a share of capex it
+            # is one unit, one axis, and the reading is direct: -60 % means the
+            # household gets 40 cents back per unit invested, on either tariff.
+            long.loc[m, "roi_pct" + suffix] = econ["ROI_pct"]
+            # What the pack price would have to FALL to, for this controller to
+            # break even. Defined for every household -- unlike the IRR, which
+            # is NaN wherever the saving misses the O&M charge and so is a
+            # median over a different subset on every row.
+            long.loc[m, "break_even_capex" + suffix] = \
+                econ["Break_Even_Capex_EUR_kWh"]
+            # LIFETIME, not annual: the discounted sum of what the controller
+            # earns over the pack's service life. This is the NPV's own gross
+            # side (`npv = lifetime_saving - capex` exactly), so the two figures
+            # are the same statement with and without the capital subtracted.
+            _pvf = np.array([be.present_value_factor(be.DISCOUNT_RATE, n)
+                             for n in econ["Service_Life_y"]])
+            long.loc[m, "lifetime_saving" + suffix] = (
+                econ["Net_Savings_EUR"] * _pvf)
+            if not suffix:
+                # The factor itself, on the row, so a figure drawing the
+                # lifetime view recomputes rather than multiplying by a constant
+                # it typed in. It IS a constant while every pack lives out its
+                # 12 y calendar band -- but the no-degradation arms are the ones
+                # that can cycle a pack to death early, and on those rows this
+                # varies and the lifetime figures have to follow it.
+                long.loc[m, "pv_factor"] = _pvf
+                # Wear over the same life, discounted the same way, so the
+                # lifetime wear/saving figure is the annual one recomputed and
+                # not the annual one rescaled.
+                long.loc[m, "lifetime_wear"] = long["wear_eur"].to_numpy()[m] * _pvf
+                long.loc[m, "lifetime_saving_operating"] = (
+                    long["saving_operating"].to_numpy()[m] * _pvf)
+            # The undiscounted one too, because it is the number a household
+            # hears ("it saves you X over its life") and the gap between the two
+            # is what discounting costs.
+            long.loc[m, "lifetime_saving_undisc" + suffix] = (
+                econ["Net_Savings_EUR"] * econ["Service_Life_y"])
             if not suffix:
                 long.loc[m, "service_life_y"] = econ["Service_Life_y"]
                 # What the life WOULD be if cycles bound, at the rated 6000 EFC.
@@ -5220,6 +5481,50 @@ def summarize(df: pd.DataFrame, reference="no_battery") -> pd.DataFrame:
     long["irr_defined"] = long["irr_pct"].notna() & (caps_priced > 0)
     long["irr_defined_pack_only"] = (long["irr_pct_pack_only"].notna()
                                      & (caps_priced > 0))
+
+    # WHERE THE NPV ABOVE IS OPTIMISTIC. The life it discounts over is the 12 y
+    # calendar band; this says where the rated 6000 EFC would have run out
+    # first. On every wear-priced arm it is False everywhere, which is why the
+    # `cycle_limit_efc=None` choice was free. A no-degradation MILP is the arm
+    # that can make it True, and where it is, the row's lifetime figures are an
+    # upper bound rather than an estimate -- the cash cost of the cycles is
+    # charged, the shortened life is not.
+    long["life_binds_on_cycles"] = (long["cycle_life_y"]
+                                    < long["service_life_y"] - 1e-9)
+
+    # The lifetime ranking, as a share, on the lifetime bill. The direct
+    # analogue of `saving_total_pct` over the pack's life rather than over one
+    # year -- and NOT the same number, because the lifetime saving carries the
+    # O&M charge that the annual one does not and is discounted over a life that
+    # a hard-cycling controller can shorten. Where the two disagree, that
+    # difference is the whole reason the article carries both views.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        _life_bill = long["baseline_cost_total"] * long["pv_factor"]
+        long["lifetime_saving_pct"] = np.where(
+            _life_bill > 1e-9, 100.0 * long["lifetime_saving"] / _life_bill,
+            np.nan)
+
+    # REGRET AS A SHARE OF WHAT WAS THERE TO WIN, so the two tariffs land on one
+    # axis. The money version cannot be compared across arms -- AU bills in AUD
+    # and SI in EUR, and a 90 AUD regret against an AU bill is not the same
+    # statement as a 30 EUR one against an SI bill. Divided by the gain perfect
+    # foresight actually achieves on that household, both become "what fraction
+    # of the achievable saving did this forecast throw away", which is the
+    # question the study is named after and the only form in which AU and SI can
+    # be put side by side.
+    #
+    # Per household, before any median: this is the same pairing argument the
+    # regret figure makes, and a ratio of two medians is not any household's
+    # share. Households where perfect foresight wins nothing (gain <= 0) have no
+    # share to take a fraction of and go to NaN rather than to a large number
+    # with an arbitrary sign.
+    _gain = long["baseline_cost"] - indexed["cost_oracle"].reindex(key).to_numpy()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        long["regret_pct_of_gain"] = np.where(
+            _gain > 1e-9,
+            100.0 * (long["cost"] - indexed["cost_oracle"].reindex(key).to_numpy())
+            / _gain,
+            np.nan)
     return long
 
 

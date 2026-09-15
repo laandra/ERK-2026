@@ -37,21 +37,205 @@ sweep is fully cached) so the stored outputs match the code, and verify no cell 
 
 Read the `dataviz` skill before writing chart code.
 
-## Status, 2026-09-13
+## Status, 2026-09-14 (pass 3) — READ THIS ONE FIRST
 
-A second review pass has since fixed part of this list and re-executed the notebook, so read
-each heading's status line before starting. What is left is §3 (the wear/saving redesign),
-§5 (`controller_ranking_*`), §7 (new figures), and the presentational half of §2, §4 and §6.
+Pass 3 closed §7.4, converted the last two money regret axes to shares, ran a measured
+readability pass over every figure, and settled the figure-width question. **21 exports now**
+(19 + 2 new); no existing name was renamed or dropped. `python3 test_hems_study.py` is
+**67 passed, 0 failed**; `hems_study.py`, `Plotting_Functions.py` and `test_hems_study.py`
+were not touched — everything below is notebook-side. The whole notebook re-executes in 96 s
+with zero cell errors and no `tight_layout` warning.
 
-Also fixed outside the figures, in the same pass: three stale numbers in the caveats (cell 20)
-— the Ausgrid 148 skills, the standing-charge example, the 0.44 correlation — `milp_full` added
-to cell 0's controller table, and cells 13 and 15 now rescore when the roster or the tuning grid
-has moved rather than only when the CSV is missing. Both cached CSVs were regenerated, so
-`hs.provenance` reports a window instead of "no provenance" (the numbers came back identical;
-only the provenance columns are new).
+### §7.4 is done, and it has a real answer
 
-Note for the harness below: cell 14 reads `bench` from cell 13, so the setup list has to be
-`(1, 3, 5, 7, 10, 13)` to render it.
+Two new figures, after `horizon_effect`:
+
+- **`household_heterogeneity`** — one point per household, faceted by tariff. x is the
+  household's own export over its own import with no battery (`sell_no_battery /
+  buy_no_battery`), y is Prophet's `regret_pct_of_gain`. **The sign flips between the
+  tariffs**: ρ = **+0.63** (p = 0.0002) on AU and **−0.55** (p = 0.0017) on SI, n = 30 each.
+  PV-heavy households are the ones Prophet is worst at on AU and best at on SI. Consistent
+  with that, the two tariffs barely agree about which households are hard (ρ = −0.18,
+  p = 0.35).
+- **`household_regret_strip`** — 30 rows, one per household, sorted by AU regret. Left panel:
+  AU and SI regret on one shared axis (legal only because the measure is a share). Right
+  panel: both channel skills as bars from zero, coloured by sign like cell 14. Ausgrid 127
+  and 148 are bold, so the channel disagreement the caveats describe finally has a picture.
+
+**Do not re-propose `cluster` or `dist_to_centroid` as an axis.** Both were tested:
+|ρ| < 0.15, p > 0.4 on both tariffs. The cluster id is 1:1 with the household, exactly as the
+pass-3 prompt warned. The honest reading — stated in both captions — is that the households
+do not fall into kinds, they fall on a gradient, and forecast skill does not order the regret
+either (ρ = −0.33, p = 0.08 against the mean of the two channels).
+
+The caveats cell now carries both findings and points at the two figures by name.
+
+### The last two money axes are shares
+
+- **`forecast_channel_regret_lifetime`** — was `[AUD on AU, EUR on SI]` on two independent
+  scales. Now `[% of the capital]` on **one shared axis**. The denominator had to change,
+  not just the units: a share of the *gain* is invariant under discounting — `pv_factor`
+  multiplies regret and gain alike and cancels — so a lifetime share of the gain is the
+  annual panel again under a longer label, which is the trap cell 17 fell into once already.
+  `_regret` now reads `pv_factor` and `capex` per household out of `long` rather than using
+  the scalar `PVF`.
+- **`skill_vs_regret`** — this was the user's "graph 11" (the cell beginning *"Does a better
+  forecast buy a smaller regret?"*). y is now `regret_pct_of_gain`, the **same column** cell
+  12's annual view plots — verified equal to 10 decimal places on both reference arms. The
+  ρ and p **did move**, because dividing by a per-household gain before the median is not a
+  rank-preserving transform across kinds: AU went −0.68/p=0.094 → **−0.64/p=0.119**, SI
+  −0.93/p=0.003 → **−0.96/p=0.000**. The verdicts are unchanged (AU does not carry the
+  claim; SI does).
+- It also **gained a caption**. It was the only figure closing on a bare `pf.show`, so with
+  `titles=False` its `SOURCE.md` recorded no caption at all and the article had nothing to
+  put in `\caption{}`. It now goes through `chart_frame` + `layout="frame"` like the rest.
+
+### Figure width: the premise was false, and the fix is LaTeX-side
+
+`pf.PRESET` is `screen` = `IEEE_PAGE_W` = 7.16 in = `\textwidth`. All 21 `SOURCE.md` files
+say `7.16 x ... in`. **Nothing in this notebook is column-width and widening is not
+available** — 7.16 is already the maximum. What makes the figures read small is a 7.16 in
+graphic included at `width=\columnwidth`, which scales it to 49 % and halves every font.
+
+New cell at the end of the notebook emits `pf.latex_figure(name, caption, subdir="hems",
+span=True)` for all 21, reading each figure's recorded caption out of its `source.json` so
+the caption and the image cannot drift. Note `latex_figure` does **not** read the module
+`SUBDIR` global — `subdir="hems"` must be passed or the include path is wrong.
+
+The knobs, in order: the **float** (`figure*`), then **`ratio`** in `pf.figsize(ratio=...)`
+if a figure wants to be taller at the same width, then the **base font size** in
+`Plotting_Functions.py` — and only if the figures are already in `figure*` and still read
+small. The width is not a knob.
+
+### The readability pass was measured, not eyeballed
+
+Every figure was rendered through the real `pf.show` pipeline and checked mechanically for
+text-on-text overlap and text straddling the canvas edge, then looked at. **17 of 19 figures
+had at least one defect; all 21 are now clean.** Two classes were invisible to a casual read:
+
+- **Legend rows and axis labels ran off the exported box.** `chart_frame`'s legend is
+  centred on the figure and a three-column row of long labels was wider than 7.16 in, so
+  `rule-based (RBC)` started 44 px left of the canvas and the star key ended 8 px past its
+  right edge. Separately, `finish(ax, xlabel=...)` centres on the **axes**, which thirteen
+  rows of tick labels push well right of the figure's centre — the ranking figure's lifetime
+  x label overhung by 65 px. Fixed by shortening: `view["per"]` for the lifetime view, the
+  star key to `* same MILP, no degradation term` (one wording in all five cells that use
+  it), and the ranking figure's lifetime label now **names** its denominator
+  (`PCT_OF_LIFETIME_BILL`, new in cell 10) instead of qualifying it — `lifetime_saving_pct`
+  divides by `baseline_cost_total * pv_factor`, so the old `PCT_OF_BILL` was also imprecise.
+- **The exported PDF is not trimmed, so overhanging text is genuinely cut.** `save_fig` uses
+  `tight=False` for `layout="frame"` figures. Watch for this when iterating: passing
+  `bbox_inches=None` to `savefig` resolves back through `_val_or_rc` to
+  `rcParams["savefig.bbox"] == "tight"`, so a PNG saved that way is trimmed while the PDF is
+  not, and the trimmed PNG hides every defect of this class. Only the rcParam turns it off.
+
+Also fixed:
+
+- **`tick_label` (cell 10)** — width 30 → 34 plus one short override, so all sixteen rows are
+  now a single line on cells 11, 17 and 19. Only two labels ever wrapped, and one of them
+  (`self-consumption + peak shaving`, 31 chars) was one character over.
+- **The long left tail on the ranking panels** — new `clip_window` helper in cell 10 (shared,
+  since the strip figure uses it too). The axis is clipped to a robust range widened to hold
+  every median; households outside it are drawn **on** the boundary as carets and counted in
+  the key. The AU lifetime panel went from −42..+27 to −13..+27. Nothing is dropped and the
+  medians are still taken over all 30.
+- **Cell 18's `n=30/29 unpaired` tags** — 6.5 pt against the markers, now 7.5 pt pinned to
+  the axes edge as a right gutter column, the pattern cell 19 already used.
+- **`skill_vs_regret`'s label ladder** — the collisions were **horizontal**, so no ladder of
+  vertical offsets could fix them; a sweep of the whole offset grid moved them around
+  without removing one. Seven names averaging ~90 px cannot fit a ~330 px half-width panel.
+  The panels are now **stacked**, full width, sharing both axes — which also makes the new
+  finding visible, that the SI regret band sits entirely above the AU band.
+
+### What is left
+
+- **Cell 18 is the only figure still using the long `LABEL.get(c, c)` names** rather than
+  `tick_label`, and `RBC: price threshold, full-year foresight (diagnostic)` eats about 38 %
+  of its width. It was left alone deliberately: it is the one figure whose key does **not**
+  carry the family markers, so the `RBC:`/`MPC-MILP` prefix is the only place the family is
+  named. Shortening the labels there means adding a family key first.
+- **Cell 20's value labels** sit close to their markers on short bars (`−0.1` on the SI
+  Prophet row). Below the overlap threshold, but it is the next thing to tighten.
+- The overlap/clipping checker used for this pass is not committed. If a pass 4 touches
+  geometry, rebuild it: walk `fig.findobj(Text)` after `fig.canvas.draw()`, drop tick labels
+  whose tick is outside the axis view limits (they are ghosts and produce false reports on
+  both checks), and test pairwise bbox intersection plus straddling of the renderer's box.
+  A text-only check still misses a label sitting on somebody else's **marker** — check label
+  boxes against `collection.get_offsets()` too, which is how the caveat-household labels in
+  `household_heterogeneity` were caught and turned into rings.
+
+## Status, 2026-09-14 (pass 2) — this list is CLOSED
+
+Everything in sections 1-7 below is done, plus a round of user-requested work that went
+past it. **Read this section, not the per-item status lines below, which are stale.**
+The sections are kept for the reasoning, not the state.
+
+### Done in this pass
+
+**Data layer (`hems_study.py`).** Two rates where there was one: `cycle_cost_eur_per_efc`
+is the MILP's shadow price and `cycle_cost_reporting_eur_per_efc` is what the cycles cost.
+`summarize` and `full_period_bound_check` now bill wear at the second and only ever read a
+*positive* dispatch rate back — a solved rate of zero is the one value that cannot mean "a
+different pack price". Without this the no-degradation arm reports zero wear and the
+hardest-cycling controller in the study tops every chart whose axis says "net of wear".
+Both places had the bug; the second (`total_*`, and therefore `saving_total`) was found
+only by rendering the figure and disbelieving it.
+
+New columns, all with tests: `roi_pct`, `break_even_capex`, `lifetime_saving`,
+`lifetime_saving_undisc`, `pv_factor`, `lifetime_wear`, `saving_total_pct`,
+`lifetime_saving_pct`, `wear_pct`, `regret_pct_of_gain`, `life_binds_on_cycles`,
+`wear_rate_charged` / `_accounted` / `wear_priced_in_objective`. `roi_pct` and
+`break_even_capex` were computed by `Battery_Economics` all along and thrown away.
+
+**Four new arms**: `{AU,SI}_{H24,H11}_nowear`, the same arms with
+`cycle_cost_eur_per_efc = 0`. They are a controlled ablation — everything else is the
+twin's — and the rules in them are expected to be bit-identical, which is the control.
+`forecast_arms` excludes them: they carry no `forecaster_kind` either, and would otherwise
+answer "which arm shows me Prophet?" by roster order, the same trap `AU_H24_leaked` set.
+
+**`test_hems_study.py` is 67 passed, 0 failed** (was 42).
+
+### The figures
+
+Nineteen exports, every one rendered and looked at. Money figures come in an `annual` and a
+`_lifetime` version driven by one `VIEWS` loop; the annual view keeps every pre-existing
+export name so the LaTeX side does not move.
+
+- `controller_ranking_{au,si}[_lifetime]` — **now drawn on `saving_total_pct`, not
+  `saving_pct`.** That was the one real correctness bug in the set: on the energy bill
+  alone, three AU price rules score above the row labelled "optimum" (106.6 % of a supposed
+  ceiling) because they buy their saving out of pack life and the measure cannot see it.
+  Also sorted, beeswarmed instead of jittered, and the AU/SI roster difference is stated in
+  the caption.
+- `forecast_channel_regret[_lifetime]` — **`regret_pct_of_gain`, so both tariffs share one
+  axis.** Sorted by regret on the AU ordering (panels stay aligned, so a rank disagreement
+  stays visible), with a reference rule at the study's own forecaster.
+- `forecast_method_skill` — `ratio=0.62` (0.42 was ~11 px a row and would not have
+  printed), `yesterday` marked as the baseline instead of a zero bar labelled `+0.00`, and
+  sign is green/**red**: orange is the SI tariff everywhere else in this notebook.
+- `skill_vs_regret` — prints `n` and `p`. AU is rho -0.61 at **p = 0.15** and does not carry
+  the claim; SI does. Printed side by side without them the two read as one finding.
+- `wear_vs_saving_{au,si}[_lifetime]` — both axes are shares. The lifetime view divides by
+  the **capital**, not the lifetime bill: a discounted saving over a discounted bill cancels
+  `pv_factor` out of both and reproduces the annual panel under a new axis label, which the
+  first draft duly shipped.
+- `lifetime_economics_{au,si}[_money]` — the percentage version is now the default
+  (`roi_pct`), money is the variant. The hollow-to-solid connector is drawn **only where the
+  same households are behind both ends**; on SI it joined a median over twenty to a median
+  over one and asserted the install fee costs 19.2 IRR points. Marker area is documented in
+  the key, and both `n` are always printed.
+- `break_even_capex_{au,si}` — NEW. Defined for every household, so it has none of the IRR
+  panel's n=1 problem. As a share of today's quote: the pack must reach 37 % of it on AU and
+  21 % on SI, pack-only — and with the install fee in, every value is negative, i.e. no cell
+  price pays, free included.
+- `horizon_effect` — NEW, and the H24/H11 axis had no figure at all. Paired per household.
+  Perfect foresight gains from the longer horizon; a Prophet forecast does not, and with no
+  degradation term the longer horizon actively hurts it.
+
+### What is left
+
+Only §7.4, the household-heterogeneity strip. `study_units()` carries `cluster` and
+`dist_to_centroid` for it and nothing plots them.
 
 ## The house style you must stay inside
 
@@ -154,7 +338,17 @@ are nearly coincident because the x range is dominated by the distance to zero, 
 "gap = what the fee is worth" reading the cell's comment promises is invisible. Consider
 plotting the **fee's** NPV delta as its own small panel, or breaking the x axis.
 
-## 3. Cell 16 — `wear_vs_saving_*` is the wrong chart for this data
+## 3. DONE — cell 16 (now 17) — `wear_vs_saving_*` is the wrong chart for this data
+
+**Replaced by a sorted dumbbell**, one row per controller, name on the y axis. Per row: the
+median household's annual saving as the family marker, its annual wear as a tick, a bar between
+them coloured by sign (green = the saving covers the wear), and a right-aligned column printing
+`saving_net_of_wear` — the paired median the tables quote, which differs from the gap between
+the marks by a few units of currency because it is taken per household first — with the row's
+EFC beside it. The wear-rate sensitivity survived as a second, pale tick at the 250 EUR/kWh
+quote, AU only, drawn from `_slope` read out of the frame. `place_labels` had no callers left
+and was deleted; `tick_label` in the styling cell replaced it and is shared with the ranking
+figure. Original text:
 
 Do not try to fix this with better label placement. The `place_labels` helper in cell 10 is
 ~150 lines of ring search, leader lines, wrapping and a scored fallback, and it is fighting
@@ -207,10 +401,14 @@ labelled `both: Prophet` rather than `PV: Prophet`. Remaining, all presentationa
   arm, and `set_xlim(0, ...)` silently hides a negative regret and puts its value label
   off-axes. Every value is positive today; neither is guaranteed.
 
-## 5. Cell 11 — `controller_ranking_*` (one item done)
+## 5. DONE — cell 11 — `controller_ranking_*`
 
-The `edgecolor` warning is fixed: the halo is only passed for markers that have a face. The rest
-of this section stands.
+All four items. The `edgecolor` warning is gone (the halo is only passed for markers with a
+face); the family prefix is dropped from the tick labels and the rest wrapped at 30 characters
+by `tick_label`, with the figure grown to `ratio=0.78` so thirteen two-line labels have room;
+`FAMILY_SHADE` was widened to 0.72/0.46/0.22/0.0, where the four steps are distinguishable at
+`alpha=0.6`; and a family key — shape *and* shade, on the figure via `chart_frame` — now
+documents the RBC/MPC/MILP encoding inside the image. Original text:
 
 - The y tick labels eat about a third of the width, `"RBC: price threshold, full-year
   foresight (diagnostic)"` worst. Wrap to two lines, or move the family prefix (`RBC:`,
@@ -244,7 +442,15 @@ Besides the legend blocker in §1:
 In priority order. The first one is the figure the notebook's title question needs and does
 not have.
 
-1. **Skill vs. regret scatter.** Forecast skill (cell 13's `bench`) on x, paired median regret
+1. **DONE — Skill vs. regret scatter.** Built as a new cell after the skill figure, exported as
+   `skill_vs_regret`. x is the mean of the two channels' skill per household, then the median;
+   y is the paired median regret, unchanged from the regret cell; seven kinds are in both
+   tables now that `prophet_tuned` is in `BENCHMARK_KINDS`. Labels alternate above and below
+   in x order, which is what keeps the two near-coincident pairs apart. It carries a Spearman
+   ρ per panel, and the answer is that skill does order regret: ρ = −0.68 on AU and −0.93 on
+   SI. Adding `prophet_tuned` to the benchmark also closed the gap this item flagged — it is
+   scored on the full roster now, and it does **not** reproduce what the 8-household screen
+   found. Original text: Forecast skill (cell 13's `bench`) on x, paired median regret
    (cell 12's computation) on y, one point per forecaster kind, faceted by tariff. Six kinds
    are in both tables — `persistence`, `median14`, `prophet`, `hbd`, `hbd_baseline`,
    `hbd_median14` — which is enough. Right now a reader has to do this join by eye across two
