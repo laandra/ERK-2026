@@ -37,7 +37,116 @@ sweep is fully cached) so the stored outputs match the code, and verify no cell 
 
 Read the `dataviz` skill before writing chart code.
 
-## Status, 2026-09-14 (pass 3) — READ THIS ONE FIRST
+## Status, 2026-09-15 (pass 4) — READ THIS ONE FIRST
+
+Pass 4 was not a geometry pass. Pass 3 left the figures clean to the eye and to a
+checker; what was still wrong was **statistical**: three figures printed a number the
+picture did not show, and one of the three was costing the paper a result it has. It
+also added the two comparisons the study can make and had no figure for.
+
+**26 exports now** (21 + 5 new). No existing name was renamed or dropped.
+`python3 test_hems_study.py` is **67 passed, 0 failed**; `hems_study.py`,
+`Plotting_Functions.py` and `test_hems_study.py` were not touched. `CODE.ipynb`
+re-executes in **99 s with zero cell errors and no warning** but the pre-existing
+`ipywidgets` one from cell 1.
+
+### New files, and why the style moved out of cell 10
+
+- **`figure_style.py`** — the house style, minus anything that closes over the sweep.
+  It moved because a SECOND notebook now needs the same semantics, and a palette
+  defined in two cells is a second source of truth. Cell 10 imports from it and keeps
+  only `make_labels`/`LABEL`, `SAMPLE`, `nowear_twin`/`with_nowear` and a one-line
+  `tick_label` that binds this notebook's `LABEL` into the shared shortener (which now
+  takes the label map as an argument — the horizon is part of an MPC controller's
+  identity, so the map is per-arm and cannot be a module constant). `FAMILY_LABEL` and
+  `beeswarm` came out of cell 11, `BEATS`/`LOSES` out of cells 14, 17 and 23.
+  New in it: `boot_ci`, `boot_ci_paired`, `spearman_ci`, `rho_lines`, `corner_block`,
+  `holm`, and `PCT_OF_GAIN_SHORT`. **Do not add a fourth wording for a denominator.**
+- **`anomaly.py`** — public holidays off the run's own calendar, absence detection, and
+  the cached daily panel (`results_local/daily_panel.csv`, provenance columns and a
+  staleness check like `forecast_benchmark.csv`). ~15 s warm for 30 households x 5
+  methods; **hours against a cold forecast cache**, so run the sweep first.
+- **`FIGURES_FORECAST.ipynb`** — the new figures, plus the defect checker, committed
+  this time (see below).
+
+### The three reworked figures — same names, ported back into CODE.ipynb
+
+- **`skill_vs_regret` (cell 15). This one changed a conclusion.** It correlated seven
+  method medians against seven and threw away the pairing the whole of section 5 rests
+  on. On seven points AU is ρ = −0.64 at **p = 0.119**, and the old caption said AU
+  "does not carry the claim". It does: within each household, across the seven methods,
+  the correlation is negative on **28/30** households on AU (sign test p = 9e-7) and
+  **30/30** on SI (p = 2e-9). Both readings are printed, the between-method one now
+  with a bootstrap CI that says how little seven points support. The caveats cell
+  carries the correction.
+- **`household_heterogeneity` (cell 22).** Spearman drawn on the rank axis it measures,
+  not on a raw axis with two thirds of the households under 30 and one at 96. Same ρ
+  and p; a Theil–Sen line fitted **in rank space** (the one line a rank statistic
+  licenses — the old cell was right to refuse an OLS line in data space, and the comment
+  now says why this one is different) and a bootstrap CI on ρ.
+- **`forecast_channel_regret` (cell 12, both views).** Percentile bootstrap CI on every
+  paired median, and every row tested against its panel's best, Holm-adjusted over the
+  thirteen comparisons. All thirteen separate on both tariffs — so the hollow "not
+  separable" key never fires on this sweep and is only added when it does, because a
+  legend entry with no instance is decoration a reader then hunts for.
+
+### Five new figures
+
+`top_methods_headtohead`, `top_methods_channels`, `holiday_effect`,
+`absence_forecast_breakdown`, `absence_map`. The two results worth knowing:
+
+- **The best forecast is not the same one on both tariffs.** `hbd_median14` wins AU by
+  0.64 pp of the achievable gain (p = 0.0006, 22/30) and loses SI to plain `median14`
+  by 1.90 pp (p = 0.0003, 23/30). Hand both a perfect PV forecast and the swap survives
+  and sharpens (2/30 against 28/30), so it is a **consumption-channel** effect.
+- **Public holidays do nothing; absences do everything.** The holiday effect is +0.017
+  against the households' own workdays at p = 0.18 — the wrong sign — while the same
+  statistic finds the weekend at p = 1e-4, which is the positive control that makes the
+  negative result mean something. What breaks the forecasts is 37 multi-day absences
+  across 22 of the 30 houses: copying yesterday's error falls to **x0.22**, Prophet's
+  rises to **x1.53**, every model-based method over-predicts (22/22 households for the
+  median methods), and Prophet throws away **34 %** of the day's achievable gain against
+  9 % normally. Raw daily cash goes the *other* way — an empty house has less to win —
+  which is why the money panel divides by the day's own gain and says so.
+
+### The checker is committed now
+
+It is the last cell of `FIGURES_FORECAST.ipynb`. Two traps cost real time rebuilding it,
+both worth knowing before a pass 5 touches it:
+
+- **Ghost ticks.** A locator routinely emits ticks beyond the view limits. They are never
+  drawn, but their `Text` artists have positions, and on a right-hand panel they sit past
+  the canvas edge — five false "clipped label" reports. Zipping `get_ticklocs()` against
+  `get_ticklabels()` does not identify them; ask the `Tick` object for its own `get_loc()`
+  and its own `label1`/`label2`. And they must be excluded from the **figure-level** sweep
+  as well as the per-axes one, or the figure-level pass picks straight back up everything
+  the axes pass just dropped.
+- **A trimmed PNG hides the whole clipped class.** `savefig` with `bbox_inches` unset
+  resolves to `rcParams["savefig.bbox"] == "tight"`, which grows the canvas to fit
+  overhanging text; the exported PDF uses `tight=False` for `layout="frame"` and cuts it.
+  Set the rcParam to `None` while iterating.
+
+The residue it reports is one accepted class: a numbered badge on `skill_vs_regret`,
+drawn on a surface pad, covers one to five points of a 210-point cloud. There is no
+placement in that panel that covers none.
+
+### What is left
+
+- Cell 18 still uses the long `LABEL.get(c, c)` names — unchanged from pass 3, and the
+  reason is unchanged: it is the one figure whose key does not carry the family markers.
+- Cell 20's value labels still sit close to their markers on short bars.
+- The daily money panel is **AU only**, and `anomaly.daily_panel` raises rather than
+  guessing: SI's excess-power charge is monthly and endogenous to the controller's own
+  peaks, so a day is not a settleable unit there. A per-month SI decomposition is the
+  obvious next thing if the absence result needs a second tariff.
+- The channel decomposition is **one-sided**. The sweep has a perfect-PV twin for each
+  top method and no perfect-LOAD twin, so `top_methods_channels`'s lower segment is "what
+  survives a perfect roof" — the load channel plus any interaction — and is labelled as
+  that rather than as a measured load-only term. Four `*_loadtruth` arms would close it.
+
+## Status, 2026-09-14 (pass 3) — this list is CLOSED
+
+Kept for the reasoning, not the state. Pass 4 above supersedes it.
 
 Pass 3 closed §7.4, converted the last two money regret axes to shares, ran a measured
 readability pass over every figure, and settled the figure-width question. **21 exports now**
