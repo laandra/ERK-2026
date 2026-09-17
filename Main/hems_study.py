@@ -293,9 +293,9 @@ class EnergyForecaster:
 # The sweep ahead of this pipeline is two tariffs x two horizons x 30 households
 # x a simulated year, so nothing may be recomputed that has already been
 # computed -- and nothing may be REUSED that was computed under different rules.
-# Upstream solves both halves with one idea (Horizon_Comparison.run_user): every
-# checkpoint carries a tag describing the study it was produced under, and a
-# checkpoint whose tag no longer matches is dropped rather than resumed into.
+# Both halves are solved by one idea: every checkpoint carries a tag describing
+# the study it was produced under, and a checkpoint whose tag no longer matches
+# is dropped rather than resumed into.
 #
 # The two caches are keyed DIFFERENTLY, on purpose:
 #
@@ -309,7 +309,7 @@ class EnergyForecaster:
 
 # Anchored to THIS FILE, not to the cwd. A relative "forecast_cache" resolves
 # against wherever the process happens to have started -- the notebook runs
-# from Yoann/, a worker process or a test harness need not -- and a cache that
+# from Main/, a worker process or a test harness need not -- and a cache that
 # moves when the cwd moves is a cache that silently misses and refits Prophet.
 _HERE = os.path.dirname(os.path.abspath(__file__))
 FORECAST_CACHE_DIR = os.environ.get(
@@ -706,24 +706,6 @@ def controller_family(name: str) -> str:
     """RBC / MPC / MILP / reference -- what KIND of thing a row is."""
     entry = CONTROLLER_ALGORITHM.get(name)
     return entry[0] if entry else "RBC"
-
-
-def arm_label(name: str, delta_t: float = 0.5) -> str:
-    """The display name for one study arm: tariff, algorithm, horizon, forecast."""
-    spec = next((a for a in STUDY_ARMS if a["name"] == name), None)
-    if spec is None:
-        return name
-    horizon = horizon_label(spec.get("control_horizon"), delta_t)
-    kind = spec.get("forecaster_kind", "prophet")
-    parts = [spec["tariff"], f"MPC-MILP {horizon}", forecast_kind_label(kind)]
-    if spec.get("leak_current_interval"):
-        parts.append("current-interval leak")
-    # The objective, where it is not the study's default. An arm whose MILP does
-    # not pay for its cycles is a different method from one whose MILP does, and
-    # the label is the only place a reader of a table meets the difference.
-    if "cycle_cost_eur_per_efc" in spec and not spec["cycle_cost_eur_per_efc"]:
-        parts.append("no degradation term")
-    return " \u00b7 ".join(parts)
 
 
 def seasonal_naive(actual: pd.Series, spd: int) -> pd.Series:
@@ -1199,7 +1181,7 @@ def _find_repo_root(start: str | None = None) -> str:
     """Walk up until the shared modules are in sight.
 
     Mirrors Data_Loader._find_workspace_root rather than assuming a fixed depth:
-    `os.getcwd() + "/.."` is only correct when the cwd happens to be Yoann/, and
+    `os.getcwd() + "/.."` is only correct when the cwd happens to be Main/, and
     silently resolves somewhere else when the notebook is run from the repo root,
     from a test harness, or from Colab.
     """
@@ -3624,28 +3606,6 @@ def tuning_ranking(tuning: pd.DataFrame) -> pd.DataFrame:
                          values=["nmae", "skill"]))
 
 
-def best_prophet_params(tuning: pd.DataFrame,
-                        grid: dict | None = None) -> tuple:
-    """The winning override for each channel -> (params_con, params_gen).
-
-    Each channel is chosen independently, which is the whole reason the search
-    is a coordinate one: the trend term that helps a roof need not be the one
-    that helps a household, and nothing forces one config to win both.
-    """
-    grid = PROPHET_TUNING_GRID if grid is None else grid
-    med = (tuning.groupby(["config", "channel"], observed=True)["skill_vs_naive"]
-                 .median().unstack())
-    best_con = med["consumption"].idxmax()
-    best_gen = med["generation"].idxmax()
-    print(f"[tune] best consumption config {best_con!r} "
-          f"(skill {med.loc[best_con, 'consumption']:+.3f} vs "
-          f"{med.loc['default', 'consumption']:+.3f} default)")
-    print(f"[tune] best generation  config {best_gen!r} "
-          f"(skill {med.loc[best_gen, 'generation']:+.3f} vs "
-          f"{med.loc['default', 'generation']:+.3f} default)")
-    return grid[best_con][0], grid[best_gen][1]
-
-
 # =====================================================================
 # 7 — Pipeline for ONE dataset (formerly main(), now parameterized)
 # =====================================================================
@@ -4392,16 +4352,15 @@ def run_all(data_dir: str,
 #
 # The 30 sites are not a hand-picked list, though they were written down as one.
 # They are the centroid-nearest member of each of 30 k-means clusters over all
-# 300 Ausgrid households -- `rank_in_cluster == 1` in the clustering
-# `Andraz/cluster_sweep_analysis/sweep_analysis.ipynb` also draws its ten fixed
-# evaluation users from. One household per cluster is a deliberate sample that
-# spans the consumption shapes present in the population, and it is a far better
-# story than "30 ids", so it is derived here rather than transcribed: the rule is
-# then executable, and a reviewer can check it.
+# 300 Ausgrid households -- `rank_in_cluster == 1` in the sweep that
+# `Clustering/cluster_households.py` runs. One household per cluster is a
+# deliberate sample that spans the consumption shapes present in the population,
+# and it is a far better story than "30 ids", so it is derived here rather than
+# transcribed: the rule is then executable, and a reviewer can check it.
 
 CLUSTERING_CSV = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
-    "..", "Andraz", "clustering_results", "user_ids_sorted_by_cluster_30.csv",
+    "..", "Clustering", "Ausgrid", "user_ids_sorted_by_cluster_30.csv",
 )
 
 
@@ -4419,13 +4378,14 @@ def study_units(path: str | None = None, k: int = 30) -> pd.DataFrame:
         # frames down. This is the FIRST thing the notebook calls and the first
         # thing `collect_results` calls, so a missing file breaks every cell at
         # once with a traceback that names neither the study nor the fix -- and
-        # it has already happened once, when `../Andraz` was renamed.
+        # it has already happened twice, on moves of the clustering output.
         raise FileNotFoundError(
             f"the clustering that defines the study households is not at\n"
             f"  {path}\n"
             f"Every household id, and therefore every result, is derived from "
             f"it. Point `hs.CLUSTERING_CSV` at the file or pass `path=`; it is "
-            f"`user_ids_sorted_by_cluster_{k}.csv` from the k-means sweep."
+            f"`user_ids_sorted_by_cluster_{k}.csv`, which "
+            f"`Clustering/cluster_households.py` writes."
         )
     df = pd.read_csv(path)
     picked = df[df["rank_in_cluster"] == 1].sort_values("cluster")

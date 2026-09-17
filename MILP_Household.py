@@ -63,8 +63,7 @@ from si_obracun import Pravila  # noqa: E402
 # Battery, horizon and solver defaults
 # ---------------------------------------------------------------------------
 # Shared by every study so two of them cannot quietly size the same battery
-# differently. `Horizon_Comparison` re-exports these, which is where most
-# callers still read them from.
+# differently.
 STEPS_PER_DAY = 96
 SOC_FRACTION = 0.5
 CHARGE_EFFICIENCY = 0.95
@@ -146,8 +145,8 @@ def build_household_env(
 
     `agreed_power` is the dogovorjena-obracunska-moc rule as a dict of
     `connection_power_kw` / `min_agreed_power_kw` / `agreed_power_lag_months` /
-    `agreed_power_bootstrap`. Left out, the environment's own defaults apply --
-    which is what every study except `Horizon_Comparison` relies on.
+    `agreed_power_bootstrap`. Left out, the environment's own defaults apply,
+    which is what every caller relies on.
 
     `capacity_kwh` is the NAMEPLATE pack -- what the invoice is for. The SOC
     window derates it to the usable capacity the physics actually sees, and that

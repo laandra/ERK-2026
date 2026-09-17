@@ -257,21 +257,6 @@ def boot_ci(values, stat=np.median, n_boot=10_000, alpha=0.05, seed=0):
             float(np.quantile(draws, 1.0 - alpha / 2.0)))
 
 
-def boot_ci_paired(a, b, stat=np.median, n_boot=10_000, alpha=0.05, seed=0):
-    """The same, for the PAIRED difference of two aligned samples.
-
-    The pairing is the whole argument of the study's section 5: every household
-    runs under every arm, so the unit is the per-household difference and
-    resampling the two arms independently would throw that away and widen the
-    interval to something the data does not say.
-    """
-    a = np.asarray(a, dtype=float)
-    b = np.asarray(b, dtype=float)
-    ok = (a == a) & (b == b)
-    return boot_ci(a[ok] - b[ok], stat=stat, n_boot=n_boot, alpha=alpha,
-                   seed=seed)
-
-
 def spearman_ci(x, y, n_boot=10_000, alpha=0.05, seed=0):
     """Spearman rho with its p and a bootstrap CI, as one call.
 

@@ -30,4 +30,4 @@ Results/Figures/
 
 # Fitted forecaster parameters: derived, per-household, and large.
 # Same reasoning as forecast_cache/ -- a cache, not a result.
-Yoann/hbd_params/
+Main/hbd_params/
