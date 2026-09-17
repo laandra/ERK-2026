@@ -894,7 +894,14 @@ def load_or_build_forecasts(dataset_name: str,
               f"generation from {gen_source}")
     else:
         table = channel_table(kind)
-    table.to_csv(path, index=False, compression="gzip")
+    # ATOMIC, for the same reason the oracle cache is: the key drops the tariff,
+    # the horizon and the leak flag, so one entry serves several arms -- and
+    # since the sweep was split across three notebooks those arms can be running
+    # in two kernels at once. A plain `to_csv` leaves a half-written gzip at the
+    # final path that the other kernel reads as a cache hit; `os.replace` means a
+    # reader sees the whole file or no file. `_atomic_write` is defined below --
+    # module level, resolved at call time.
+    _atomic_write(path, lambda t: table.to_csv(t, index=False, compression="gzip"))
     print(f"  [Forecaster] cached {len(table)} rows -> {os.path.basename(path)}")
     served = TableForecaster(table)
     served.table = table
@@ -4717,9 +4724,9 @@ def _run_arms_parallel(data_dir, output_root, dataset_ids, filename_template,
         allrows = allrows.sort_values(
             ["arm", "dataset"], key=lambda s: s.map(ARM_ORDER.index)
             if s.name == "arm" else s)
-        path = os.path.join(output_root, "summary_all_arms.csv")
+        path = sweep_summary_path(output_root, arms)
         allrows.to_csv(path, index=False, encoding="utf-8-sig")
-        print(f"\nAll arms: {path}")
+        print(f"\n{len(arms)} arm(s): {path}")
 
     # WHAT the elapsed time bought. A sweep whose checkpoints are all valid
     # finishes in a minute because it executed nothing, and reporting that as
@@ -4801,6 +4808,29 @@ def _household_all_arms(file_path, output_root, arms, log_dir, kwargs):
     return rows
 
 
+def sweep_summary_path(output_root: str, arms) -> str:
+    """Where `run_arms` writes its roll-up, named for the arms it actually swept.
+
+    "summary_all_arms.csv" was true while one notebook swept the whole roster.
+    The sweep is now partitioned across three notebooks, each passing its own
+    `arms=`, and all three writing that one filename means the last one to run
+    leaves a file whose name claims every arm and whose contents are one track's
+    -- last-writer-wins on a name that lies. Nothing READS it (`collect_results`
+    takes the checkpoints as the source of truth, and says so), so this is about
+    a person opening the file, which is the only thing it is for.
+
+    The full roster keeps the old name so an existing file is still overwritten
+    rather than orphaned beside a new one.
+    """
+    names = [a["name"] for a in arms]
+    if set(names) == {a["name"] for a in STUDY_ARMS}:
+        return os.path.join(output_root, "summary_all_arms.csv")
+    # Digested, not joined: 21 arm names make a 400-character filename. The arm
+    # count is in the name so the file is recognisable without opening it.
+    tag = config_digest({"arms": sorted(names)})[:8]
+    return os.path.join(output_root, f"summary_{len(names)}_arms_{tag}.csv")
+
+
 def run_arms(data_dir, output_root="results", dataset_ids=None,
              filename_template="Ausgrid {id}.csv", arms=None, n_jobs=1, **kwargs):
     """Every arm over every dataset, into one long frame.
@@ -4834,9 +4864,9 @@ def run_arms(data_dir, output_root="results", dataset_ids=None,
     if not rows:
         raise RuntimeError("no arm produced any result")
     allrows = pd.concat(rows, ignore_index=True)
-    path = os.path.join(output_root, "summary_all_arms.csv")
+    path = sweep_summary_path(output_root, arms)
     allrows.to_csv(path, index=False, encoding="utf-8-sig")
-    print(f"\nAll arms: {path}")
+    print(f"\n{len(arms)} arm(s): {path}")
     return allrows
 
 
