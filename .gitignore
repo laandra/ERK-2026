@@ -31,3 +31,9 @@ Results/Figures/
 # Fitted forecaster parameters: derived, per-household, and large.
 # Same reasoning as forecast_cache/ -- a cache, not a result.
 Main/hbd_params/
+
+# Trained RL/IL networks and the cached MILP teacher traces: derived,
+# per-household, rebuildable from run_rl_benchmark.py under the config digest
+# stored beside each result JSON. The result JSONs under results_local/ are
+# the results and stay tracked.
+Main/rl_models/

@@ -672,6 +672,34 @@ CONTROLLER_ALGORITHM = {
 }
 
 
+# The learned controllers (`Main/rl_control.py`), keyed by the METHOD half of
+# the `<method>_<variant>` names `run_rl_benchmark` gives them -- the variant
+# is the observation contract, which is an axis of that screen rather than a
+# different controller, so it is not enumerated here. Resolved by prefix in
+# `controller_family` / `controller_label` below, which is what keeps a
+# variant added to the screen tomorrow from arriving unlabelled.
+#
+#   RL   reinforcement. Learns from its own dispatch, rewarded by the arm's
+#        own settlement; no demonstration, no LP at run time.
+#   IL   imitation. Clones the whole-period MILP solved over the TRAINING
+#        period, so what survives is what a reactive map can express of a
+#        perfect-foresight plan.
+LEARNED_ALGORITHM = {
+    # Longest first: "bc_dqn" must match before "bc".
+    "bc_dqn": ("IL+RL", "IL: cloned MILP, RL fine-tuned"),
+    "dqn":    ("RL", "RL: Double DQN"),
+    "bc":     ("IL", "IL: cloned MILP"),
+}
+
+
+def learned_method(name: str):
+    """The (family, label) of a learned controller, or None if it is not one."""
+    for method, entry in LEARNED_ALGORITHM.items():
+        if name == method or name.startswith(method + "_"):
+            return entry
+    return None
+
+
 def horizon_label(control_horizon, delta_t: float = 0.5) -> str:
     """A control horizon in STEPS, as the hours a reader thinks in.
 
@@ -692,7 +720,7 @@ def controller_label(name: str, control_horizon=None, delta_t: float = 0.5,
     Unknown names fall back to the key with its underscores opened up, so a
     controller added tomorrow is legible before anyone remembers to label it.
     """
-    entry = CONTROLLER_ALGORITHM.get(name)
+    entry = CONTROLLER_ALGORITHM.get(name) or learned_method(name)
     if entry is None:
         return name.replace("_", " ")
     template = entry[1]
@@ -703,8 +731,8 @@ def controller_label(name: str, control_horizon=None, delta_t: float = 0.5,
 
 
 def controller_family(name: str) -> str:
-    """RBC / MPC / MILP / reference -- what KIND of thing a row is."""
-    entry = CONTROLLER_ALGORITHM.get(name)
+    """RBC / MPC / MILP / RL / IL / reference -- what KIND of thing a row is."""
+    entry = CONTROLLER_ALGORITHM.get(name) or learned_method(name)
     return entry[0] if entry else "RBC"
 
 
