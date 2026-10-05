@@ -5151,15 +5151,142 @@ def controller_columns(df: pd.DataFrame) -> list:
     for col in df.columns:
         if col.startswith("cost_"):
             present.add(col[len("cost_"):])
+    # The LEARNED controllers are admitted by the same rule that labels them --
+    # `learned_method` resolves `<method>_<variant>` by prefix -- rather than by
+    # a second list of names here. A variant added to the RL screen tomorrow is
+    # then reported without editing this function, which is the property the
+    # rest of this module's name tables are built for. They sort between the
+    # rules and the MPC arms, which is where they sit on the information axis.
+    unknown = present - set(known)
+    learned = sorted(n for n in unknown if learned_method(n))
+    if learned:
+        cut = known.index("prophet")
+        known = known[:cut] + learned + known[cut:]
     # Only names that are actually controllers. An unrecognised cost_* column is
     # reported rather than sorted in at the end of the list, where it reads as a
     # controller nobody can name -- which is how "eur_closed_oracle" ended up in
     # the paired tables next to "peak shaving".
-    unknown = present - set(known)
+    unknown = unknown - set(learned)
     if unknown:
         print(f"  ! ignoring cost_* column(s) that name no controller: "
               f"{', '.join(sorted(unknown))}")
     return [c for c in known if c in present]
+
+
+# ---------------------------------------------------------------------------
+# The learned controllers, joined onto a results frame
+# ---------------------------------------------------------------------------
+# WHY A JOIN AND NOT A RE-RUN. `run_rl_benchmark` already scored these on the
+# same households, the same battery, the same sim year and the same `settle`,
+# through `Rule_Based_Control.run_policy` with the endogenous contract
+# converged -- the identical call `run_pipeline_for_file` would make. A greedy
+# network is deterministic, so re-running them inside each arm reproduces the
+# numbers already on disk bit for bit, at about eight hours of compute for the
+# full sweep. The join is the same measurement, not an approximation of it.
+#
+# WHICH TWO, AND WHY NOT THE THIRD. The clone and the fine-tuned clone are the
+# two that earn a place: over 30 households the clone beats plain reinforcement
+# on 29 of them on SI (Wilcoxon p < 1e-4) and ties it on AU, so `dqn` alone is
+# carried in `FIGURES_RL.ipynb` as the comparison it is, not here as an
+# alternative anyone should run.
+LEARNED_CONTROLLERS = [("bc", "fc_h24"), ("bc_dqn", "fc_h24")]
+
+# What the published models were trained under. A learned controller is a
+# function of the pack it learned on, so joining one onto an arm with a
+# different battery would be the "two batteries" failure this study already has
+# a test for -- silently, because nothing in a cost column says which pack it
+# came from.
+LEARNED_TRAINED_UNDER = {"battery_cap": 10.0, "n_sim": 365}
+
+
+def learned_screen_dir() -> str:
+    """Where `run_rl_benchmark` writes its per-run results."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "results_local", "rl_screen")
+
+
+def merge_learned_controllers(df: pd.DataFrame, controllers=None, arms=None,
+                              screen_dir=None, verbose: bool = True):
+    """Add `cost_/efc_/fixed_/total_<method>_<variant>` columns to a wide frame.
+
+    Returns a COPY with the learned controllers joined on, so a notebook can
+    show them beside the rules and the MILP arms without re-running anything.
+    Rows whose arm is not in `arms`, or whose household the screen never ran,
+    keep NaN and are simply absent from that controller's series.
+
+    `arms` defaults to the reference arms -- the ones whose full controller
+    roster the "all controllers" figures are drawn from. The learned
+    controllers are a property of the TARIFF, not of an arm's forecast, so they
+    are identical across the arms of one tariff exactly as the rules are;
+    joining them to every arm would repeat one number thirty-one times and
+    invite a reader to average it.
+    """
+    import json as _json
+
+    controllers = LEARNED_CONTROLLERS if controllers is None else controllers
+    arms = set(REFERENCE_ARM.values() if arms is None else arms)
+    root = screen_dir or learned_screen_dir()
+    out = df.copy()
+
+    # The guard: never join a controller onto a battery it did not learn.
+    for key, want in LEARNED_TRAINED_UNDER.items():
+        if key in out.columns:
+            bad = out[out["arm"].isin(arms) & (out[key] != want)]
+            if len(bad):
+                raise ValueError(
+                    f"the learned controllers were trained at {key}={want}, but "
+                    f"{len(bad)} target row(s) carry {sorted(set(bad[key]))}. "
+                    f"Joining them would compare two different batteries; "
+                    f"re-train for that configuration or pass `arms=` to "
+                    f"exclude it.")
+
+    # The accounting rate `total_*` is built at, read off the row so a no-wear
+    # arm cannot silently be billed at a different rate than its twin.
+    rate = (out["cycle_cost_reporting_eur_per_efc"]
+            if "cycle_cost_reporting_eur_per_efc" in out.columns
+            else out.get("cycle_cost_eur_per_efc", pd.Series(0.0, index=out.index)))
+    rate = pd.to_numeric(rate, errors="coerce").fillna(0.0)
+
+    found = {}
+    for method, variant in controllers:
+        name = f"{method}_{variant}"
+        cost = pd.Series(np.nan, index=out.index)
+        efc = pd.Series(np.nan, index=out.index)
+        fixed = pd.Series(np.nan, index=out.index)
+        n = 0
+        for i, row in out.iterrows():
+            if row["arm"] not in arms:
+                continue
+            ident = str(row["dataset"]).split()[-1]
+            path = os.path.join(root, str(row["tariff"]),
+                                f"{variant}__{method}", f"{ident}.json")
+            if not os.path.isfile(path):
+                continue
+            with open(path, encoding="utf-8") as fh:
+                r = _json.load(fh)
+            # `Cost_EUR_Closed`, the same column every rule is compared on.
+            cost[i] = r["cost_eur_closed"]
+            efc[i] = r["efc"]
+            fixed[i] = r["fixed_eur"]
+            n += 1
+        if n:
+            out[f"cost_{name}"] = cost
+            out[f"efc_{name}"] = efc
+            out[f"fixed_{name}"] = fixed
+            # Exactly `full_period_bound_check`'s `total()`: bill, plus the
+            # cycles at the accounting rate, plus the standing charge on SI
+            # (where it is NOT decision-independent -- the contract is
+            # endogenous, so a peak shaver walks itself onto a cheaper one).
+            total = cost + rate * efc.fillna(0.0)
+            on_si = out["tariff"].eq("SI")
+            out[f"total_{name}"] = total + fixed.fillna(0.0).where(on_si, 0.0)
+        found[name] = n
+
+    if verbose:
+        for name, n in found.items():
+            print(f"  learned: {name:18s} joined onto {n} row(s)"
+                  + ("" if n else "  -- no screen results found"))
+    return out
 
 
 def summarize(df: pd.DataFrame, reference="no_battery") -> pd.DataFrame:

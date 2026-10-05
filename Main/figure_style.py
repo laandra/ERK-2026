@@ -57,15 +57,26 @@ FAMILY = {c: hs.controller_family(c) for c in hs.CONTROLLER_ALGORITHM}
 # Shade is still the WEAK cue -- marker shape is the strong one, and the key on
 # the ranking figure names both -- but a redundant cue that cannot be seen is
 # not redundancy, it is decoration.
-FAMILY_SHADE = {"reference": 0.72, "RBC": 0.46, "MPC": 0.22, "MILP": 0.0}
-FAMILY_MARKER = {"reference": "x", "RBC": "o", "MPC": "*", "MILP": "D"}
+#
+# The three LEARNED families sit between RBC and MPC on the shade ramp, which is
+# where they sit on the information axis too: they read more than a rule and
+# less than a solve. They are told apart by SHAPE, the strong cue -- a square
+# for the clone, a triangle for reinforcement, and a filled triangle-down for
+# the hybrid -- because a fourth, fifth and sixth shade of one hue is not a cue.
+FAMILY_SHADE = {"reference": 0.72, "RBC": 0.46, "MPC": 0.22, "MILP": 0.0,
+                "IL": 0.38, "RL": 0.34, "IL+RL": 0.30}
+FAMILY_MARKER = {"reference": "x", "RBC": "o", "MPC": "*", "MILP": "D",
+                 "IL": "s", "RL": "^", "IL+RL": "v"}
 
 # WHAT THE SHAPES MEAN, for a key inside the image. The figures are built around
 # the RBC/MPC/MILP distinction -- it is what the shape and the shade both encode
 # -- and it was once documented nowhere a reader of the figure could see.
 FAMILY_LABEL = {"reference": "no battery", "RBC": "rule-based (RBC)",
                 "MPC": "MPC-MILP, receding horizon",
-                "MILP": "MILP, full-year horizon"}
+                "MILP": "MILP, full-year horizon",
+                "IL": "imitation of the MILP (IL)",
+                "RL": "reinforcement learning (RL)",
+                "IL+RL": "IL clone, RL fine-tuned"}
 
 # The star arms borrow their twin's family, marker and shade -- they ARE the same
 # algorithm -- and are told apart by the star in the name and by a hollow face.
@@ -73,6 +84,18 @@ FAMILY_LABEL = {"reference": "no battery", "RBC": "rule-based (RBC)",
 # case.
 for _c in list(FAMILY):
     FAMILY[_c + "*"] = FAMILY[_c]
+
+# The learned controllers are named `<method>_<variant>`, so they are resolved
+# by PREFIX in `hems_study.learned_method` and never appear as keys of
+# CONTROLLER_ALGORITHM -- which means the comprehension above cannot see them
+# and `FAMILY.get(c, "RBC")` would quietly draw every one of them as a rule.
+# `ctrl_family` asks hems_study instead of the dict, so one table stays the
+# single source of truth for both.
+def ctrl_family(controller):
+    """The algorithm family of any controller, learned ones included."""
+    c = str(controller)
+    base = c[:-1] if c.endswith("*") else c
+    return FAMILY.get(base) or hs.controller_family(base)
 
 
 def is_nowear(controller):
@@ -83,11 +106,11 @@ def is_nowear(controller):
 def ctrl_color(tariff, controller):
     """Fill for one (tariff, controller): the tariff's hue, shaded by family."""
     return pf.mix(TARIFF_COLOR[tariff], "#ffffff",
-                  FAMILY_SHADE[FAMILY.get(controller, "RBC")])
+                  FAMILY_SHADE[ctrl_family(controller)])
 
 
 def ctrl_marker(controller):
-    return FAMILY_MARKER[FAMILY.get(controller, "RBC")]
+    return FAMILY_MARKER[ctrl_family(controller)]
 
 
 # ---------------------------------------------------------------------------
