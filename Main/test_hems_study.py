@@ -596,15 +596,18 @@ def test_accounting_rate_survives_a_zero_dispatch_rate():
         out = hs.summarize(pd.DataFrame([row]))
         return out[out["controller"] == "milp_full"].iloc[0]
 
+    # The per-cycle rate is now the SHADOW price (`wear_shadow_eur`): what the
+    # objective charged, reported and never subtracted. The rate it is read at
+    # still has to be the right one, so these checks moved onto that column.
     priced = _summarized(physical)
-    check("a priced arm bills wear at the rate it solved under",
-          abs(priced["wear_eur"] - physical * efc) < 1e-9,
-          f"{priced['wear_eur']:.2f} EUR at {physical:.4f}/EFC")
+    check("a priced arm reports shadow wear at the rate it solved under",
+          abs(priced["wear_shadow_eur"] - physical * efc) < 1e-9,
+          f"{priced['wear_shadow_eur']:.2f} EUR at {physical:.4f}/EFC")
 
     nowear = _summarized(0.0)
-    check("a ZERO dispatch rate does not zero the reported wear",
-          abs(nowear["wear_eur"] - physical * efc) < 1e-9,
-          f"wear_eur {nowear['wear_eur']:.2f}, not 0.00")
+    check("a ZERO dispatch rate does not zero the reported shadow wear",
+          abs(nowear["wear_shadow_eur"] - physical * efc) < 1e-9,
+          f"wear_shadow_eur {nowear['wear_shadow_eur']:.2f}, not 0.00")
     check("the no-wear arm is flagged as unpriced in its objective",
           bool(nowear["wear_priced_in_objective"]) is False
           and bool(priced["wear_priced_in_objective"]) is True)
@@ -613,12 +616,80 @@ def test_accounting_rate_survives_a_zero_dispatch_rate():
     # original rule was written for.
     other = _summarized(2.0 * physical)
     check("a different positive pack price is still read back",
-          abs(other["wear_eur"] - 2.0 * physical * efc) < 1e-9)
+          abs(other["wear_shadow_eur"] - 2.0 * physical * efc) < 1e-9)
 
     # And an explicit accounting rate wins over both.
     named = _summarized(0.0, reported=1.5)
     check("an explicitly recorded accounting rate wins",
-          abs(named["wear_eur"] - 1.5 * efc) < 1e-9)
+          abs(named["wear_shadow_eur"] - 1.5 * efc) < 1e-9)
+
+
+def test_the_pack_is_paid_for_once():
+    """NPV at 5 % over min(12 y, 6000 EFC / EFC per year); no cash wear on top.
+
+    The NPV used to start from a saving already net of EFC x capex/6000 and
+    then subtract the full capex as well -- the cells paid for twice. Pinned
+    here: below the cycle limit a cycle costs nothing, above it the pack dies
+    early and the lost years are the whole cost of cycling.
+    """
+    cap = 10.0
+    capex = be.CAPEX_EUR_PER_KWH * cap + be.CAPEX_FIXED_EUR
+    r = be.DISCOUNT_RATE
+
+    def _row(efc):
+        row = {"arm": "X", "dataset": "d", "tariff": "SI", "cluster": 0,
+               "battery_cap": cap, "cycle_cost_eur_per_efc": 0.4167,
+               "cost_no_battery": 1000.0, "cost_milp_full": 800.0,
+               "cost_oracle": 800.0, "efc_no_battery": 0.0,
+               "efc_milp_full": efc, "efc_oracle": efc}
+        out = hs.summarize(pd.DataFrame([row]))
+        return out[out["controller"] == "milp_full"].iloc[0]
+
+    calm = _row(300.0)                      # 20 y of cycles: the calendar binds
+    op = calm["saving_operating"]
+    want = (op - capex * be.OPEX_FRAC_OF_CAPEX_PER_YEAR) \
+        * be.present_value_factor(r, 12) - capex
+    check("below the cycle limit the life is the 12 y calendar",
+          abs(calm["service_life_y"] - 12.0) < 1e-9
+          and not bool(calm["life_binds_on_cycles"]))
+    check("below the cycle limit a cycle costs nothing",
+          abs(calm["wear_eur"]) < 1e-9 and abs(calm["lifetime_wear"]) < 1e-9)
+    check("NPV = (operating saving - O&M) x PVF(life) - capex, wear not "
+          "subtracted again", abs(calm["npv"] - want) < 1e-6,
+          f"{calm['npv']:.2f} vs {want:.2f}")
+
+    hard = _row(1000.0)                     # 6 y of cycles: the cycles bind
+    want_h = (hard["saving_operating"] - capex * be.OPEX_FRAC_OF_CAPEX_PER_YEAR) \
+        * be.present_value_factor(r, 6) - capex
+    check("above the cycle limit the pack dies at 6000 EFC",
+          abs(hard["service_life_y"] - 6.0) < 1e-9
+          and bool(hard["life_binds_on_cycles"]))
+    check("and the NPV discounts over that shorter life",
+          abs(hard["npv"] - want_h) < 1e-6, f"{hard['npv']:.2f} vs {want_h:.2f}")
+    check("the annual wear is the extra capital recovery of the shorter life",
+          abs(hard["wear_eur"] - capex * (be.capital_recovery_factor(r, 6)
+                                           - be.capital_recovery_factor(r, 12)))
+          < 1e-6, f"{hard['wear_eur']:.2f}")
+
+
+def test_one_shadow_rate_rule():
+    """`shadow_wear_rate` is the only place the per-cycle price is resolved.
+
+    `merge_learned_controllers` once read an empty rate cell as 0 while
+    `summarize` fell back to the pack price, so a learned row's `total_` had no
+    wear in it and `summarize` added it back: the SI clone's operating saving
+    read 101 EUR/a against the 49 its own bill lines sum to.
+    """
+    physical = be.cycle_cost_eur_per_efc(10.0)
+    rows = pd.DataFrame({"battery_cap": [10.0, 10.0, 10.0, 10.0],
+                         "cycle_cost_eur_per_efc": [np.nan, 0.0, 0.9, 0.0],
+                         "cycle_cost_reporting_eur_per_efc": [np.nan, np.nan, np.nan, 1.5]})
+    r = hs.shadow_wear_rate(rows)
+    check("an empty rate cell falls back to the pack price, not to 0",
+          abs(r[0] - physical) < 1e-12, f"{r[0]:.4f}")
+    check("a zero dispatch rate falls back to the pack price", abs(r[1] - physical) < 1e-12)
+    check("a positive dispatch rate is read back", abs(r[2] - 0.9) < 1e-12)
+    check("a recorded accounting rate wins", abs(r[3] - 1.5) < 1e-12)
 
 
 def test_the_totals_are_billed_at_the_pack_price():
@@ -728,26 +799,33 @@ def test_regret_share_is_guarded_and_paired():
           pd.isna(got[("b", "prophet")]))
 
 
-def test_the_no_wear_arms_are_a_controlled_pair():
-    """Each no-degradation arm differs from its twin in the objective alone."""
+def test_the_wear_price_arms_are_a_controlled_pair():
+    """Each `*_wearprice` arm differs from its twin in the objective alone.
+
+    Since 2026-10-06 the main arms dispatch with no per-cycle wear term (the
+    accounting charges a cycle only through pack life) and these put the old
+    0.417 EUR/EFC back, as the ablation.
+    """
     by = {a["name"]: a for a in hs.STUDY_ARMS}
-    for nowear, twin in (("AU_H24_nowear", "AU_H24"), ("SI_H24_nowear", "SI_H24"),
-                         ("AU_H11_nowear", "AU_H11"), ("SI_H11_nowear", "SI_H11")):
-        check(f"{nowear} is in the roster", nowear in by)
-        if nowear not in by:
+    for priced, twin in (("AU_H24_wearprice", "AU_H24"), ("SI_H24_wearprice", "SI_H24"),
+                         ("AU_H11_wearprice", "AU_H11"), ("SI_H11_wearprice", "SI_H11")):
+        check(f"{priced} is in the roster", priced in by)
+        if priced not in by:
             continue
-        a = {k: v for k, v in by[nowear].items() if k != "name"}
+        a = {k: v for k, v in by[priced].items() if k != "name"}
         b = {k: v for k, v in by[twin].items() if k != "name"}
-        check(f"{nowear} differs from {twin} in the objective alone",
-              a.pop("cycle_cost_eur_per_efc", None) == 0.0 and a == b,
+        check(f"{priced} differs from {twin} in the objective alone",
+              a.pop("cycle_cost_eur_per_efc", None) == "pack" and a == b,
               f"{a} vs {b}")
+    check("no arm still carries the retired `_nowear` name",
+          not any(n.endswith("_nowear") for n in by))
     # And it must not be mistaken for a forecast variant: it carries no
     # `forecaster_kind`, so it defaults to "prophet" exactly like the twin.
     for tariff in ("AU", "SI"):
         arms = set(hs.forecast_arms(tariff).values())
-        check(f"{tariff}: the no-wear arm stays out of the forecast comparison",
-              not any(a.endswith("_nowear") for a in arms),
-              ", ".join(sorted(arms)) if any(a.endswith("_nowear") for a in arms)
+        check(f"{tariff}: the wear-price arm stays out of the forecast comparison",
+              not any(a.endswith("_wearprice") for a in arms),
+              ", ".join(sorted(arms)) if any(a.endswith("_wearprice") for a in arms)
               else "")
 
 
@@ -774,8 +852,10 @@ if __name__ == "__main__":
     test_a_rule_has_no_objective_to_price()
     test_the_totals_are_billed_at_the_pack_price()
     test_lifetime_is_the_npv_without_the_capital()
+    test_the_pack_is_paid_for_once()
+    test_one_shadow_rate_rule()
     test_regret_share_is_guarded_and_paired()
-    test_the_no_wear_arms_are_a_controlled_pair()
+    test_the_wear_price_arms_are_a_controlled_pair()
     print(f"\n{len(_passed)} passed, {len(_failed)} failed")
     if _failed:
         print("FAILED: " + ", ".join(_failed))

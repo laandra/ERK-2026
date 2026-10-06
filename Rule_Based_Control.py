@@ -149,10 +149,17 @@ def price_interval(env, idx, net_kwh, peak_state):
                   walks itself onto). Measured over 60 days on Ausgrid 127:
                   15.54 -> 13.24 EUR on fixed, on top of 1.78 -> 0.33 on power.
     """
+    # The stamps as a plain list, built once per index: `DatetimeIndex[idx]`
+    # costs ~35 us a call, 7 % of an RL training step. Same Timestamp objects,
+    # so the price is bit-identical; keyed on the index object, so an env whose
+    # dataset is swapped rebuilds rather than reading stale stamps.
+    stamps = env.__dict__.get("_settle_stamps")
+    if stamps is None or stamps[0] is not env.dataset.index:
+        stamps = env._settle_stamps = (env.dataset.index, list(env.dataset.index))
     res = calculate_interval_price(
         smp_market_price_kwh=float(env.arr_price[idx]),
         total_consumed_kwh=float(net_kwh),
-        utc_date=env.dataset.index[idx],
+        utc_date=stamps[1][idx],
         interval_minutes=float(env.interval_minutes),
         scheme=env.pricing_scheme,
         dogovorjena_moc=env.agreed_power_at(idx),

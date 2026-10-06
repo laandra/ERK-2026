@@ -289,6 +289,26 @@ def _daily_money(arm, hh, output_root=None):
             .groupby("day").sum())
 
 
+def arm_dispatch_digest(arm, output_root=None):
+    """One digest over the configurations every checkpoint of `arm` was run
+    under -- the identity of the DISPATCH the panel's money columns come from.
+
+    The arm NAME is not that identity. On 2026-10-06 `AU_H24` changed from a
+    wear-priced to a wear-free dispatch under the same name, and a panel keyed
+    on the name alone kept serving the old trajectories' money as current.
+    """
+    import glob
+    import hashlib
+    import json
+
+    root = RESULTS_DIR if output_root is None else output_root
+    digests = []
+    for path in sorted(glob.glob(os.path.join(root, arm, "*", "checkpoint.json"))):
+        with open(path, encoding="utf-8") as fh:
+            digests.append(hs.config_digest(json.load(fh).get("config", {})))
+    return hashlib.sha256("|".join(digests).encode()).hexdigest()[:12]
+
+
 def build_daily_panel(arm="AU_H24", kinds=PANEL_KINDS, dataset_ids=None,
                       data_dir=None, output_root=None, H=48, delta_t=0.5,
                       n_train=730, n_sim=365,
@@ -339,7 +359,9 @@ def build_daily_panel(arm="AU_H24", kinds=PANEL_KINDS, dataset_ids=None,
     # built over a different window is NAMED by `hs.provenance` rather than
     # described by whatever the reading notebook happens to have set. This is the
     # trap `forecast_benchmark.csv` fell into before it grew these columns.
-    for col, val in (("arm", arm), ("n_sim", n_sim), ("n_train", n_train),
+    for col, val in (("arm", arm),
+                     ("arm_digest", arm_dispatch_digest(arm, output_root) if money else ""),
+                     ("n_sim", n_sim), ("n_train", n_train),
                      ("steps_per_day", H), ("start_ts", start_ts),
                      ("kinds", "|".join(kinds)), ("money", bool(money)),
                      ("absence_rel", ABSENCE_REL),
@@ -364,13 +386,19 @@ def load_daily_panel(path=PANEL_PATH, arm="AU_H24", kinds=PANEL_KINDS,
         cached = pd.read_csv(path, parse_dates=["day"])
         have = set(str(cached.get("kinds", pd.Series([""])).iloc[0]).split("|"))
         arm_ok = str(cached.get("arm", pd.Series([""])).iloc[0]) == arm
+        # The dispatch, not just the name: see `arm_dispatch_digest`.
+        want = arm_dispatch_digest(arm, kwargs.get("output_root"))
+        digest_ok = (not bool(cached.get("money", pd.Series([True])).iloc[0])
+                     or str(cached.get("arm_digest", pd.Series([""])).iloc[0]) == want)
         missing = set(kinds) - have
-        if not missing and arm_ok:
+        if not missing and arm_ok and digest_ok:
             return add_absence(cached), f"cached: {path}"
         stale = (f"rebuilding {os.path.basename(path)}: "
                  + (f"{sorted(missing)} not in it" if missing else "")
                  + ("" if arm_ok else f"; it holds arm "
-                    f"{cached.get('arm', pd.Series(['?'])).iloc[0]}, not {arm}"))
+                    f"{cached.get('arm', pd.Series(['?'])).iloc[0]}, not {arm}")
+                 + ("" if digest_ok else f"; {arm} has been re-run since "
+                    f"(dispatch digest {want})"))
     if stale:
         print(stale)
     panel = build_daily_panel(arm=arm, kinds=kinds, **kwargs)

@@ -11,8 +11,8 @@ MPC-MILP arms for optimization; these two answer it for LEARNED logic:
              price the MILP objective carries and the same terminal-SOC
              close-out `Cost_EUR_Closed` charges. The agent therefore optimizes
              the quantity it is later scored on, and nothing else.
-    il_bc    behaviour cloning of the whole-period MILP solved over the last
-             training year: the optimum demonstrates, the network imitates.
+    il_bc    behaviour cloning of the whole-period MILP solved over both
+             training years: the optimum demonstrates, the network imitates.
              What survives the copy is what a reactive map can express of a
              perfect-foresight plan.
     bc_dqn   the cloned network fine-tuned by the DQN: imitation supplies the
@@ -60,6 +60,7 @@ from dataclasses import dataclass, field, asdict
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from Basic_Functions import max_charge_now, max_discharge_now
 import Rule_Based_Control as rbc
@@ -88,7 +89,17 @@ torch.set_num_threads(1)
 #   3  n-step returns truncated at the first exploratory continuation
 #   4  episodes, validation rollouts and teacher walks inherit the ratchet
 #      peak state of the window they start inside, instead of starting at 0
-ALGO_VERSION = 4
+#   5  train / validation / test: episodes drawn from both training years
+#      minus held-out validation weeks, validation summed over those weeks
+#      (was: year 2 only, validated on its last 60 days), and gamma / n-step
+#      / bc_reg re-chosen on validation cost alone -- the v1-v4 values had
+#      been picked from scored-year numbers on household 138
+#   6  no per-cycle wear price in the reward (the study's accounting charges a
+#      cycle only by shortening the pack's life, ~500 EFC/a and up), and the
+#      validation score that drives early stopping and tuning is the bill PLUS
+#      that life-limited wear (`val_wear`) -- the axis the results are reported
+#      on, so a learner that cycles a pack to death early is still caught
+ALGO_VERSION = 6
 
 # The same stamp for the SUPERVISED half, versioned apart because the two
 # change on different days: a fix to the Q-update cannot move a clone, so
@@ -99,7 +110,9 @@ ALGO_VERSION = 4
 #
 #   1  first screen
 #   2  teacher walk inherits the ratchet peak state of its starting window
-BC_ALGO_VERSION = 2
+#   3  teacher solved over both training years; the clone early-stops on the
+#      study's validation weeks instead of a random 10 % of its own days
+BC_ALGO_VERSION = 3
 
 
 # ---------------------------------------------------------------------------
@@ -349,9 +362,21 @@ class QNet(nn.Module):
         self.adv = nn.Linear(hidden, n_actions)
 
     def forward(self, x):
-        z = self.trunk(x)
-        a = self.adv(z)
-        return self.value(z) + a - a.mean(dim=1, keepdim=True)
+        # The layers are called as functions, not as modules: identical ops,
+        # bit-identical output, but without `nn.Module.__call__` on each of six
+        # submodules -- at this size (one observation, 128 units) that dispatch
+        # IS the forward pass. Measured 10 % of a training step. The modules
+        # stay as the parameter holders, so state dicts are unchanged.
+        #
+        # Why not the GPU: measured on the M4 Max (MPS), an update is 10x and a
+        # single-observation forward 40x SLOWER than on the CPU. The network
+        # does almost no arithmetic per call; the loop is Python-bound.
+        t0, t2 = self.trunk[0], self.trunk[2]
+        z = F.relu(F.linear(x, t0.weight, t0.bias))
+        z = F.relu(F.linear(z, t2.weight, t2.bias))
+        a = F.linear(z, self.adv.weight, self.adv.bias)
+        return (F.linear(z, self.value.weight, self.value.bias)
+                + a - a.mean(dim=1, keepdim=True))
 
 
 class _Replay:
@@ -405,13 +430,15 @@ class TrainConfig:
     episode_days: int = 7
     batch: int = 128
     lr: float = 1e-3
-    # 0.997, not the textbook 0.99, and it is a measurement: on 30-minute
-    # intervals 0.99 discounts a noon-to-evening store by 13 % and an
-    # overnight one by 38 %, which erases exactly the thin margins this study
-    # trades in -- calibrated on Ausgrid 138, moving to 0.997 took the AU DQN
-    # from 870 to 844 closed and the SI DQN from 449 to 439. Safe only
+    # 0.997, not the textbook 0.99: on 30-minute intervals 0.99 discounts a
+    # noon-to-evening store by 13 % and an overnight one by 38 %, which erases
+    # exactly the thin margins this study trades in. First set from scored-
+    # year costs on Ausgrid 138 (a leak), then re-chosen on the validation
+    # weeks alone (`run_rl_benchmark.tune`): 0.997 won for every tariff and
+    # method, decisively only on SI dqn (p 0.03); on AU it is a tie. Safe only
     # because rewards are baseline-subtracted; against raw bills this gamma
-    # would put the Q-scale near 200 EUR.
+    # would put the Q-scale near 200 EUR. Per-(tariff, method) values live in
+    # `run_rl_benchmark.TUNED`.
     gamma: float = 0.997
     hidden: int = 128
     buffer: int = 200_000
@@ -431,7 +458,6 @@ class TrainConfig:
     # with the refinement phase never trained.
     eval_every: int = 20_000
     patience: int = 8
-    validation_days: int = 60
     # The wear shadow price the MILP objective carries, EUR per EFC. The agent
     # pays it too, or it learns to cycle for gains the study then bills it for.
     wear_eur_per_efc: float = 0.0
@@ -443,7 +469,8 @@ class TrainConfig:
     # 1-step TD has to walk the credit back through that many bootstraps: the
     # first screen's DQN under-traded badly for exactly this reason (27-51
     # EFC/year on SI against the cloned MILP's 87-116). 8 is half a charge-to-
-    # discharge cycle at this resolution.
+    # discharge cycle at this resolution. Confirmed on validation (tune grid
+    # {1, 8}): 8 wins on both tariffs, though never by a significant margin.
     n_step: int = 8
     # Keeps a fine-tune near the policy it was warm-started from. Without it a
     # warm start is destroyed inside 20k steps: the clone's weights are
@@ -451,7 +478,9 @@ class TrainConfig:
     # Q-magnitudes, taking the ranking with them -- measured, `bc_dqn` began
     # its validation trace at 62.6 EUR, where a COLD dqn begins (63.6), rather
     # than where the clone sits. Decays to 0 so reinforcement can eventually
-    # overrule the demonstration it started from.
+    # overrule the demonstration it started from. Validation splits it by
+    # tariff (`run_rl_benchmark.TUNED`): kept at 1 on AU, 0 on SI, where the
+    # clone's heavy cycling costs more in wear than it saves on the bill.
     bc_reg: float = 1.0
     bc_reg_decay_frac: float = 0.5
     seed: int = 0
@@ -588,6 +617,45 @@ def greedy_rollout(net, fb, static_norm, sig, settle, env, start: int, stop: int
             "efc": discharged / nominal if nominal > 0 else 0.0}
 
 
+def as_blocks(days) -> list:
+    """Day ranges as a list of (first_day, last_day_exclusive) blocks.
+
+    A single `(a, b)` pair is one block -- what every caller passed before
+    the split became seasonal -- so short fixtures keep working unchanged.
+    """
+    days = list(days)
+    if len(days) == 2 and all(np.isscalar(d) for d in days):
+        days = [tuple(days)]
+    return [(int(a), int(b)) for a, b in days]
+
+
+def block_days(blocks) -> np.ndarray:
+    """Every day index the blocks cover, ascending."""
+    return np.concatenate([np.arange(a, b) for a, b in as_blocks(blocks)])
+
+
+def validation_rollout(net, fb, static_norm, sig, settle, env, blocks,
+                       soc_init: float, respect_peak: bool) -> dict:
+    """`greedy_rollout` summed over held-out blocks: the validation measure.
+
+    Each block is rolled out on its own, from the study's starting SOC and the
+    ratchet peak it really opens inside, and closed out at its end -- the same
+    way an episode is. Summing is what makes held-out WEEKS spread over both
+    training years a seasonal measure: a contiguous window can only ever say
+    how a policy does in one season, and the scored year has all four.
+    """
+    cost = closed = efc = 0.0
+    for a, b in as_blocks(blocks):
+        r = greedy_rollout(net, fb, static_norm, sig, settle, env,
+                           a * int(round(24.0 / sig.hours)),
+                           b * int(round(24.0 / sig.hours)),
+                           soc_init, respect_peak)
+        cost += r["cost_eur"]
+        closed += r["cost_eur_closed"]
+        efc += r["efc"]
+    return {"cost_eur": cost, "cost_eur_closed": closed, "efc": efc}
+
+
 # ---------------------------------------------------------------------------
 # DQN training
 # ---------------------------------------------------------------------------
@@ -595,14 +663,22 @@ def train_dqn(sig, settle, env, fb: FeatureBuilder, static_norm: np.ndarray,
               cfg: TrainConfig, respect_peak: bool,
               train_days: tuple, val_days: tuple,
               init_net: QNet | None = None, bc_net: QNet | None = None,
-              soc_target: float | None = None, verbose: bool = True):
+              soc_target: float | None = None, verbose: bool = True,
+              val_wear=None):
     """Double DQN on one household's training period.
 
-    `train_days` / `val_days` are (first_day, last_day_exclusive) in local-day
+    `val_wear(efc, n_days) -> EUR`, when given, is added to every validation
+    rollout's closed cost, so early stopping selects on the bill plus what the
+    rollout's cycling costs the pack -- the study's lifetime wear, which is zero
+    until the cycles would end the pack early. None scores the bill alone.
+
+    `train_days` / `val_days` are day blocks -- one (first_day,
+    last_day_exclusive) pair or a list of them (`as_blocks`), in local-day
     index; episodes are `cfg.episode_days` windows drawn uniformly from the
-    training range, so the buffer decorrelates across seasons instead of
-    replaying one January. Validation is a greedy rollout over `val_days`,
-    scored as `Cost_EUR_Closed`; the weights kept are the best validation
+    training blocks, never straddling a held-out one, so the buffer
+    decorrelates across seasons instead of replaying one January. Validation
+    is `validation_rollout` over `val_days`, scored as `Cost_EUR_Closed`
+    summed over its blocks; the weights kept are the best validation
     weights, and `converged` says whether that best had stopped moving --
     early-stop after `cfg.patience` evaluations without improvement.
 
@@ -639,15 +715,24 @@ def train_dqn(sig, settle, env, fb: FeatureBuilder, static_norm: np.ndarray,
     # its own `bc`. Fine-tune gently instead.
     warm = init_net is not None
     eps_start = min(cfg.eps_start, 0.2) if warm else cfg.eps_start
-    opt = torch.optim.Adam(net.parameters(), lr=cfg.lr * (0.5 if warm else 1.0))
+    opt = torch.optim.Adam(net.parameters(), lr=cfg.lr * (0.5 if warm else 1.0),
+                           foreach=True)  # bit-identical, fewer dispatches
     buf = _Replay(cfg.buffer, dim)
 
-    val_start, val_stop = val_days[0] * spd, val_days[1] * spd
+    val_blocks = as_blocks(val_days)
+    n_val_days = sum(b - a for a, b in val_blocks)
     ep_days = cfg.episode_days
     ep_steps = ep_days * spd
-    day_lo, day_hi = train_days[0], train_days[1] - ep_days
-    if day_hi <= day_lo:
-        raise ValueError("training range shorter than one episode")
+    # An episode must lie wholly inside ONE training block: one that ran across
+    # a held-out week would train on the days validation is scored on.
+    starts = np.concatenate([np.arange(a, b - ep_days + 1)
+                             for a, b in as_blocks(train_days)
+                             if b - a >= ep_days] or [np.array([], dtype=int)])
+    if len(starts) == 0:
+        raise ValueError("no training block is as long as one episode")
+    held = set(block_days(val_blocks).tolist())
+    if any(d in held for s in starts for d in range(s, s + ep_days)):
+        raise ValueError("a training episode overlaps the validation days")
 
     decay_steps = max(int(cfg.total_steps * cfg.eps_decay_frac), 1)
     history = {"episode_return_eur": [], "episode_start_day": [],
@@ -664,7 +749,7 @@ def train_dqn(sig, settle, env, fb: FeatureBuilder, static_norm: np.ndarray,
     t0 = time.time()
     while step < cfg.total_steps and not stopped_early:
         # -- one episode ---------------------------------------------------
-        d0 = int(rng.integers(day_lo, day_hi + 1))
+        d0 = int(starts[rng.integers(len(starts))])
         idx0 = d0 * spd
         # Half the episodes start where the study starts every controller;
         # half start at a random SOC, or the agent never sees a full pack in
@@ -791,9 +876,11 @@ def train_dqn(sig, settle, env, fb: FeatureBuilder, static_norm: np.ndarray,
 
             # -- validate --------------------------------------------------
             if step % cfg.eval_every == 0:
-                val = greedy_rollout(net, fb, static_norm, sig, settle, env,
-                                     val_start, val_stop, soc_target,
-                                     respect_peak)
+                val = validation_rollout(net, fb, static_norm, sig, settle,
+                                         env, val_blocks, soc_target,
+                                         respect_peak)
+                if val_wear is not None:
+                    val["cost_eur_closed"] += float(val_wear(val["efc"], n_val_days))
                 history["val_step"].append(step)
                 history["val_cost_closed"].append(val["cost_eur_closed"])
                 history["val_efc"].append(val["efc"])
@@ -891,13 +978,20 @@ def teacher_actions(sig, settle, env, setpoints_kwh: np.ndarray,
 def train_bc(sig, settle, env, fb: FeatureBuilder, static_norm: np.ndarray,
              setpoints_kwh: np.ndarray, start: int, stop: int,
              soc_init: float, respect_peak: bool, cfg: TrainConfig,
-             verbose: bool = True):
+             verbose: bool = True, holdout_days=None):
     """Clone the MILP's action choices. Returns (net, history).
 
     Plain cross-entropy with inverse-frequency class weights -- idle and
     self-consumption dominate an optimal year, and an unweighted fit collapses
-    onto them. 10 % of the days are held out for the agreement measure;
-    convergence is early-stopping on held-out loss.
+    onto them. Convergence is early-stopping on held-out loss, and the
+    agreement measure is read on the same held-out days.
+
+    `holdout_days` (absolute day indices, or blocks) names those days: the
+    study passes its validation weeks, so the clone is early-stopped on the
+    same days every other method validates on and never fits them. Left at
+    None, a random 10 % of the walk's days are held out -- the fixture path.
+    The teacher is still WALKED across the held-out days: the states after
+    them depend on it, and walking is not fitting.
     """
     rng = np.random.default_rng(cfg.seed)
     torch.manual_seed(cfg.seed)
@@ -914,10 +1008,18 @@ def train_bc(sig, settle, env, fb: FeatureBuilder, static_norm: np.ndarray,
     # Hold out whole days, not random intervals: adjacent intervals are nearly
     # identical, so a random split leaks the training set into the holdout.
     spd = int(round(24.0 / sig.hours))
-    days = np.arange(n // spd)
-    rng.shuffle(days)
-    held = set(days[: max(1, len(days) // 10)])
-    mask = np.array([(j // spd) in held for j in range(n)])
+    first_day = start // spd
+    if holdout_days is None:
+        days = np.arange(n // spd)
+        rng.shuffle(days)
+        held = set((days[: max(1, len(days) // 10)] + first_day).tolist())
+    else:
+        hd = list(holdout_days)
+        held = set((block_days(hd) if hd and np.ndim(hd[0]) else
+                    np.asarray(hd, dtype=int)).tolist())
+    mask = np.array([(first_day + j // spd) in held for j in range(n)])
+    if not mask.any() or mask.all():
+        raise ValueError("BC holdout must be a proper, non-empty subset")
     Xtr, ytr, Xva, yva = X[~mask], y[~mask], X[mask], y[mask]
 
     counts = np.bincount(ytr, minlength=N_ACTIONS).astype(float)
@@ -925,7 +1027,7 @@ def train_bc(sig, settle, env, fb: FeatureBuilder, static_norm: np.ndarray,
     weights = weights / weights.mean()
 
     net = QNet(X.shape[1], cfg.hidden)
-    opt = torch.optim.Adam(net.parameters(), lr=cfg.lr)
+    opt = torch.optim.Adam(net.parameters(), lr=cfg.lr, foreach=True)
     lossf = nn.CrossEntropyLoss(weight=torch.from_numpy(weights.astype(np.float32)))
     Xtr_t, ytr_t = torch.from_numpy(Xtr), torch.from_numpy(ytr)
     Xva_t, yva_t = torch.from_numpy(Xva), torch.from_numpy(yva)

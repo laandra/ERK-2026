@@ -265,7 +265,21 @@ def casovni_blok(lokalni_cas: dt.datetime, razpored: str = "2024") -> int:
 
 
 def bloki_v_mesecu(leto: int, mesec: int, razpored: str = "2024") -> set:
-    """Bloki, ki se v mesecu sploh pojavijo — omrežnina za moč se plača za vsakega."""
+    """Bloki, ki se v mesecu sploh pojavijo — omrežnina za moč se plača za vsakega.
+
+    Cached because the per-interval settlement asks once per 30-minute step and
+    the answer is a 30-day walk: measured, 9 % of an RL training step. The key
+    carries the calendar globals `nastavi_koledar` moves, so a study that
+    switches country or season mid-process never reads another calendar's
+    blocks. A fresh set is returned, so a caller mutating it cannot poison the
+    cache.
+    """
+    return set(_bloki_v_mesecu(leto, mesec, razpored, DRZAVA_PRAZNIKOV,
+                               PODROCJE_PRAZNIKOV, VISJA_SEZONA_MESECI))
+
+
+@lru_cache(maxsize=None)
+def _bloki_v_mesecu(leto, mesec, razpored, _drzava, _podrocje, _sezona) -> frozenset:
     tabela = RAZPOREDI[razpored]
     d = dt.date(leto, mesec, 1)
     bloki = set()
@@ -274,7 +288,7 @@ def bloki_v_mesecu(leto: int, mesec: int, razpored: str = "2024") -> set:
         dan = "prost" if je_dela_prost(d) else "delovni"
         bloki.update(tabela[(sezona, dan)])
         d += dt.timedelta(days=1)
-    return bloki
+    return frozenset(bloki)
 
 
 # ---------------------------------------------------------------------------

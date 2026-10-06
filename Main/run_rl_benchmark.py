@@ -21,14 +21,19 @@ The grid answers the questions the study asks of every other controller:
     methods     dqn (reinforcement), bc (imitation of the whole-period MILP),
                 bc_dqn (imitation warm start, reinforcement fine-tune).
 
-Training only ever touches the 730-day training period; the scored year is
-untouched until the final `run_policy` evaluation, which prices the agent
-through the arm's own settlement, endogenous contract included.
+Three disjoint parts: TRAIN (both training years minus every 5th week),
+VALIDATION (those held-out weeks: early stopping, and every hyperparameter
+choice via `--tune`), TEST (the scored year, untouched until the final
+`run_policy` evaluation, which prices the agent through the arm's own
+settlement, endogenous contract included).
+
+    python3 run_rl_benchmark.py --tune --ids <30 units> --jobs 12 --quiet
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -60,12 +65,43 @@ N_TRAIN, N_SIM = 730, 365
 SOC_INIT_ABS = 5.0                       # absolute kWh; usable-window = 4.0
 SOC_INIT_USABLE = SOC_INIT_ABS - BATTERY_CAP * SOC_MIN
 
-# Training uses the LAST year of the training period (the year the tariff
-# calendar repeats over), holds out its final 60 days for validation, and the
-# teacher MILP demonstrates over the same year.
-TRAIN_DAYS = (N_TRAIN - 365, N_TRAIN - 60)     # RL episodes / BC dataset
-VAL_DAYS = (N_TRAIN - 60, N_TRAIN)             # convergence measure
-TEACH_DAYS = 365                               # teacher solve span
+# TRAIN / VALIDATION / TEST. Test is the scored year (days 730-1095) and is
+# read exactly once per run, by `run_policy` at the end of `run_one`. Train
+# and validation share the two years before it: every 5th week is held out
+# for validation, the rest is trained on.
+#
+# Held-out WEEKS rather than a contiguous tail, and both years rather than
+# the last one. The first split trained on year 2 alone and validated on its
+# last 60 days -- so the agents never trained on May or June (AU's high
+# season) and every validation and tuning verdict was a verdict on early
+# winter. A 5-week cycle over 104 weeks lands validation in every month,
+# twice over, and keeps ~80 % of both years for training. Whole weeks, not
+# random days: adjacent intervals are nearly identical, and a 7-day episode
+# must fit inside one training block. The pattern is the same for every
+# household, so comparisons stay paired.
+#
+# Week 4 first, not week 0: the median14 forecast has no history on day 0.
+VAL_EVERY_WEEKS, VAL_FIRST_WEEK = 5, 4
+VAL_BLOCKS = [(7 * w, 7 * w + 7) for w in range(N_TRAIN // 7)
+              if w >= VAL_FIRST_WEEK and (w - VAL_FIRST_WEEK) % VAL_EVERY_WEEKS == 0]
+
+
+def _complement(blocks, n_days):
+    out, lo = [], 0
+    for a, b in blocks:
+        if a > lo:
+            out.append((lo, a))
+        lo = b
+    if lo < n_days:
+        out.append((lo, n_days))
+    return out
+
+
+TRAIN_BLOCKS = _complement(VAL_BLOCKS, N_TRAIN)   # RL episodes / BC fit
+# The teacher MILP demonstrates over BOTH training years. It is walked across
+# the validation weeks too (a perfect-foresight plan is one trajectory), but
+# the clone is only fitted on the training blocks.
+TEACH_SPAN = (0, N_TRAIN)
 
 DEFAULT_IDS = [138, 127, 65, 148, 223]         # first five study units
 
@@ -166,21 +202,27 @@ def prepare_household(ident, tariff: str) -> dict:
 
 
 def teacher_setpoints(prep) -> np.ndarray:
-    """The whole-period MILP over the last training year, cached as kWh.
+    """The whole-period MILP over `TEACH_SPAN`, cached as kWh.
 
-    Solved on its own environment over exactly that year -- the contract it
+    Solved on its own environment over exactly that span -- the contract it
     decides for itself inside the LP is then the contract of a household whose
-    history is that year, which is the closest a demonstration can be to the
-    conditions the student will meet.
+    history is that span, which is the closest a demonstration can be to the
+    conditions the student will meet. Never past day `N_TRAIN`: the teacher
+    sees nothing of the scored year.
+
+    The cache path carries the span. It used to be `<tariff>/<ident>.npz`, and
+    widening the span from one year to two would have served the stale
+    365-day solve under the new labels without a word.
     """
     ident, tariff = prep["ident"], prep["tariff"]
-    cache = os.path.join(MODELS, "teacher", tariff, f"{ident}.npz")
+    a, b = TEACH_SPAN
+    assert b <= N_TRAIN, "the teacher must not see the scored year"
+    cache = os.path.join(MODELS, "teacher", tariff, f"d{a}-{b}", f"{ident}.npz")
     if os.path.exists(cache):
         return np.load(cache)["setpoints_kwh"]
 
     frames = prep["frames"]
-    start = (N_TRAIN - TEACH_DAYS) * H
-    df_teach_kwh = frames["df_all_kwh"].iloc[start: N_TRAIN * H]
+    df_teach_kwh = frames["df_all_kwh"].iloc[a * H: b * H]
     env = hs.align_envelope(
         hs.build_study_env(df_teach_kwh, battery_cap=BATTERY_CAP,
                            soc_min_pct=SOC_MIN, soc_max_pct=SOC_MAX,
@@ -190,7 +232,7 @@ def teacher_setpoints(prep) -> np.ndarray:
                                   df_teach_kwh["SMP"].values,
                                   int(round(DELTA_T * 60)))
     sol = hs.solve_full_period(
-        env, rates, tariff, n_steps=TEACH_DAYS * H,
+        env, rates, tariff, n_steps=(b - a) * H,
         soc_init_kwh=SOC_INIT_ABS, delta_t=DELTA_T,
         soc_min_kwh=BATTERY_CAP * SOC_MIN, verbose=True)
     setpoints = (np.asarray(sol["x_ch"]) - np.asarray(sol["x_dis"])) * DELTA_T
@@ -224,7 +266,8 @@ def _method_config(cfg: rl.TrainConfig, method: str) -> dict:
     return cfg.config()
 
 
-def run_digest(cfg: rl.TrainConfig, spec, tariff: str, method: str) -> str:
+def run_digest(cfg: rl.TrainConfig, spec, tariff: str, method: str,
+               overrides: dict | None = None) -> str:
     """The identity of one result: its features, its method's settings, its
     split, and the learning rule that produced it.
 
@@ -235,20 +278,93 @@ def run_digest(cfg: rl.TrainConfig, spec, tariff: str, method: str) -> str:
     not discard every clone on disk -- and `bc_dqn` carries BOTH, because it is
     a clone that was then fine-tuned and either half moving moves the result.
     """
+    cfg = effective_config(cfg, tariff, method, overrides)
     version = {"bc": (rl.BC_ALGO_VERSION,),
                "dqn": (rl.ALGO_VERSION,),
                "bc_dqn": (rl.BC_ALGO_VERSION, rl.ALGO_VERSION)}[method]
     return _digest(spec.config(), _method_config(cfg, method),
                    {"tariff": tariff, "method": method, "algo": version,
-                    "train_days": TRAIN_DAYS, "val_days": VAL_DAYS})
+                    "train_days": TRAIN_BLOCKS, "val_days": VAL_BLOCKS,
+                    "teach_span": TEACH_SPAN})
 
 
-def make_config(steps: int, seed: int, gamma: float | None = None) -> rl.TrainConfig:
-    cfg = rl.TrainConfig(total_steps=steps, seed=seed,
-                         wear_eur_per_efc=be.cycle_cost_eur_per_efc(BATTERY_CAP))
-    if gamma is not None:
-        cfg.gamma = float(gamma)
-    return cfg
+def make_config(steps: int, seed: int) -> rl.TrainConfig:
+    # No per-cycle wear in the reward: the study prices the pack once, as an
+    # NPV over min(12 y, 6000 EFC), so a cycle costs nothing until it would end
+    # the pack early -- and that case is caught by `val_wear`, which scores the
+    # validation rollouts on the same lifetime wear the results are reported
+    # with. It used to be the pack price over its cycle life (0.417 EUR/EFC),
+    # the same per-cycle charge the MILP carried; both were dropped together.
+    return rl.TrainConfig(total_steps=steps, seed=seed, wear_eur_per_efc=0.0)
+
+
+def val_wear_fn(tariff: str):
+    """`(efc, n_days) -> EUR`: the study's lifetime wear for a validation window.
+
+    The rollout's cycles annualised, priced by `hs.cycle_wear_eur` (the one
+    formula `summarize` charges), and scaled back to the window. Zero unless the
+    pace would end the pack before its calendar life.
+    """
+    def _wear(efc, n_days):
+        per_year = float(efc) * 365.0 / max(n_days, 1)
+        return float(hs.cycle_wear_eur(per_year, BATTERY_CAP, tariff)) * n_days / 365.0
+    return _wear
+
+
+# ---------------------------------------------------------------------------
+# Hyperparameters: chosen on VALIDATION, per tariff and method
+# ---------------------------------------------------------------------------
+# The knobs the first screen set by looking at scored-year costs on household
+# 138 (gamma 0.99 -> 0.997, n-step 8, the BC regulariser), re-decided on the
+# validation weeks alone. `tune()` trains each grid point on every household
+# WITHOUT evaluating the test year, `tune_report()` picks the point with the
+# lowest validation cost net of wear, and the winners are written into TUNED
+# by hand -- a visible, reviewable step, not one a sweep can take silently.
+TUNE_VARIANT = "fc_h24"
+TUNE_GRID = {
+    "dqn": [{"gamma": g, "n_step": n} for g in (0.99, 0.997) for n in (1, 8)],
+    # bc_dqn's exploration is BC-guided, so its continuations are near
+    # on-policy and the n-step question is the DQN's; its own knob is how hard
+    # the fine-tune is held to the clone.
+    "bc_dqn": [{"gamma": g, "bc_reg": r} for g in (0.99, 0.997) for r in (0.0, 1.0)],
+}
+TUNE_OUT = os.path.join(HERE, "results_local", "rl_tune")
+TUNE_MODELS = os.path.join(MODELS, "tune")
+
+# {(tariff, method): {field: value}} -- the tune_report() winners, 2026-10-06,
+# ALGO_VERSION 6: no per-cycle wear in the reward, validation on the bill plus
+# the lifetime wear (zero here -- no validation rollout cycles fast enough to
+# shorten the pack's life). 30 households, 140 validation days, test year never
+# evaluated. Ties are kept honest in the comment: on every cell the gamma or
+# n-step runner-up is within noise (p 0.26-0.58) EXCEPT AU, where gamma 0.997
+# beats 0.99 for both methods (p < 0.001). The BC regulariser separates
+# everywhere (p < 0.001) and is 1 on both tariffs: with cycles unpriced there
+# is no longer anything for the fine-tune to gain by drifting off the clone --
+# under the per-cycle price (ALGO 5) SI had picked 0 for exactly that reason.
+TUNED: dict = {
+    ("AU", "dqn"): {"gamma": 0.997, "n_step": 8},
+    ("SI", "dqn"): {"gamma": 0.997, "n_step": 1},
+    ("AU", "bc_dqn"): {"gamma": 0.997, "bc_reg": 1.0},
+    ("SI", "bc_dqn"): {"gamma": 0.99, "bc_reg": 1.0},
+}
+
+
+def tune_tag(overrides: dict) -> str:
+    return "_".join(f"{k}{v:g}" for k, v in sorted(overrides.items()))
+
+
+def effective_config(cfg: rl.TrainConfig, tariff: str, method: str,
+                     overrides: dict | None = None) -> rl.TrainConfig:
+    """`cfg` with the tuned (or the explicitly given) settings applied."""
+    over = TUNED.get((tariff, method), {}) if overrides is None else overrides
+    if not over:
+        return cfg
+    out = copy.copy(cfg)
+    for k, v in over.items():
+        if not hasattr(out, k):
+            raise AttributeError(f"TrainConfig has no field {k!r}")
+        setattr(out, k, v)
+    return out
 
 
 def _features(prep, spec, bundle_key: str):
@@ -261,15 +377,25 @@ def _features(prep, spec, bundle_key: str):
 
 
 def run_one(prep, variant: str, method: str, cfg: rl.TrainConfig,
-            verbose: bool = True) -> dict:
+            verbose: bool = True, out_root: str = OUT,
+            models_root: str = MODELS, score_test: bool = True,
+            overrides: dict | None = None) -> dict:
+    """Train one (variant, method) for one household; score it on the test year.
+
+    `score_test=False` is the TUNING path: the run is trained and validated,
+    and the test year is never evaluated -- the result file carries no test
+    number at all, so a tuning choice cannot be made on one even by accident.
+    `overrides` replaces the TUNED settings (the grid point being tried).
+    """
     ident, tariff = prep["ident"], prep["tariff"]
+    cfg = effective_config(cfg, tariff, method, overrides)
     spec = variant_specs(tariff)[variant]
     respect_peak = tariff == "SI"
     key = f"{variant}__{method}"
-    out_dir = os.path.join(OUT, tariff, key)
+    out_dir = os.path.join(out_root, tariff, key)
     os.makedirs(out_dir, exist_ok=True)
     result_path = os.path.join(out_dir, f"{ident}.json")
-    digest = run_digest(cfg, spec, tariff, method)
+    digest = run_digest(cfg, spec, tariff, method, overrides={})
     if os.path.exists(result_path):
         with open(result_path, encoding="utf-8") as fh:
             existing = json.load(fh)
@@ -280,47 +406,79 @@ def run_one(prep, variant: str, method: str, cfg: rl.TrainConfig,
     t0 = time.time()
     train = prep["train"]
     fb, static = _features(prep, spec, "train")
-    # Normalisation from the TRAINING range only -- the validation window and
+    # Normalisation from the TRAINING blocks only -- the validation weeks and
     # the scored year must not leak into the scaler.
-    lo, hi = TRAIN_DAYS[0] * H, TRAIN_DAYS[1] * H
-    fb.fit_norm(static[lo:hi])
+    train_rows = np.concatenate([np.arange(a * H, b * H) for a, b in TRAIN_BLOCKS])
+    fb.fit_norm(static[train_rows])
     static_norm = fb.normalize(static)
 
     hist_bc = hist_dqn = None
     if method in ("bc", "bc_dqn"):
         setpoints = teacher_setpoints(prep)
-        # The teacher trace covers the last TEACH_DAYS; the BC dataset stops at
-        # the validation boundary so no method has seen the validation window.
-        t_start = (N_TRAIN - TEACH_DAYS) * H
+        # Walk the whole teacher span; fit on the training blocks, early-stop
+        # on the validation weeks.
+        a, b = TEACH_SPAN
         net, hist_bc = rl.train_bc(
             train["sig"], train["settle"], train["env"], fb, static_norm,
-            setpoints[: TRAIN_DAYS[1] * H - t_start],
-            start=t_start, stop=TRAIN_DAYS[1] * H,
+            setpoints, start=a * H, stop=b * H,
             soc_init=SOC_INIT_USABLE, respect_peak=respect_peak, cfg=cfg,
-            verbose=verbose)
+            verbose=verbose, holdout_days=VAL_BLOCKS)
     if method in ("dqn", "bc_dqn"):
         bc_net = net if method == "bc_dqn" else None
         init = net if method == "bc_dqn" else None
         net, hist_dqn = rl.train_dqn(
             train["sig"], train["settle"], train["env"], fb, static_norm, cfg,
-            respect_peak=respect_peak, train_days=TRAIN_DAYS,
-            val_days=VAL_DAYS, init_net=init, bc_net=bc_net,
-            soc_target=SOC_INIT_USABLE, verbose=verbose)
+            respect_peak=respect_peak, train_days=TRAIN_BLOCKS,
+            val_days=VAL_BLOCKS, init_net=init, bc_net=bc_net,
+            soc_target=SOC_INIT_USABLE, verbose=verbose,
+            val_wear=val_wear_fn(tariff))
 
     # The convergence measure every method reports on the same axis: the
-    # greedy validation rollout, closed cost.
-    val = rl.greedy_rollout(net, fb, static_norm, train["sig"],
-                            train["settle"], train["env"],
-                            VAL_DAYS[0] * H, VAL_DAYS[1] * H,
-                            SOC_INIT_USABLE, respect_peak)
+    # greedy validation rollout, closed cost, summed over the held-out weeks.
+    val = rl.validation_rollout(net, fb, static_norm, train["sig"],
+                                train["settle"], train["env"], VAL_BLOCKS,
+                                SOC_INIT_USABLE, respect_peak)
+    # Validation on the axis the paper reports: the bill plus the lifetime wear
+    # `summarize` charges (zero below ~500 EFC/a). Early stopping and TUNING
+    # both read this one now.
+    n_val_days = sum(b - a for a, b in VAL_BLOCKS)
+    val_net = val["cost_eur_closed"] + val_wear_fn(tariff)(val["efc"], n_val_days)
 
-    model_path = os.path.join(MODELS, tariff, key, f"{ident}.pt")
+    model_path = os.path.join(models_root, tariff, key, f"{ident}.pt")
     rl.save_model(model_path, net, fb, spec, cfg,
                   {"bc": hist_bc, "dqn": hist_dqn},
                   extra={"ident": str(ident), "tariff": tariff,
                          "variant": variant, "method": method})
 
-    # -- score on the sim year, through the study's own runner ------------
+    hist = hist_dqn or hist_bc or {}
+    result = {
+        "dataset": f"Ausgrid {ident}", "ident": str(ident), "tariff": tariff,
+        "variant": variant, "method": method, "digest": digest,
+        "causal": spec.causal, "spec": spec.config(),
+        "val_cost_closed": val["cost_eur_closed"],
+        "val_efc": val["efc"],
+        "val_cost_net_of_wear": val_net,
+        "train_converged": bool(hist.get("converged", False)),
+        "train_steps": hist.get("steps_run"),
+        "train_runtime_s": hist.get("runtime_s"),
+        "best_val_cost_closed": hist.get("best_val_cost_closed"),
+        "bc_val_agreement": (hist_bc or {}).get("final_val_agreement"),
+        "bc_converged": (hist_bc or {}).get("converged"),
+        # The budget this result was produced under, recorded rather than
+        # implied. A straggler re-trained at a larger budget is otherwise
+        # indistinguishable on disk from one that converged at the default,
+        # and a paired comparison that silently mixes the two is comparing
+        # budgets, not observations.
+        "train_config": cfg.config(),
+        "model_path": os.path.relpath(model_path, HERE),
+    }
+    if not score_test:
+        result["wall_s"] = time.time() - t0
+        with open(result_path, "w", encoding="utf-8") as fh:
+            json.dump(result, fh, indent=1)
+        return result
+
+    # -- score on the TEST year, through the study's own runner -----------
     sim = prep["sim"]
     policy = rl.LearnedPolicy(
         net, fb, respect_peak,
@@ -334,11 +492,7 @@ def run_one(prep, variant: str, method: str, cfg: rl.TrainConfig,
                              soc_init_kwh=SOC_INIT_USABLE,
                              rates=sim["rates"])
 
-    hist = hist_dqn or hist_bc or {}
-    result = {
-        "dataset": f"Ausgrid {ident}", "ident": str(ident), "tariff": tariff,
-        "variant": variant, "method": method, "digest": digest,
-        "causal": spec.causal, "spec": spec.config(),
+    result.update({
         "cost_eur_closed": out["Cost_EUR_Closed"],
         "cost_eur": out["Cost_EUR"],
         "fixed_eur": out["Fixed_EUR"],
@@ -348,21 +502,8 @@ def run_one(prep, variant: str, method: str, cfg: rl.TrainConfig,
         "peak_import_kw": out["Peak_Import_kW"],
         "agreed_power_iters": out["Agreed_Power_Iters"],
         "agreed_power_converged": out["Agreed_Power_Converged"],
-        "val_cost_closed": val["cost_eur_closed"],
-        "train_converged": bool(hist.get("converged", False)),
-        "train_steps": hist.get("steps_run"),
-        "train_runtime_s": hist.get("runtime_s"),
-        "best_val_cost_closed": hist.get("best_val_cost_closed"),
-        "bc_val_agreement": (hist_bc or {}).get("final_val_agreement"),
-        "bc_converged": (hist_bc or {}).get("converged"),
         "wall_s": time.time() - t0,
-        "model_path": os.path.relpath(model_path, HERE),
-    }
-    # The budget this result was produced under, recorded rather than implied.
-    # A straggler re-trained at a larger budget is otherwise indistinguishable
-    # on disk from one that converged at the default, and a paired comparison
-    # that silently mixes the two is comparing budgets, not observations.
-    result["train_config"] = cfg.config()
+    })
     result.update(_comparators(ident, tariff))
     with open(result_path, "w", encoding="utf-8") as fh:
         json.dump(result, fh, indent=1)
@@ -480,6 +621,340 @@ def _run_parallel(jobs, cfg, args):
 
 
 # ---------------------------------------------------------------------------
+# Tuning: validation only
+# ---------------------------------------------------------------------------
+def _tune_worker(group, cfg, quiet):
+    """Every grid point for one (tariff, household); no test-year scoring."""
+    tariff, ident, items = group
+    prep = prepare_household(ident, tariff)
+    out = []
+    for method, over in items:
+        tag = tune_tag(over)
+        try:
+            res = run_one(prep, TUNE_VARIANT, method, cfg, verbose=not quiet,
+                          out_root=os.path.join(TUNE_OUT, tag),
+                          models_root=os.path.join(TUNE_MODELS, tag),
+                          score_test=False, overrides=over)
+            assert "cost_eur_closed" not in res, "tuning touched the test year"
+            out.append((tariff, method, tag, ident, None))
+        except Exception as exc:
+            out.append((tariff, method, tag, ident, repr(exc)))
+    return out
+
+
+def tune(ids, tariffs, cfg, n_jobs: int = 1, quiet: bool = True):
+    """Train TUNE_GRID on `ids` x `tariffs`, scoring validation weeks only.
+
+    Resumable like the sweep: a grid point already on disk under its digest is
+    skipped. Results land in `results_local/rl_tune/<tag>/`, never in the
+    screen's own tree, so `load_results()` cannot mix them into the panel.
+    """
+    from joblib import Parallel, delayed
+
+    todo, cached = {}, 0
+    for tariff in tariffs:
+        spec = variant_specs(tariff)[TUNE_VARIANT]
+        for ident in ids:
+            for method, grid in TUNE_GRID.items():
+                for over in grid:
+                    path = os.path.join(TUNE_OUT, tune_tag(over), tariff,
+                                        f"{TUNE_VARIANT}__{method}", f"{ident}.json")
+                    if os.path.exists(path):
+                        try:
+                            with open(path, encoding="utf-8") as fh:
+                                if json.load(fh).get("digest") == run_digest(
+                                        cfg, spec, tariff, method, overrides=over):
+                                    cached += 1
+                                    continue
+                        except Exception:
+                            pass
+                    todo.setdefault((tariff, ident), []).append((method, over))
+    groups = [(t, i, items) for (t, i), items in todo.items()]
+    n_runs = sum(len(g[2]) for g in groups)
+    if n_runs:
+        n_jobs = max(1, (os.cpu_count() or 1) + 1 + n_jobs) if n_jobs < 0 else n_jobs
+        n_jobs = min(n_jobs, len(groups))
+        print(f"tuning: {n_runs} run(s) over {len(groups)} group(s) on "
+              f"{n_jobs} worker(s); {cached} already cached", flush=True)
+        t0 = time.time()
+        results = Parallel(n_jobs=n_jobs, backend="loky", verbose=10)(
+            delayed(_tune_worker)(g, cfg, quiet) for g in groups)
+        flat = [r for g in results for r in g]
+        failed = [r for r in flat if r[4] is not None]
+        print(f"\n{len(flat)} tuning run(s) in {(time.time() - t0) / 60:.1f} min")
+        if failed:
+            for t, m, tag, i, exc in failed:
+                print(f"  FAILED {t} {m} {tag} Ausgrid {i}: {exc}")
+            print("rerun to retry the failures; everything else is cached")
+            return None
+    print("ALL DONE")
+    return tune_report()
+
+
+def tune_report():
+    """Validation cost per grid point, and the winner per (tariff, method).
+
+    Picked on the TOTAL validation cost net of wear over every household --
+    the paper's axis, paired by construction (same households, same weeks).
+    The paired Wilcoxon against the winner says whether the runner-up is
+    distinguishable at all; when it is not, either choice is defensible and
+    the winner is kept only because some choice has to be.
+    """
+    import pandas as pd
+    from scipy.stats import wilcoxon
+
+    rows = []
+    if os.path.isdir(TUNE_OUT):
+        for tag in sorted(os.listdir(TUNE_OUT)):
+            for tariff in ("AU", "SI"):
+                for method in TUNE_GRID:
+                    d = os.path.join(TUNE_OUT, tag, tariff,
+                                     f"{TUNE_VARIANT}__{method}")
+                    if not os.path.isdir(d):
+                        continue
+                    for f in sorted(os.listdir(d)):
+                        if f.endswith(".json"):
+                            with open(os.path.join(d, f), encoding="utf-8") as fh:
+                                r = json.load(fh)
+                            rows.append({"tag": tag, "tariff": tariff,
+                                         "method": method, "ident": r["ident"],
+                                         "val_net": r["val_cost_net_of_wear"],
+                                         "val_bill": r["val_cost_closed"],
+                                         "val_efc": r["val_efc"],
+                                         "converged": r["train_converged"]})
+    if not rows:
+        print("no tuning results on disk")
+        return None
+    df = pd.DataFrame(rows)
+    winners = {}
+    for (tariff, method), g in df.groupby(["tariff", "method"]):
+        wide = g.pivot(index="ident", columns="tag", values="val_net").dropna()
+        summary = (g[g["ident"].isin(wide.index)]
+                   .groupby("tag")
+                   .agg(n=("ident", "size"), val_net=("val_net", "mean"),
+                        val_bill=("val_bill", "mean"), efc=("val_efc", "mean"),
+                        converged=("converged", "mean"))
+                   .sort_values("val_net"))
+        best = summary.index[0]
+        p = {}
+        for tag in summary.index[1:]:
+            diff = wide[tag] - wide[best]
+            p[tag] = (wilcoxon(diff).pvalue
+                      if (diff != 0).sum() >= 6 else float("nan"))
+        summary["vs_best_p"] = pd.Series(p)
+        print(f"\n{tariff} {method}  (mean validation EUR over "
+              f"{len(wide)} households, {sum(b - a for a, b in VAL_BLOCKS)} days)")
+        print(summary.round(3).to_string())
+        winners[(tariff, method)] = best
+    print("\nwinners (copy into TUNED):")
+    for k, tag in winners.items():
+        over = next(o for o in TUNE_GRID[k[1]] if tune_tag(o) == tag)
+        print(f"    {k!r}: {over!r},")
+    return df
+
+
+# ---------------------------------------------------------------------------
+# SI on the test year: where the money goes
+# ---------------------------------------------------------------------------
+# A DIAGNOSTIC of results already scored, not a step in training: nothing here
+# feeds back into a model, a setting or a selection. It re-runs the stored
+# models and the SI rules through `run_policy` -- the same call that scored
+# them -- keeping what the scoring summed away: the bill split into energy,
+# excess-power charge and the contract-dependent standing charge, and the
+# contract each controller walked itself onto, month by month.
+DIAG_OUT = os.path.join(HERE, "results_local", "rl_si_diagnosis")
+DIAG_RULES = ["no_battery", "self_consumption", "peak_shaving",
+              "self_consumption_peak_shaving"]
+DIAG_LEARNED = ["bc", "bc_dqn", "dqn"]
+
+
+def _diag_one(env, sig, policy, settle, rates):
+    """One converged test-year run, with the contract it ended up billed under."""
+    out = rbc.run_policy(env, policy, n_steps=N_SIM * H, settle=settle,
+                         soc_init_kwh=SOC_INIT_USABLE, rates=rates,
+                         keep_traces=True)
+    p = np.asarray(out["_setpoints"])
+    ch, dis = np.maximum(p, 0.0), np.maximum(-p, 0.0)
+    n = len(p)
+    net = sig.consumption[:n] + ch - sig.generation[:n] - dis
+    kw = np.maximum(net, 0.0) / sig.hours
+    # Month by month, per block: the peak drawn and the agreed power billed.
+    # `agreed_kw` is read AFTER convergence, so it is the contract this run's
+    # own peaks set -- what the household would actually be on.
+    sig_c = rbc.rebind_agreed_power(sig, env)
+    monthly = {}
+    for m in np.unique(sig.windows[:n]):
+        sel = sig.windows[:n] == m
+        row = {}
+        for b in range(1, 6):
+            mb = sel & (sig.blocks[:n] == b)
+            if mb.any():
+                row[str(b)] = {"peak_kw": float(kw[mb].max()),
+                               "agreed_kw": float(sig_c.agreed_kw[:n][mb][0]),
+                               "steps": int(mb.sum())}
+        monthly[str(int(m))] = row
+    return {
+        "energy_eur": out["Energy_EUR"], "power_eur": out["Power_EUR"],
+        "fixed_eur": out["Fixed_EUR"], "termadj_eur": out["Terminal_SOC_Adj_EUR"],
+        "cost_eur_closed": out["Cost_EUR_Closed"], "efc": out["Equivalent_Full_Cycles"],
+        "import_kwh": out["Import_kWh"], "export_kwh": out["Export_kWh"],
+        "peak_import_kw": out["Peak_Import_kW"],
+        "agreed_iters": out["Agreed_Power_Iters"],
+        "agreed_converged": out["Agreed_Power_Converged"],
+        "monthly": monthly,
+    }
+
+
+def _scored_digests(ident):
+    """{method: digest} of the scored SI runs a diagnosis re-runs -- its cache key.
+
+    Keyed on the household alone it served the PREVIOUS models after the RL
+    panel was retrained (ALGO_VERSION 6): bc_dqn read 13 EUR/a in the
+    diagnosis against 44 in the scored panel.
+    """
+    out = {}
+    for method in DIAG_LEARNED:
+        path = os.path.join(OUT, "SI", f"fc_h24__{method}", f"{ident}.json")
+        with open(path, encoding="utf-8") as fh:
+            out[method] = json.load(fh).get("digest")
+    return out
+
+
+def _diag_current(ident):
+    path = os.path.join(DIAG_OUT, f"{ident}.json")
+    if not os.path.exists(path):
+        return False
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh).get("scored_digests") == _scored_digests(ident)
+
+
+def _diag_household(ident):
+    path = os.path.join(DIAG_OUT, f"{ident}.json")
+    if _diag_current(ident):
+        return path
+    prep = prepare_household(ident, "SI")
+    sim = prep["sim"]
+    env, sig, settle, rates = sim["env"], sim["sig"], sim["settle"], sim["rates"]
+    roster = {p.name: p for p in hs.rule_roster("SI")}
+    roster[rbc.NO_BATTERY] = rbc._Idle()        # the runner's own baseline row
+    res = {}
+    for name in DIAG_RULES:
+        res[name] = _diag_one(env, sig, roster[name], settle, rates)
+    for method in DIAG_LEARNED:
+        net, fb, spec, _ = rl.load_model(
+            os.path.join(MODELS, "SI", f"fc_h24__{method}", f"{ident}.pt"))
+        pol = rl.LearnedPolicy(net, fb, True, load_fc=prep["fc_sim"][0],
+                               pv_fc=prep["fc_sim"][1], name=method)
+        res[method] = _diag_one(env, sig, pol, settle, rates)
+    os.makedirs(DIAG_OUT, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"ident": str(ident), "controllers": res,
+                   "scored_digests": _scored_digests(ident)}, fh)
+    return path
+
+
+def si_test_diagnosis(ids, n_jobs: int = 1):
+    """Run `_diag_household` for every id (cached), then check it reproduces
+    the scored numbers -- a diagnostic that disagreed with the scoring would be
+    diagnosing a different run."""
+    from joblib import Parallel, delayed
+    todo = [i for i in ids if not _diag_current(i)]
+    if todo:
+        Parallel(n_jobs=min(max(n_jobs, 1), len(todo)), backend="loky", verbose=5)(
+            delayed(_diag_household)(i) for i in todo)
+    worst = 0.0
+    for ident in ids:
+        with open(os.path.join(DIAG_OUT, f"{ident}.json"), encoding="utf-8") as fh:
+            c = json.load(fh)["controllers"]
+        for method in DIAG_LEARNED:
+            with open(os.path.join(OUT, "SI", f"fc_h24__{method}", f"{ident}.json"),
+                      encoding="utf-8") as fh:
+                scored = json.load(fh)
+            worst = max(worst, abs(c[method]["cost_eur_closed"] - scored["cost_eur_closed"]),
+                        abs(c[method]["fixed_eur"] - scored["fixed_eur"]))
+        ref = _comparators(ident, "SI")
+        for name in DIAG_RULES:
+            k = f"ref_cost_{name}"
+            if k in ref:
+                worst = max(worst, abs(c[name]["cost_eur_closed"] - ref[k]))
+    print(f"diagnosis reproduces the scored test-year numbers to {worst:.2e} EUR")
+    return worst
+
+
+def si_diagnosis_frames(from_checkpoint=None):
+    """(components, monthly) from the cached diagnosis, for drawing.
+
+    `components`: one row per (household, controller), each SI bill line as a
+    SAVING against the household's own no-battery row -- energy, excess-power
+    charge, the contract-dependent standing charge, the terminal-SOC close-out
+    -- plus `wear`, the cost of the pack life the year's cycling uses up
+    (`hs.cycle_wear_eur`: zero unless the cycles end the pack before its 12 y
+    calendar band), and their sum `net`, which is the study's
+    `saving_annual_net`. `wear_shadow` is the per-cycle price the MILP and the
+    learned agents DISPATCH against, kept for comparison and not in `net`. The MILP-family controllers come from arm
+    checkpoints; their components are the same settlement's, stored by the
+    sweep. `from_checkpoint` is `{row name: (arm, checkpoint key)}`, default
+    the full-year MILP of the SI reference arm -- pass e.g.
+    `{"mpc_best": ("SI_H24_prophet_tuned", "prophet")}` to add an MPC run on
+    another arm. They have no monthly contract in the checkpoint, so they are
+    absent from `monthly`.
+
+    `monthly`: one row per (household, controller, month, block): the peak drawn
+    and the agreed power billed, and both as a change against no battery.
+    Learned controllers are named `<method>_fc_h24`, as in the study frame.
+    """
+    import pandas as pd
+
+    if from_checkpoint is None:
+        from_checkpoint = {"milp_full": (hs.REFERENCE_ARM["SI"], "milp_full")}
+    shadow = be.cycle_cost_eur_per_efc(BATTERY_CAP)
+    wear = lambda efc: -float(hs.cycle_wear_eur(efc, BATTERY_CAP, "SI"))
+    rows, mon = [], []
+    for f in sorted(os.listdir(DIAG_OUT)):
+        if not f.endswith(".json"):
+            continue
+        with open(os.path.join(DIAG_OUT, f), encoding="utf-8") as fh:
+            d = json.load(fh)
+        ident, ctrls = d["ident"], d["controllers"]
+        nb = ctrls[rbc.NO_BATTERY]
+        for name, v in ctrls.items():
+            c = f"{name}_fc_h24" if name in DIAG_LEARNED else name
+            rows.append({"ident": ident, "controller": c,
+                         "energy": nb["energy_eur"] - v["energy_eur"],
+                         "power": nb["power_eur"] - v["power_eur"],
+                         "contract": nb["fixed_eur"] - v["fixed_eur"],
+                         "termadj": -v["termadj_eur"],
+                         "wear": wear(v["efc"]), "wear_shadow": -shadow * v["efc"],
+                         "efc": v["efc"]})
+            for m, blocks in v["monthly"].items():
+                for b, x in blocks.items():
+                    y = nb["monthly"][m][b]
+                    mon.append({"ident": ident, "controller": c, "month": int(m),
+                                "block": int(b), "peak_kw": x["peak_kw"],
+                                "agreed_kw": x["agreed_kw"],
+                                "d_peak_kw": x["peak_kw"] - y["peak_kw"],
+                                "d_agreed_kw": x["agreed_kw"] - y["agreed_kw"]})
+        for name, (arm, key) in from_checkpoint.items():
+            ck_path = os.path.join(HERE, "results_local", arm,
+                                   f"Ausgrid {ident}", "checkpoint.json")
+            if not os.path.exists(ck_path):
+                continue
+            with open(ck_path, encoding="utf-8") as fh:
+                ck = json.load(fh)["metrics"]
+            rows.append({"ident": ident, "controller": name,
+                         "energy": nb["energy_eur"] - ck[f"energy_{key}"],
+                         "power": nb["power_eur"] - ck[f"power_{key}"],
+                         "contract": nb["fixed_eur"] - ck[f"fixed_{key}"],
+                         "termadj": -ck[f"termadj_{key}"],
+                         "wear": wear(ck[f"efc_{key}"]),
+                         "wear_shadow": -shadow * ck[f"efc_{key}"],
+                         "efc": ck[f"efc_{key}"]})
+    comp = pd.DataFrame(rows)
+    comp["net"] = comp[["energy", "power", "contract", "termadj", "wear"]].sum(axis=1)
+    return comp, pd.DataFrame(mon)
+
+
+# ---------------------------------------------------------------------------
 # The sweep
 # ---------------------------------------------------------------------------
 def main(argv=None):
@@ -489,8 +964,6 @@ def main(argv=None):
     ap.add_argument("--variants", nargs="*", default=DEFAULT_VARIANTS)
     ap.add_argument("--methods", nargs="*", default=DEFAULT_METHODS)
     ap.add_argument("--steps", type=int, default=500_000)
-    ap.add_argument("--gamma", type=float, default=None,
-                    help="override TrainConfig.gamma (part of the digest)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--quick", action="store_true",
                     help="smoke-test budget: 30k steps, eval every 5k")
@@ -503,10 +976,14 @@ def main(argv=None):
                          "files record the budget they were produced under, so "
                          "a mixed-budget panel stays visible rather than "
                          "implied.")
+    ap.add_argument("--tune", action="store_true",
+                    help="train the TUNE_GRID on --ids, validation only (the "
+                         "test year is never evaluated), then print "
+                         "tune_report()")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
 
-    cfg = make_config(args.steps, args.seed, args.gamma)
+    cfg = make_config(args.steps, args.seed)
     if args.quick:
         cfg.total_steps = 30_000
         cfg.eval_every = 5_000
@@ -516,6 +993,8 @@ def main(argv=None):
     # when the household changes -- so the loop order IS the prep bill. With
     # the household innermost the first screen was rebuilding it once per
     # (variant, method) group, ~200 times instead of 10.
+    if args.tune:
+        return tune(args.ids, args.tariffs, cfg, args.jobs, args.quiet)
     if args.retrain_unconverged:
         jobs = [(t, v, m, int(i)) for t, v, m, i in unconverged_runs()]
         if not jobs:

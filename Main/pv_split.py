@@ -214,7 +214,7 @@ def forecast_arms(track: str, tariff: str, control_horizon: int = 48) -> dict:
     """`{kind: arm}` for one track and tariff -- `hs.forecast_arms`, narrowed.
 
     The exclusions that function makes are the ones that matter here too: the
-    current-interval leak carries `forecaster_kind == "prophet"` and the no-wear
+    current-interval leak carries `forecaster_kind == "prophet"` and the `*_wearprice`
     arms carry no kind at all, so both would answer "which arm shows me Prophet?"
     and neither is a forecast.
     """

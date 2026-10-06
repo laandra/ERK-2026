@@ -7,7 +7,7 @@ just added -- which is the same argument `hems_study.CONTROLLER_ALGORITHM` makes
 about label dicts, applied one level up.
 
 What stays in the notebooks is what closes over run data: `make_labels`, `LABEL`,
-`SAMPLE`, `nowear_twin` and `with_nowear` all need `df_all` or `long`, and a
+`SAMPLE`, `wearprice_twin` and `with_wearprice` all need `df_all` or `long`, and a
 module-level copy of those would be a cache of a frame the notebook is still
 loading.
 
@@ -98,8 +98,9 @@ def ctrl_family(controller):
     return FAMILY.get(base) or hs.controller_family(base)
 
 
-def is_nowear(controller):
-    """True for the `<name>*` rows: the same MILP with no degradation term."""
+def is_wearprice(controller):
+    """True for the `<name>*` rows: the same MILP dispatched against the
+    per-cycle wear price (the `*_wearprice` ablation arms)."""
     return str(controller).endswith("*")
 
 
@@ -139,15 +140,15 @@ def tick_label(c, label_map, width=34):
     controller's identity, so the map has to be built against an arm and cannot
     be a module constant.
     """
-    base = c[:-1] if is_nowear(c) else c
+    base = c[:-1] if is_wearprice(c) else c
     lab = TICK_SHORT.get(base, label_map.get(base, base))
     for prefix in ("RBC: ", "MPC-MILP ", "MILP, "):
         if lab.startswith(prefix):
             lab = lab[len(prefix):]
             break
     # The star is re-appended after the lookup rather than carried through it,
-    # so a shortened name and its no-wear twin cannot drift apart.
-    return textwrap.fill(lab + (" *" if is_nowear(c) else ""), width)
+    # so a shortened name and its wear-price twin cannot drift apart.
+    return textwrap.fill(lab + (" *" if is_wearprice(c) else ""), width)
 
 
 # ---------------------------------------------------------------------------
@@ -159,10 +160,12 @@ def tick_label(c, label_map, width=34):
 # lifetime reading is the one a household decides on.
 #
 # These are not a rescaling of each other. The lifetime columns discount at 5 %
-# over each ROW'S service life (`pv_factor`), so wherever two rows have different
-# lives -- which is what a MILP with no degradation term can cause, by cycling a
-# pack past its rated 6000 EFC inside the 12 y calendar band -- the ratio between
-# them moves between the views.
+# over each ROW'S service life, min(12 y calendar, 6000 EFC / EFC per year)
+# (`pv_factor`), so wherever two rows have different lives -- which is what a
+# MILP that cycles freely can cause, by cycling a pack past its rated
+# 6000 EFC inside the 12 y calendar band -- the ratio between them moves
+# between the views. `wear` is the cost of that shortened life and nothing
+# else: zero on every row the calendar ends (see `hems_study.summarize`).
 VIEWS = [
     dict(key="annual", suffix="",
          saving="saving_annual_net", operating="saving_operating",
@@ -173,7 +176,7 @@ VIEWS = [
          saving="lifetime_saving", operating="lifetime_saving_operating",
          wear="lifetime_wear", ret="npv",
          per="over the pack's life, at 5 %/a",
-         note="the 12 y calendar band, discounted at 5 %/a"),
+         note="min(12 y, 6000 EFC) of pack life, discounted at 5 %/a"),
 ]
 
 # WHAT PERCENT OF WHAT. A share is a number with a % after it until its

@@ -194,6 +194,17 @@ check("kept weights reproduce the recorded best validation cost",
       abs(re_val["cost_eur_closed"] - hist_q["best_val_cost_closed"]) < 1e-6,
       f"{re_val['cost_eur_closed']:.4f} vs {hist_q['best_val_cost_closed']:.4f}")
 
+# The validation score early stopping reads must be the one the results are
+# reported on: bill plus the lifetime wear. A constant charge shifts every
+# evaluation alike, so the kept weights cannot move -- only the score can.
+_, hist_vw = rl.train_dqn(sig_si, settle_si, env, fb, static_norm, cfg_q,
+                          respect_peak=True, train_days=(0, 90),
+                          val_days=(90, 120), soc_target=3.5, verbose=False,
+                          val_wear=lambda efc, days: 100.0)
+check("val_wear is added to every validation score early stopping reads",
+      abs(hist_vw["best_val_cost_closed"] - hist_q["best_val_cost_closed"] - 100.0) < 1e-6,
+      f"{hist_vw['best_val_cost_closed']:.2f} vs {hist_q['best_val_cost_closed']:.2f} + 100")
+
 net_q2, hist_q2 = rl.train_dqn(sig_si, settle_si, env, fb, static_norm, cfg_q,
                                respect_peak=True, train_days=(0, 90),
                                val_days=(90, 120), soc_target=3.5, verbose=False)
@@ -296,6 +307,46 @@ check("a mid-window index inherits a nonzero peak state",
 check("the seed is the environment's own, not a second opinion",
       seeded == {int(b): float(v)
                  for b, v in env.compute_seed_peak_kw(mid).items()})
+
+
+# --------------------------------------------------------------------------
+# 5d. Train / validation / test are disjoint, and training respects it
+# --------------------------------------------------------------------------
+# The first split trained on year 2 only and its knobs were tuned on scored-
+# year numbers. These pin the replacement: three disjoint parts, validation in
+# every season, no episode or clone fit reaching a held-out day.
+import run_rl_benchmark as rb                                    # noqa: E402
+
+tr = set(rl.block_days(rb.TRAIN_BLOCKS).tolist())
+va = set(rl.block_days(rb.VAL_BLOCKS).tolist())
+check("train and validation days are disjoint and cover the training period",
+      not (tr & va) and tr | va == set(range(rb.N_TRAIN)),
+      f"{len(tr)} train / {len(va)} validation days")
+check("neither train nor validation reaches the test year",
+      max(tr | va) < rb.N_TRAIN and rb.TEACH_SPAN[1] <= rb.N_TRAIN)
+months = {(int(d) // 30) % 12 for d in va}
+check("validation weeks fall in every season of the year",
+      len({m // 3 for m in months}) == 4, f"{len(months)} month bins")
+
+try:
+    rl.train_dqn(sig_si, settle_si, env, fb, static_norm,
+                 rl.TrainConfig(total_steps=100, eval_every=100, learn_start=50,
+                                episode_days=3, hidden=64, seed=0),
+                 respect_peak=True, train_days=[(0, 60)],
+                 val_days=[(50, 55)], soc_target=3.5, verbose=False)
+    overlap_raised = False
+except ValueError:
+    overlap_raised = True
+check("a training range that contains a validation week is refused",
+      overlap_raised)
+
+_, hist_h = rl.train_bc(sig_si, settle_si, env, fb, static_norm,
+                        t_out["_setpoints"], start=0, stop=N_STEPS,
+                        soc_init=4.0, respect_peak=True, cfg=cfg,
+                        verbose=False, holdout_days=[(20, 27), (90, 97)])
+n_held = int(round(sum(hist_h["label_counts"])))
+check("BC fits only outside its held-out weeks",
+      n_held == (N_DAYS - 14) * H, f"{n_held} fitted steps")
 
 
 # --------------------------------------------------------------------------
