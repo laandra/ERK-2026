@@ -51,6 +51,7 @@ import torch
 import torch.nn as nn
 
 import rl_control as rl
+import Rule_Based_Control as rbc
 
 # WHICH POOLED LEARNING RULE produced a result -- stamped into every digest
 # beside `rl.ALGO_VERSION` / `rl.BC_ALGO_VERSION`, for the same reason those
@@ -611,3 +612,48 @@ def load_model(path: str):
     net.load_state_dict(blob["state_dict"])
     net.eval()
     return net, fb, blob
+
+
+# ---------------------------------------------------------------------------
+# Time-localised deployment: one network per period, switched by the clock
+# ---------------------------------------------------------------------------
+class SwitchingPolicy(rbc.Policy):
+    """Several networks sharing one observation contract, one active per step.
+
+    `period_of(index) -> int array` maps the signal bundle's timestamps to the
+    network that drives each interval -- a season, or the month a rolling
+    fine-tune was made for. Every network was fitted to the SAME scaler (they
+    are fine-tunes of one parent), so the static features are built once and
+    only the forward pass changes with the period. SOC, the ratchet peak and
+    the contract carry across a switch exactly as they carry across any other
+    interval: the runner owns them, not the network.
+    """
+
+    def __init__(self, nets: dict, fb, respect_peak: bool, period_of,
+                 load_fc=None, pv_fc=None, name="switching", label="switching",
+                 causal: bool = True):
+        self.nets = nets
+        self.fb = fb
+        self.respect_peak = bool(respect_peak)
+        self.period_of = period_of
+        self.load_fc, self.pv_fc = load_fc, pv_fc
+        self.name, self.label, self.causal = name, label, bool(causal)
+        self._static = self._period = None
+
+    def reset(self, sig):
+        static = self.fb.build_static(sig, load_fc=self.load_fc, pv_fc=self.pv_fc)
+        self._static = self.fb.normalize(static)
+        self._period = np.asarray(self.period_of(sig.env.dataset.index[:sig.n_steps]))
+        missing = set(np.unique(self._period)) - set(self.nets)
+        if missing:
+            raise KeyError(f"no network for period(s) {sorted(missing)}")
+        for n in self.nets.values():
+            n.eval()
+
+    def setpoint(self, sig, idx, soc_kwh, lo, hi, peak_state):
+        obs = np.concatenate([self._static[idx],
+                              self.fb.dynamic(sig, idx, soc_kwh, peak_state)])
+        net = self.nets[int(self._period[idx])]
+        with torch.no_grad():
+            a = int(net(torch.from_numpy(obs).unsqueeze(0)).argmax(dim=1).item())
+        return rl.action_setpoint(a, sig, idx, lo, hi, peak_state, self.respect_peak)

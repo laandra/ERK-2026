@@ -102,6 +102,23 @@ CTRL_SCHEMES = ("ctrl_type", "ctrl_ft", "rand_type")
 # size, the shape types carry nothing the controller can use, and the per-type
 # deficit against the global model is the cost of the smaller pool alone.
 CTRL_K = 6                                   # ~50 households a type
+# Stage 4: localisation in TIME rather than across consumers. The network
+# already reads time as input (hour, weekday, day of year, sin/cos); these
+# localise by DATA instead, each on top of the global network:
+#   season_ft  the global network fine-tuned per meteorological season on all
+#              299 households' training days of that season; deployed by
+#              switching networks at the season boundary
+#   roll_ft    the global clone fine-tuned at the start of every test-year month
+#              on the household's own trailing ROLL_WINDOW days, labelled by a
+#              MILP solved on that window only -- causal: everything it reads
+#              is in the past when the month begins
+TIME_SCHEMES = ("season_ft", "roll_ft")
+SEASON_OF_MONTH = {12: 0, 1: 0, 2: 0, 3: 1, 4: 1, 5: 1, 6: 2, 7: 2, 8: 2,
+                   9: 3, 10: 3, 11: 3}
+SEASON_NAME = {0: "DJF", 1: "MAM", 2: "JJA", 3: "SON"}
+DAY0 = np.datetime64("2010-07-01")           # every Ausgrid household's day 0
+SEASON_STEPS, SEASON_EVAL = 1_000_000, 40_000
+ROLL_WINDOW, ROLL_HOLDOUT = 56, 7
 CTRL_TYPES = os.path.join(OUT, "control_types.csv")
 METHODS = ("bc", "dqn", "bc_dqn")
 # Stage 2 sub-clusters only a type large enough to split into pools that are
@@ -121,8 +138,37 @@ GLOBAL_STEPS = 3_000_000
 N_EVALS = 25           # validation evaluations per run, whatever its budget
 
 
+def day_season(days) -> np.ndarray:
+    """Meteorological season of local-day indices (shared calendar)."""
+    months = (DAY0 + np.asarray(days, dtype="timedelta64[D]")).astype(
+        "datetime64[M]").astype(int) % 12 + 1
+    return np.vectorize(SEASON_OF_MONTH.get)(months)
+
+
+def season_blocks(blocks, season: int) -> list:
+    """The days of `blocks` that fall in `season`, as contiguous blocks."""
+    days = rl.block_days(blocks)
+    keep = days[day_season(days) == season]
+    out = []
+    for d in keep:
+        if out and out[-1][1] == d:
+            out[-1][1] = d + 1
+        else:
+            out.append([int(d), int(d) + 1])
+    return [tuple(b) for b in out]
+
+
+def season_of_index(index) -> np.ndarray:
+    """Season of each timestamp -- what `SwitchingPolicy` switches on."""
+    return np.asarray([SEASON_OF_MONTH[ts.month] for ts in index])
+
+
 def dqn_budget(n_members: int, scheme: str) -> tuple[int, int]:
     """(total_steps, eval_every) for a pool of `n_members`."""
+    if scheme == "season_ft":
+        # A fine-tune of a converged network on a quarter of its data: a third
+        # of the global budget, the same 25 evaluations.
+        return SEASON_STEPS, SEASON_EVAL
     if scheme in ("global", "global_typed"):
         steps = GLOBAL_STEPS
     else:
@@ -193,6 +239,12 @@ def groups_for(scheme: str, pop=None, pool_cap: int | None = None,
                 # method is the fine-tune's own.
                 **({"parent": ["global_typed", "all"]} if ft else {})}
         return out
+    if scheme == "season_ft":
+        return {f"q{q}": {"members": sorted(int(i) for i in pop.index),
+                          "val_members": sorted(units), "n_types": 0,
+                          "type_of": {}, "parent": ["global", "all"],
+                          "season": q}
+                for q in SEASON_NAME}
     if scheme == "rand_type":
         full = population()
         rng = np.random.default_rng(42)
@@ -470,7 +522,7 @@ def cached_members(tariff: str, idents) -> list[int]:
 # Phase B: training
 # ---------------------------------------------------------------------------
 # Fine-tunes that may never come back worse than their parent on validation.
-GUARDED_SCHEMES = ("ctrl_ft",)
+GUARDED_SCHEMES = ("ctrl_ft", "season_ft")
 
 
 def train_config(tariff: str, method: str, scheme: str, n_members: int,
@@ -498,6 +550,7 @@ def model_digest(tariff, scheme, group, method, g, cfg, bc_digest=None,
                     "train_days": rb.TRAIN_BLOCKS, "val_days": rb.VAL_BLOCKS,
                     "teach_span": rb.TEACH_SPAN, "cache": cache_digest(tariff),
                     "bc_prior": bc_digest, "parent": parent_digest,
+                    "season": g.get("season"),
                     **({"guarded": True} if scheme in GUARDED_SCHEMES else {})})
 
 
@@ -526,6 +579,15 @@ def model_current(tariff, scheme, group, method, digest) -> dict | None:
         if meta.get("digest") == digest:
             return meta
     return None
+
+
+def _blocks_for(g):
+    """(train_days, val_days) a group trains and validates on: the study's
+    split, cut to the group's season when it has one."""
+    if g.get("season") is None:
+        return rb.TRAIN_BLOCKS, rb.VAL_BLOCKS
+    return (season_blocks(rb.TRAIN_BLOCKS, g["season"]),
+            season_blocks(rb.VAL_BLOCKS, g["season"]))
 
 
 def _train_rows():
@@ -581,8 +643,12 @@ class _Pool:
             X = np.hstack([fb.normalize_base(c["base"][s0:s0 + n]), c["dyn"]])
             mask = _val_mask(n, s0)
             y = c["labels"].astype(np.int64)
-            Xtr.append(X[~mask]); ytr.append(y[~mask])
-            Xva.append(X[mask]); yva.append(y[mask])
+            # A season-localised clone fits, and early-stops on, its season's
+            # rows only -- the validation weeks of that season, nothing else.
+            keep = (np.ones(n, dtype=bool) if self.g.get("season") is None else
+                    day_season((s0 + np.arange(n)) // H) == self.g["season"])
+            Xtr.append(X[~mask & keep]); ytr.append(y[~mask & keep])
+            Xva.append(X[mask & keep]); yva.append(y[mask & keep])
         return (np.concatenate(Xtr), np.concatenate(ytr),
                 np.concatenate(Xva), np.concatenate(yva))
 
@@ -680,7 +746,7 @@ def train_group(tariff, scheme, group, g, methods, seed=0, verbose=True):
                     init = parent_net
                 net, hist_dqn = rg.train_dqn_pool(
                     members, val_members, pool.fb, cfg, respect_peak,
-                    rb.TRAIN_BLOCKS, rb.VAL_BLOCKS, init_net=init, bc_net=bc_net,
+                    *_blocks_for(g), init_net=init, bc_net=bc_net,
                     soc_target=rb.SOC_INIT_USABLE, verbose=verbose,
                     val_wear=rb.val_wear_fn(tariff),
                     # The fallback, for the control-relevant fine-tune only:
@@ -726,6 +792,10 @@ def run_train(tariffs, schemes, methods, n_jobs, seed=0, pool_cap=None,
         for s in schemes:
             for group, g in groups_for(s, pool_cap=pool_cap, clusters=clusters).items():
                 group = group + seed_tag(seed)
+                if g.get("parent") and seed:
+                    # A fine-tune under seed s starts from the parent of seed s,
+                    # where that parent has seed replicates (the global schemes).
+                    g = dict(g, parent=[g["parent"][0], g["parent"][1] + seed_tag(seed)])
                 ok = cached_members(t, g["members"])
                 missing = sorted(set(g["members"]) - set(ok))
                 if missing:
@@ -789,6 +859,13 @@ def eval_unit(tariff, ident, schemes, methods, seed=0):
     prep = None
     out = []
     for scheme in schemes:
+        if scheme == "season_ft":
+            prep = prep or rb.prepare_household(ident, tariff)
+            out += [_eval_season(tariff, ident, method, prep, seed)
+                    for method in methods]
+            continue
+        if scheme == "roll_ft":
+            continue                     # scored by `roll_unit`, which trains it
         group = group_of_unit(scheme, ident, pop) + seed_tag(seed)
         for method in methods:
             pt, js = _paths(tariff, scheme, group, method)
@@ -859,6 +936,249 @@ def eval_unit(tariff, ident, schemes, methods, seed=0):
     return out
 
 
+def _write_scored(o, tariff, ident, scheme, method, digest, extra, t0, key=None):
+    """One test-year result in the layout every scheme shares."""
+    pop = population()
+    result = {
+        "dataset": f"Ausgrid {ident}", "ident": str(ident), "tariff": tariff,
+        "scheme": scheme, "method": method, "variant": VARIANT, "seed": 0,
+        "model_digest": digest, "cluster": int(pop.loc[ident, "cluster"]),
+        "cost_eur_closed": o["Cost_EUR_Closed"], "cost_eur": o["Cost_EUR"],
+        "fixed_eur": o["Fixed_EUR"], "cost_eur_total": o["Cost_EUR_Total"],
+        "efc": o["Equivalent_Full_Cycles"], "import_kwh": o["Import_kWh"],
+        "export_kwh": o["Export_kWh"], "peak_import_kw": o["Peak_Import_kW"],
+        "agreed_power_iters": o["Agreed_Power_Iters"],
+        "agreed_power_converged": o["Agreed_Power_Converged"],
+        "eval_s": time.time() - t0, **extra}
+    result.update(rb._comparators(ident, tariff))
+    result.update(_local_result(tariff, method, ident))
+    path = os.path.join(OUT, tariff, key or f"{scheme}__{method}", f"{ident}.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(result, fh, indent=1)
+
+
+def _eval_season(tariff, ident, method, prep, seed=0):
+    """The four season fine-tunes as ONE controller, switched at each season
+    boundary of the test year."""
+    metas, nets, fb = {}, {}, None
+    for q in SEASON_NAME:
+        pt, js = _paths(tariff, "season_ft", f"q{q}" + seed_tag(seed), method)
+        if not os.path.exists(js):
+            return (tariff, "season_ft", method, ident, "no model")
+        with open(js, encoding="utf-8") as fh:
+            metas[q] = json.load(fh)
+        nets[q], fb_q, _ = rg.load_model(pt)
+        fb = fb or fb_q
+    digest = _digest(*[metas[q]["digest"] for q in sorted(metas)])
+    key = f"season_ft__{method}" + seed_tag(seed).replace("_", "__")
+    path = os.path.join(OUT, tariff, key, f"{ident}.json")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as fh:
+            if json.load(fh).get("model_digest") == digest:
+                return (tariff, "season_ft", method, ident, None)
+    try:
+        sim = prep["sim"]
+        policy = rg.SwitchingPolicy(nets, fb.for_type(None), tariff == "SI",
+                                    season_of_index, load_fc=prep["fc_sim"][0],
+                                    pv_fc=prep["fc_sim"][1],
+                                    name=f"{method}_season_ft")
+        t0 = time.time()
+        o = rbc.run_policy(sim["env"], policy, n_steps=rb.N_SIM * H,
+                           settle=sim["settle"], soc_init_kwh=rb.SOC_INIT_USABLE,
+                           rates=sim["rates"])
+        _write_scored(o, tariff, ident, "season_ft", method, digest, {
+            "group": "q0-3", "n_members": metas[0]["n_members"], "n_types": 0,
+            "train_converged": all(m["converged"] for m in metas.values()),
+            "seed": int(seed),
+            "kept_parent": {SEASON_NAME[q]: _kept_parent(tariff, q, method, seed)
+                            for q in SEASON_NAME}}, t0, key=key)
+        return (tariff, "season_ft", method, ident, None)
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        return (tariff, "season_ft", method, ident, repr(exc))
+
+
+def _kept_parent(tariff, q, method, seed=0):
+    """Did the season's fine-tune hand back its parent unchanged (the guard)?"""
+    pt, _ = _paths(tariff, "season_ft", f"q{q}" + seed_tag(seed), method)
+    with open(pt + ".history.json", encoding="utf-8") as fh:
+        h = json.load(fh)
+    if h.get("dqn"):
+        return bool(h["dqn"].get("kept_init"))
+    b = h.get("bc") or {}
+    return bool(b.get("init_val_loss") is not None
+                and b.get("best_val_loss", 0) >= b["init_val_loss"] - 1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Rolling localisation in time: fine-tune on the household's own recent past
+# ---------------------------------------------------------------------------
+ROLL_TEACH = os.path.join(MODELS, "roll", "teacher")
+
+
+def _full_bundle(prep, tariff):
+    """env / rates / settle / signals over ALL 1095 days at once, so a trailing
+    window may straddle the training/test boundary. Built exactly as
+    `prepare_household` builds its two halves, from the same frame."""
+    df = prep["frames"]["df_all_kwh"]
+    n = (len(df) // H) * H
+    df = df.iloc[:n]
+    env = hs.align_envelope(
+        hs.build_study_env(df, battery_cap=rb.BATTERY_CAP, soc_min_pct=rb.SOC_MIN,
+                           soc_max_pct=rb.SOC_MAX, p_max=rb.P_MAX, eff=rb.EFF,
+                           delta_t=rb.DELTA_T, H=H), rb.P_MAX, rb.EFF, rb.DELTA_T)
+    df_kw = df.copy()
+    df_kw[["Energy_Generation", "Energy_Consumption"]] /= rb.DELTA_T
+    rates = hs.build_rate_vectors(tariff, env, df_kw.index, df_kw["SMP"].values,
+                                  int(round(rb.DELTA_T * 60)))
+    settle = hs.build_settlement(tariff, env, rates, rb.DELTA_T)
+    sig = rbc.build_signals(env, n_steps=n, rates=rates)
+    fc = (rl.median14_forecast(df["Energy_Consumption"].values, H),
+          rl.median14_forecast(df["Energy_Generation"].values, H))
+    return {"df": df, "env": env, "rates": rates, "settle": settle, "sig": sig,
+            "fc": fc}
+
+
+def roll_segments(index_sim) -> list:
+    """(first_day, last_day_exclusive) of each test-year month, absolute day
+    indices. A stub of under a week at the start is folded into the next month,
+    so no network is fine-tuned for a single day."""
+    days = rb.N_TRAIN + np.arange(rb.N_SIM)
+    months = (DAY0 + days.astype("timedelta64[D]")).astype("datetime64[M]")
+    starts = [int(days[0])] + [int(d) for d, a, b in
+                               zip(days[1:], months[:-1], months[1:]) if a != b]
+    if len(starts) > 1 and starts[1] - starts[0] < 7:
+        starts.pop(1)
+    ends = starts[1:] + [int(days[-1]) + 1]
+    return list(zip(starts, ends))
+
+
+def _roll_teacher(prep, full, tariff, ident, d0):
+    """MILP setpoints over [d0 - ROLL_WINDOW, d0): solved on that window
+    ALONE, so a label never reads a day the month it serves has not reached."""
+    a = d0 - ROLL_WINDOW
+    cache = os.path.join(ROLL_TEACH, tariff, str(ident), f"d{a}-{d0}.npz")
+    if os.path.exists(cache):
+        return np.load(cache)["setpoints_kwh"]
+    df_w = full["df"].iloc[a * H: d0 * H]
+    env = hs.align_envelope(
+        hs.build_study_env(df_w, battery_cap=rb.BATTERY_CAP, soc_min_pct=rb.SOC_MIN,
+                           soc_max_pct=rb.SOC_MAX, p_max=rb.P_MAX, eff=rb.EFF,
+                           delta_t=rb.DELTA_T, H=H), rb.P_MAX, rb.EFF, rb.DELTA_T)
+    rates = hs.build_rate_vectors(tariff, env, df_w.index, df_w["SMP"].values,
+                                  int(round(rb.DELTA_T * 60)))
+    sol = hs.solve_full_period(env, rates, tariff, n_steps=ROLL_WINDOW * H,
+                               soc_init_kwh=rb.SOC_INIT_ABS, delta_t=rb.DELTA_T,
+                               soc_min_kwh=rb.BATTERY_CAP * rb.SOC_MIN,
+                               verbose=False)
+    sp = (np.asarray(sol["x_ch"]) - np.asarray(sol["x_dis"])) * rb.DELTA_T
+    os.makedirs(os.path.dirname(cache), exist_ok=True)
+    np.savez_compressed(cache, setpoints_kwh=sp)
+    return sp
+
+
+def roll_digest(tariff, seed=0) -> str:
+    _, js = _paths(tariff, "global", "all" + seed_tag(seed), "bc")
+    with open(js, encoding="utf-8") as fh:
+        parent = json.load(fh)["digest"]
+    return _digest({"parent": parent, "window": ROLL_WINDOW,
+                    "holdout": ROLL_HOLDOUT, "lr_scale": 0.3,
+                    "pool": rg.BCConfigPool().config(),
+                    "global_algo": rg.GLOBAL_ALGO_VERSION})
+
+
+def roll_unit(tariff, ident, seed=0):
+    """Train the month-by-month fine-tunes of the global clone for one study
+    unit, then score them as one switched controller on the test year.
+
+    `seed` picks the PARENT: the global clone of that seed. The month's teacher
+    and window do not depend on it, so the teacher cache is shared; rolling
+    from each of the three global seeds is what separates "rolling helps" from
+    "rolling repairs one weak parent"."""
+    warnings.simplefilter("ignore")
+    rb._calendar(tariff)
+    digest = roll_digest(tariff, seed)
+    key = "roll_ft__bc" + seed_tag(seed).replace("_", "__")
+    path = os.path.join(OUT, tariff, key, f"{ident}.json")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as fh:
+            if json.load(fh).get("model_digest") == digest:
+                return (tariff, "roll_ft", "bc", ident, None)
+    try:
+        prep = rb.prepare_household(ident, tariff)
+        full = _full_bundle(prep, tariff)
+        parent, fb, _ = rg.load_model(
+            _paths(tariff, "global", "all" + seed_tag(seed), "bc")[0])
+        fb = fb.for_type(None)
+        static = fb.normalize(fb.build_static(full["sig"], *full["fc"]))
+        respect_peak = tariff == "SI"
+        segs = roll_segments(None)
+        nets, kept, agree = {}, 0, []
+        for k, (d0, _) in enumerate(segs):
+            sp = _roll_teacher(prep, full, tariff, ident, d0)
+            a = d0 - ROLL_WINDOW
+            soc, peaks, labels = rl.teacher_actions(
+                full["sig"], full["settle"], full["env"], sp, a * H, d0 * H,
+                rb.SOC_INIT_USABLE, respect_peak)
+            X = np.stack([np.concatenate([static[idx], fb.dynamic(
+                full["sig"], idx, soc[j], peaks[j])])
+                for j, idx in enumerate(range(a * H, d0 * H))]).astype(np.float32)
+            cut = (ROLL_WINDOW - ROLL_HOLDOUT) * H     # last week held out
+            net, hist = rg.train_bc_pool(
+                X[:cut], labels[:cut], X[cut:], labels[cut:],
+                rl.TrainConfig(seed=0), verbose=False, init_net=parent,
+                lr_scale=0.3)
+            nets[k] = net
+            kept += int(hist["best_val_loss"] >= hist["init_val_loss"] - 1e-5)
+            agree.append(hist["final_val_agreement"])
+        # Which network drives each test-year interval: the month it was made for.
+        seg_of_day = np.zeros(rb.N_TRAIN + rb.N_SIM + 1, dtype=int)
+        for k, (d0, d1) in enumerate(segs):
+            seg_of_day[d0:d1] = k
+        t_start = prep["sim"]["env"].dataset.index[0]
+
+        def period_of(index):
+            day = ((index - t_start) / np.timedelta64(1, "D")).astype(int) + rb.N_TRAIN
+            return seg_of_day[np.clip(day, rb.N_TRAIN, len(seg_of_day) - 1)]
+
+        sim = prep["sim"]
+        policy = rg.SwitchingPolicy(nets, fb, respect_peak, period_of,
+                                    load_fc=prep["fc_sim"][0],
+                                    pv_fc=prep["fc_sim"][1], name="bc_roll_ft")
+        t0 = time.time()
+        o = rbc.run_policy(sim["env"], policy, n_steps=rb.N_SIM * H,
+                           settle=sim["settle"], soc_init_kwh=rb.SOC_INIT_USABLE,
+                           rates=sim["rates"])
+        _write_scored(o, tariff, ident, "roll_ft", "bc", digest, {
+            "group": "own", "n_members": 1, "n_types": 0, "train_converged": True,
+            "n_months": len(segs), "months_kept_parent": kept,
+            "mean_holdout_agreement": float(np.mean(agree)), "seed": int(seed)},
+            t0, key=key)
+        return (tariff, "roll_ft", "bc", ident, None)
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        return (tariff, "roll_ft", "bc", ident, repr(exc))
+
+
+def run_roll(tariffs=("AU", "SI"), n_jobs=12, units=None, seed=0):
+    from joblib import Parallel, delayed
+    units = units or study_units()
+    jobs = [(t, i) for t in tariffs for i in units]
+    jobs.sort(key=lambda j: j[0] != "SI")
+    t0 = time.time()
+    res = Parallel(n_jobs=min(n_jobs, len(jobs)), backend="loky", verbose=5)(
+        delayed(roll_unit)(t, i, seed) for t, i in jobs)
+    bad = [r for r in res if r[4]]
+    print(f"rolling fine-tunes done in {(time.time() - t0) / 60:.1f} min: "
+          f"{len(res) - len(bad)} scored, {len(bad)} failed", flush=True)
+    for r in bad:
+        print(f"  FAILED {r}")
+    return bad
+
+
 def run_eval(tariffs, schemes, methods, n_jobs, units=None, seed=0):
     from joblib import Parallel, delayed
     units = units or study_units()
@@ -904,6 +1224,8 @@ def _unit_candidates(tariff, ident, pop):
         if os.path.exists(js) and os.path.exists(pt):
             with open(js, encoding="utf-8") as fh:
                 out.append(("local", method, 0, pt, json.load(fh)["digest"], "local"))
+    # The time schemes deploy SEVERAL networks per household, switched by the
+    # clock; a single-network validation rollout does not describe them.
     for scheme in SCHEMES + STAGE2_SCHEMES + CTRL_SCHEMES:
         for seed in SEEDS:
             group = group_of_unit(scheme, ident, pop) + seed_tag(seed)
@@ -1180,11 +1502,12 @@ def report(df=None, axis: str = "cost_eur_total"):
 # ---------------------------------------------------------------------------
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--phase", choices=["cache", "train", "eval", "report", "all"],
+    ap.add_argument("--phase", choices=["cache", "train", "eval", "report", "all",
+                                        "roll"],
                     default="all")
     ap.add_argument("--tariffs", nargs="*", default=["AU", "SI"])
     ap.add_argument("--schemes", nargs="*", default=list(SCHEMES),
-                    help=f"any of {SCHEMES + STAGE2_SCHEMES + CTRL_SCHEMES}")
+                    help=f"any of {SCHEMES + STAGE2_SCHEMES + CTRL_SCHEMES + TIME_SCHEMES}")
     ap.add_argument("--methods", nargs="*", default=list(METHODS))
     ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--seed", type=int, default=0)
@@ -1209,6 +1532,8 @@ def main(argv=None):
         units = [u for u in study_units() if u in pop.index]
         run_eval(args.tariffs, args.schemes, args.methods, args.jobs, units,
                  args.seed)
+    if args.phase == "roll":
+        run_roll(args.tariffs, args.jobs, seed=args.seed)
     if args.phase in ("report", "all"):
         report()
 
