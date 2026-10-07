@@ -1,0 +1,48 @@
+{
+ "digest": "65faaf98a11496b3",
+ "tariff": "SI",
+ "scheme": "type",
+ "group": "c04",
+ "method": "bc_dqn",
+ "n_members": 1,
+ "members": [
+  223
+ ],
+ "val_members": [
+  223
+ ],
+ "n_types": 0,
+ "parent": null,
+ "parent_digest": null,
+ "converged": true,
+ "steps_run": 380000,
+ "best_val_cost_closed": 77.4236817353121,
+ "bc_val_agreement": null,
+ "train_runtime_s": 117.86749315261841,
+ "wall_s": 120.60820317268372,
+ "train_config": {
+  "total_steps": 500000,
+  "episode_days": 7,
+  "batch": 128,
+  "lr": 0.001,
+  "gamma": 0.99,
+  "hidden": 128,
+  "buffer": 200000,
+  "learn_start": 5000,
+  "update_every": 2,
+  "target_sync": 2000,
+  "eps_start": 1.0,
+  "eps_end": 0.05,
+  "eps_decay_frac": 0.4,
+  "reward_scale": 20.0,
+  "eval_every": 20000,
+  "patience": 8,
+  "wear_eur_per_efc": 0.0,
+  "bc_guide_prob": 0.5,
+  "n_step": 8,
+  "bc_reg": 1.0,
+  "bc_reg_decay_frac": 0.5,
+  "seed": 0
+ },
+ "model_path": "rl_models/global/SI/type/c04/bc_dqn.pt"
+}

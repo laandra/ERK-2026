@@ -1,0 +1,61 @@
+{
+ "digest": "7aa72b902ee47c47",
+ "tariff": "AU",
+ "scheme": "global_ft",
+ "group": "c29",
+ "method": "dqn",
+ "n_members": 6,
+ "members": [
+  82,
+  84,
+  137,
+  161,
+  241,
+  277
+ ],
+ "val_members": [
+  82,
+  84,
+  137,
+  161,
+  241,
+  277
+ ],
+ "n_types": 30,
+ "parent": [
+  "global_typed",
+  "all"
+ ],
+ "parent_digest": "f29a2dc8be69df7b",
+ "converged": true,
+ "steps_run": 864000,
+ "best_val_cost_closed": 1541.1280536149636,
+ "bc_val_agreement": null,
+ "train_runtime_s": 268.29103994369507,
+ "wall_s": 277.3244206905365,
+ "train_config": {
+  "total_steps": 1220000,
+  "episode_days": 7,
+  "batch": 128,
+  "lr": 0.001,
+  "gamma": 0.997,
+  "hidden": 128,
+  "buffer": 200000,
+  "learn_start": 5000,
+  "update_every": 2,
+  "target_sync": 2000,
+  "eps_start": 1.0,
+  "eps_end": 0.05,
+  "eps_decay_frac": 0.4,
+  "reward_scale": 20.0,
+  "eval_every": 48000,
+  "patience": 8,
+  "wear_eur_per_efc": 0.0,
+  "bc_guide_prob": 0.5,
+  "n_step": 8,
+  "bc_reg": 1.0,
+  "bc_reg_decay_frac": 0.5,
+  "seed": 0
+ },
+ "model_path": "rl_models/global/AU/global_ft/c29/dqn.pt"
+}

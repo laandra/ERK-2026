@@ -1,0 +1,63 @@
+{
+ "digest": "f86c59eb9843b65c",
+ "tariff": "SI",
+ "scheme": "global_ft",
+ "group": "c28",
+ "method": "bc_dqn",
+ "n_members": 7,
+ "members": [
+  116,
+  206,
+  246,
+  247,
+  263,
+  281,
+  289
+ ],
+ "val_members": [
+  116,
+  206,
+  246,
+  247,
+  263,
+  281,
+  289
+ ],
+ "n_types": 30,
+ "parent": [
+  "global_typed",
+  "all"
+ ],
+ "parent_digest": "3ef660376d20ee11",
+ "converged": true,
+ "steps_run": 1040000,
+ "best_val_cost_closed": 695.1765423922335,
+ "bc_val_agreement": null,
+ "train_runtime_s": 417.6288070678711,
+ "wall_s": 417.6415579319,
+ "train_config": {
+  "total_steps": 1320000,
+  "episode_days": 7,
+  "batch": 128,
+  "lr": 0.001,
+  "gamma": 0.99,
+  "hidden": 128,
+  "buffer": 200000,
+  "learn_start": 5000,
+  "update_every": 2,
+  "target_sync": 2000,
+  "eps_start": 1.0,
+  "eps_end": 0.05,
+  "eps_decay_frac": 0.4,
+  "reward_scale": 20.0,
+  "eval_every": 52000,
+  "patience": 8,
+  "wear_eur_per_efc": 0.0,
+  "bc_guide_prob": 0.5,
+  "n_step": 8,
+  "bc_reg": 1.0,
+  "bc_reg_decay_frac": 0.5,
+  "seed": 0
+ },
+ "model_path": "rl_models/global/SI/global_ft/c28/bc_dqn.pt"
+}
