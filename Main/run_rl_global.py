@@ -1055,10 +1055,11 @@ def roll_segments(index_sim) -> list:
     return list(zip(starts, ends))
 
 
-def _roll_teacher(prep, full, tariff, ident, d0):
-    """MILP setpoints over [d0 - ROLL_WINDOW, d0): solved on that window
-    ALONE, so a label never reads a day the month it serves has not reached."""
-    a = d0 - ROLL_WINDOW
+def _roll_teacher(prep, full, tariff, ident, d0, a=None):
+    """MILP setpoints over [a, d0) (default: the last ROLL_WINDOW days): solved
+    on that span ALONE, so a label never reads a day outside it -- neither the
+    month it serves nor, under the strong guard, the check days."""
+    a = d0 - ROLL_WINDOW if a is None else a
     cache = os.path.join(ROLL_TEACH, tariff, str(ident), f"d{a}-{d0}.npz")
     if os.path.exists(cache):
         return np.load(cache)["setpoints_kwh"]
@@ -1069,70 +1070,173 @@ def _roll_teacher(prep, full, tariff, ident, d0):
                            delta_t=rb.DELTA_T, H=H), rb.P_MAX, rb.EFF, rb.DELTA_T)
     rates = hs.build_rate_vectors(tariff, env, df_w.index, df_w["SMP"].values,
                                   int(round(rb.DELTA_T * 60)))
-    sol = hs.solve_full_period(env, rates, tariff, n_steps=ROLL_WINDOW * H,
+    sol = hs.solve_full_period(env, rates, tariff, n_steps=(d0 - a) * H,
                                soc_init_kwh=rb.SOC_INIT_ABS, delta_t=rb.DELTA_T,
                                soc_min_kwh=rb.BATTERY_CAP * rb.SOC_MIN,
                                verbose=False)
     sp = (np.asarray(sol["x_ch"]) - np.asarray(sol["x_dis"])) * rb.DELTA_T
     os.makedirs(os.path.dirname(cache), exist_ok=True)
-    np.savez_compressed(cache, setpoints_kwh=sp)
+    # Atomic: several workers can reach the same household-window at once.
+    tmp = f"{cache}.{os.getpid()}.tmp.npz"
+    np.savez_compressed(tmp, setpoints_kwh=sp)
+    os.replace(tmp, cache)
     return sp
 
 
-def roll_digest(tariff, seed=0) -> str:
+# Monthly reinforcement fine-tune: a converged network re-fitted to 49 days of
+# one household. 40k steps is ~830 days of experience, ~17 passes over the
+# window -- the local learner's own passes-per-day ratio (500k over 590 days) --
+# with ten validation evaluations on the window's last week.
+ROLL_RL_STEPS, ROLL_RL_EVAL = 40_000, 4_000
+
+# The monthly re-fit's two knobs, both tested in a grid.
+#   window  how many trailing days the month learns from (56 = the first run)
+#   guard   "weak":   the last ROLL_HOLDOUT days both pick the checkpoint and
+#                     decide parent-vs-fine-tune -- one week, used twice
+#           "strong": three disjoint parts of the window -- train, a week that
+#                     picks the checkpoint (VAL_DAYS), and the final CHECK_DAYS
+#                     that nothing was trained, stopped or labelled on; the
+#                     fine-tune is kept only if it beats its parent day by day
+#                     there (one-sided paired Wilcoxon, p < CHECK_ALPHA)
+# (56, "weak") is `roll_ft`; every other combination is `roll_w<window>_<guard>`.
+ROLL_WINDOWS = (56, 112, 168)
+ROLL_GUARDS = ("weak", "strong")
+ROLL_VAL_DAYS, ROLL_CHECK_DAYS, ROLL_CHECK_ALPHA = 7, 14, 0.10
+
+
+def roll_scheme(window, guard) -> str:
+    return "roll_ft" if (window, guard) == (56, "weak") else f"roll_w{window}_{guard}"
+
+
+def roll_layout(window, guard) -> dict:
+    """Day offsets inside the window [0, window): train / val / check, and the
+    span the month's MILP teacher is solved on (never the check days)."""
+    if guard == "weak":
+        return {"train": (0, window - ROLL_HOLDOUT), "val": (window - ROLL_HOLDOUT, window),
+                "check": None, "teach": (0, window)}
+    c0 = window - ROLL_CHECK_DAYS
+    return {"train": (0, c0 - ROLL_VAL_DAYS), "val": (c0 - ROLL_VAL_DAYS, c0),
+            "check": (c0, window), "teach": (0, c0)}
+
+
+def roll_rl_config(tariff, method, seed=0) -> rl.TrainConfig:
+    cfg = rb.effective_config(rb.make_config(ROLL_RL_STEPS, seed), tariff, method)
+    cfg.total_steps, cfg.eval_every = ROLL_RL_STEPS, ROLL_RL_EVAL
+    return cfg
+
+
+def roll_digest(tariff, seed=0, method="bc", window=56, guard="weak") -> str:
     _, js = _paths(tariff, "global", "all" + seed_tag(seed), "bc")
     with open(js, encoding="utf-8") as fh:
         parent = json.load(fh)["digest"]
-    return _digest({"parent": parent, "window": ROLL_WINDOW,
-                    "holdout": ROLL_HOLDOUT, "lr_scale": 0.3,
-                    "pool": rg.BCConfigPool().config(),
-                    "global_algo": rg.GLOBAL_ALGO_VERSION})
+    base = {"parent": parent, "window": ROLL_WINDOW,
+            "holdout": ROLL_HOLDOUT, "lr_scale": 0.3,
+            "pool": rg.BCConfigPool().config(),
+            "global_algo": rg.GLOBAL_ALGO_VERSION}
+    if (window, guard) != (56, "weak"):
+        base = {**base, "window": window, "guard": guard,
+                "layout": roll_layout(window, guard), "check_alpha":
+                ROLL_CHECK_ALPHA if guard == "strong" else None}
+    if method == "bc":
+        return _digest(base)            # unchanged at (56, weak): results stay valid
+    _, js = _paths(tariff, "global", "all" + seed_tag(seed), method)
+    with open(js, encoding="utf-8") as fh:
+        rl_parent = json.load(fh)["digest"]
+    return _digest(base, {"method": method, "rl_parent": rl_parent,
+                          "cfg": roll_rl_config(tariff, method, seed).config(),
+                          "guarded": True, "algo": rl.ALGO_VERSION})
 
 
-def roll_unit(tariff, ident, seed=0):
-    """Train the month-by-month fine-tunes of the global clone for one study
+def roll_unit(tariff, ident, seed=0, method="bc", window=56, guard="weak"):
+    """Train the month-by-month fine-tunes of one global network for one study
     unit, then score them as one switched controller on the test year.
 
-    `seed` picks the PARENT: the global clone of that seed. The month's teacher
-    and window do not depend on it, so the teacher cache is shared; rolling
-    from each of the three global seeds is what separates "rolling helps" from
-    "rolling repairs one weak parent"."""
+    `seed` picks the PARENT: the global network of that seed. The month's
+    teacher and window do not depend on it, so the teacher cache is shared;
+    rolling from each of the three global seeds is what separates "rolling
+    helps" from "rolling repairs one weak parent".
+
+    `method`:
+      bc      the global clone, re-cloned on the window's MILP labels
+      dqn     the global DQN, fine-tuned by reinforcement on the window
+      bc_dqn  the global fine-tuned clone, fine-tuned by reinforcement on the
+              window and held (BC regulariser, BC-guided exploration) to THIS
+              month's re-cloned network -- the monthly analogue of how bc_dqn
+              is built from bc everywhere else
+    Reinforcement trains on the window's first 49 days and validates on its
+    last 7, with the parent as the first candidate: a month whose fine-tune
+    never beats the parent on that week keeps the parent."""
     warnings.simplefilter("ignore")
     rb._calendar(tariff)
-    digest = roll_digest(tariff, seed)
-    key = "roll_ft__bc" + seed_tag(seed).replace("_", "__")
+    digest = roll_digest(tariff, seed, method, window, guard)
+    scheme = roll_scheme(window, guard)
+    lay = roll_layout(window, guard)
+    key = f"{scheme}__{method}" + seed_tag(seed).replace("_", "__")
     path = os.path.join(OUT, tariff, key, f"{ident}.json")
     if os.path.exists(path):
         with open(path, encoding="utf-8") as fh:
             if json.load(fh).get("model_digest") == digest:
-                return (tariff, "roll_ft", "bc", ident, None)
+                return (tariff, scheme, method, ident, None)
     try:
         prep = rb.prepare_household(ident, tariff)
         full = _full_bundle(prep, tariff)
-        parent, fb, _ = rg.load_model(
-            _paths(tariff, "global", "all" + seed_tag(seed), "bc")[0])
+        tag = "all" + seed_tag(seed)
+        clone_parent, fb, _ = rg.load_model(_paths(tariff, "global", tag, "bc")[0])
         fb = fb.for_type(None)
+        rl_parent = (rg.load_model(_paths(tariff, "global", tag, method)[0])[0]
+                     if method != "bc" else None)
         static = fb.normalize(fb.build_static(full["sig"], *full["fc"]))
         respect_peak = tariff == "SI"
         segs = roll_segments(None)
-        nets, kept, agree = {}, 0, []
+        member = rg.Member(str(ident), full["sig"], full["settle"], full["env"],
+                           static, rl.no_battery_cost_trace(
+                               full["sig"], full["settle"], full["env"])
+                           if method != "bc" else None)
+        if method != "bc":
+            cfg = roll_rl_config(tariff, method, seed)
+        nets, kept, agree, checks = {}, 0, [], []
         for k, (d0, _) in enumerate(segs):
-            sp = _roll_teacher(prep, full, tariff, ident, d0)
-            a = d0 - ROLL_WINDOW
-            soc, peaks, labels = rl.teacher_actions(
-                full["sig"], full["settle"], full["env"], sp, a * H, d0 * H,
-                rb.SOC_INIT_USABLE, respect_peak)
-            X = np.stack([np.concatenate([static[idx], fb.dynamic(
-                full["sig"], idx, soc[j], peaks[j])])
-                for j, idx in enumerate(range(a * H, d0 * H))]).astype(np.float32)
-            cut = (ROLL_WINDOW - ROLL_HOLDOUT) * H     # last week held out
-            net, hist = rg.train_bc_pool(
-                X[:cut], labels[:cut], X[cut:], labels[cut:],
-                rl.TrainConfig(seed=0), verbose=False, init_net=parent,
-                lr_scale=0.3)
+            a = d0 - window
+            tr, va, ch, te = lay["train"], lay["val"], lay["check"], lay["teach"]
+            clone = None
+            if method in ("bc", "bc_dqn"):
+                t0_, t1_ = a + te[0], a + te[1]
+                sp = _roll_teacher(prep, full, tariff, ident, t1_, a=t0_)
+                soc, peaks, labels = rl.teacher_actions(
+                    full["sig"], full["settle"], full["env"], sp, t0_ * H, t1_ * H,
+                    rb.SOC_INIT_USABLE, respect_peak)
+                X = np.stack([np.concatenate([static[idx], fb.dynamic(
+                    full["sig"], idx, soc[j], peaks[j])])
+                    for j, idx in enumerate(range(t0_ * H, t1_ * H))]).astype(np.float32)
+                cut = (va[0] - te[0]) * H                 # fit | early-stop
+                end = (va[1] - te[0]) * H
+                clone, hist = rg.train_bc_pool(
+                    X[:cut], labels[:cut], X[cut:end], labels[cut:end],
+                    rl.TrainConfig(seed=0), verbose=False, init_net=clone_parent,
+                    lr_scale=0.3)
+                agree.append(hist["final_val_agreement"])
+            if method == "bc":
+                net, parent_net = clone, clone_parent
+                kept_here = hist["best_val_loss"] >= hist["init_val_loss"] - 1e-5
+            else:
+                net, hist = rg.train_dqn_pool(
+                    [member], [member], fb, cfg, respect_peak,
+                    [(a + tr[0], a + tr[1])], [(a + va[0], a + va[1])],
+                    init_net=rl_parent, bc_net=clone, soc_target=rb.SOC_INIT_USABLE,
+                    verbose=False, val_wear=rb.val_wear_fn(tariff),
+                    init_is_candidate=True)
+                parent_net = rl_parent
+                kept_here = bool(hist["kept_init"])
+            if ch is not None and not kept_here:
+                verdict = rg.accept_fine_tune(net, parent_net, fb, member,
+                                              a + ch[0], a + ch[1],
+                                              rb.SOC_INIT_USABLE, respect_peak,
+                                              ROLL_CHECK_ALPHA)
+                checks.append(verdict["p"])
+                if not verdict["accept"]:
+                    net, kept_here = parent_net, True
             nets[k] = net
-            kept += int(hist["best_val_loss"] >= hist["init_val_loss"] - 1e-5)
-            agree.append(hist["final_val_agreement"])
+            kept += int(kept_here)
         # Which network drives each test-year interval: the month it was made for.
         seg_of_day = np.zeros(rb.N_TRAIN + rb.N_SIM + 1, dtype=int)
         for k, (d0, d1) in enumerate(segs):
@@ -1146,33 +1250,59 @@ def roll_unit(tariff, ident, seed=0):
         sim = prep["sim"]
         policy = rg.SwitchingPolicy(nets, fb, respect_peak, period_of,
                                     load_fc=prep["fc_sim"][0],
-                                    pv_fc=prep["fc_sim"][1], name="bc_roll_ft")
+                                    pv_fc=prep["fc_sim"][1],
+                                    name=f"{method}_{scheme}")
         t0 = time.time()
         o = rbc.run_policy(sim["env"], policy, n_steps=rb.N_SIM * H,
                            settle=sim["settle"], soc_init_kwh=rb.SOC_INIT_USABLE,
                            rates=sim["rates"])
-        _write_scored(o, tariff, ident, "roll_ft", "bc", digest, {
+        _write_scored(o, tariff, ident, scheme, method, digest, {
             "group": "own", "n_members": 1, "n_types": 0, "train_converged": True,
             "n_months": len(segs), "months_kept_parent": kept,
-            "mean_holdout_agreement": float(np.mean(agree)), "seed": int(seed)},
-            t0, key=key)
-        return (tariff, "roll_ft", "bc", ident, None)
+            "mean_holdout_agreement": float(np.mean(agree)) if agree else None,
+            "window": window, "guard": guard, "check_p": checks,
+            "seed": int(seed)}, t0, key=key)
+        return (tariff, scheme, method, ident, None)
     except Exception as exc:
         import traceback
         traceback.print_exc()
-        return (tariff, "roll_ft", "bc", ident, repr(exc))
+        return (tariff, scheme, method, ident, repr(exc))
 
 
-def run_roll(tariffs=("AU", "SI"), n_jobs=12, units=None, seed=0):
+def run_roll(tariffs=("AU", "SI"), n_jobs=12, units=None, seed=0, methods=("bc",)):
     from joblib import Parallel, delayed
     units = units or study_units()
-    jobs = [(t, i) for t in tariffs for i in units]
+    jobs = [(t, i, m) for m in methods for t in tariffs for i in units]
     jobs.sort(key=lambda j: j[0] != "SI")
     t0 = time.time()
     res = Parallel(n_jobs=min(n_jobs, len(jobs)), backend="loky", verbose=5)(
-        delayed(roll_unit)(t, i, seed) for t, i in jobs)
+        delayed(roll_unit)(t, i, seed, m) for t, i, m in jobs)
     bad = [r for r in res if r[4]]
     print(f"rolling fine-tunes done in {(time.time() - t0) / 60:.1f} min: "
+          f"{len(res) - len(bad)} scored, {len(bad)} failed", flush=True)
+    for r in bad:
+        print(f"  FAILED {r}")
+    return bad
+
+
+def run_roll_grid(variants, seeds=(0, 1, 2), methods=METHODS, tariffs=("AU", "SI"),
+                  n_jobs=12, units=None):
+    """Every (window, guard) x method x seed x household in ONE pool, so the
+    workers stay busy to the end. The expensive jobs (reinforcement, SI, long
+    windows) go first. Resumable: a current result is skipped by digest."""
+    from joblib import Parallel, delayed
+    units = units or study_units()
+    cost = {"bc": 1, "bc_dqn": 10, "dqn": 9}
+    jobs = [(t, i, s, m, w, g) for (w, g) in variants for s in seeds
+            for m in methods for t in tariffs for i in units]
+    jobs.sort(key=lambda j: (j[2], -(cost[j[3]] * (2 if j[0] == "SI" else 1)
+                                     * (1 + j[4] / 56))))
+    print(f"roll grid: {len(jobs)} household-year(s) on {n_jobs} worker(s)", flush=True)
+    t0 = time.time()
+    res = Parallel(n_jobs=n_jobs, backend="loky", verbose=5)(
+        delayed(roll_unit)(t, i, s, m, w, g) for t, i, s, m, w, g in jobs)
+    bad = [r for r in res if r[4]]
+    print(f"roll grid done in {(time.time() - t0) / 60:.1f} min: "
           f"{len(res) - len(bad)} scored, {len(bad)} failed", flush=True)
     for r in bad:
         print(f"  FAILED {r}")
@@ -1533,7 +1663,7 @@ def main(argv=None):
         run_eval(args.tariffs, args.schemes, args.methods, args.jobs, units,
                  args.seed)
     if args.phase == "roll":
-        run_roll(args.tariffs, args.jobs, seed=args.seed)
+        run_roll(args.tariffs, args.jobs, seed=args.seed, methods=args.methods)
     if args.phase in ("report", "all"):
         report()
 

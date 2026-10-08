@@ -227,6 +227,57 @@ s_1, _ = rgg.dqn_budget(1, "type")
 check("a one-household type gets the local budget; global gets more",
       s_1 == rgg.LOCAL_STEPS and s_g > s_1 and s_g // e_g == rgg.N_EVALS)
 
+# --------------------------------------------------------------------------
+# 5. Localisation in time: seasons, monthly windows, the switching policy
+# --------------------------------------------------------------------------
+all_train = set(rl.block_days(rb.TRAIN_BLOCKS).tolist())
+all_val = set(rl.block_days(rb.VAL_BLOCKS).tolist())
+s_train = [set(rl.block_days(rgg.season_blocks(rb.TRAIN_BLOCKS, q)).tolist())
+           for q in rgg.SEASON_NAME]
+s_val = [set(rl.block_days(rgg.season_blocks(rb.VAL_BLOCKS, q)).tolist())
+         for q in rgg.SEASON_NAME]
+check("seasons partition the training days and the validation days",
+      set().union(*s_train) == all_train and set().union(*s_val) == all_val
+      and sum(map(len, s_train)) == len(all_train)
+      and sum(map(len, s_val)) == len(all_val))
+check("a season's training days never touch the validation weeks",
+      all(not (t & all_val) for t in s_train))
+check("day 0 is 1 July 2010 (JJA) and day 184 is 1 January 2011 (DJF)",
+      rgg.day_season([0])[0] == 2 and rgg.day_season([184])[0] == 0)
+segs = rgg.roll_segments(None)
+check("monthly segments tile the test year exactly, none shorter than a week",
+      segs[0][0] == rb.N_TRAIN and segs[-1][1] == rb.N_TRAIN + rb.N_SIM
+      and all(a[1] == b[0] for a, b in zip(segs, segs[1:]))
+      and min(b - a for a, b in segs) >= 7)
+check("every monthly window ends where its month begins (causal)",
+      all(d0 - rgg.ROLL_WINDOW >= 0 for d0, _ in segs)
+      and rgg.ROLL_HOLDOUT < rgg.ROLL_WINDOW)
+
+
+class _ConstNet(torch.nn.Module):
+    """Always prefers one action: identifies which network drove a step."""
+    def __init__(self, a):
+        super().__init__()
+        self.a = a
+
+    def forward(self, x):
+        out = torch.zeros((x.shape[0], rl.N_ACTIONS))
+        out[:, self.a] = 1.0
+        return out
+
+
+fbs = rg.TypedFeatureBuilder(spec, n_types=0)
+fbs.fit_norm(base[1])
+idx = B[1]["sig"].env.dataset.index[:N_STEPS]
+pol = rg.SwitchingPolicy({0: _ConstNet(rl.A_IDLE), 1: _ConstNet(rl.A_DISCHARGE_ANY)},
+                         fbs, True, lambda ix: (np.arange(len(ix)) >= 30 * H).astype(int),
+                         load_fc=B[1]["fc"][0], pv_fc=B[1]["fc"][1])
+pol.reset(B[1]["sig"])
+sp_before = pol.setpoint(B[1]["sig"], 10 * H, 3.0, -1.0, 1.0, {b: 0.0 for b in range(1, 6)})
+sp_after = pol.setpoint(B[1]["sig"], 40 * H, 3.0, -1.0, 1.0, {b: 0.0 for b in range(1, 6)})
+check("the switching policy hands each interval to its period's network",
+      sp_before == 0.0 and sp_after == -1.0, f"{sp_before} / {sp_after}")
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} FAILED: {FAILURES}")

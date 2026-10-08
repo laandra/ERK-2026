@@ -1,0 +1,21 @@
+{
+ "overrides": {
+  "lr": 0.004764938581456586,
+  "hidden": 64,
+  "clone_batch": 2048,
+  "clone_weight_decay": 0.001,
+  "clone_class_power": 0.10088573103037599,
+  "clone_label_smoothing": 0.1,
+  "clone_patience": 20
+ },
+ "params": {
+  "lr": 0.004764938581456586,
+  "hidden": 64,
+  "clone_batch": 2048,
+  "clone_weight_decay": 0.001,
+  "clone_class_power": 0.10088573103037599,
+  "clone_label_smoothing": 0.1,
+  "clone_patience": 20
+ },
+ "trial": 103
+}

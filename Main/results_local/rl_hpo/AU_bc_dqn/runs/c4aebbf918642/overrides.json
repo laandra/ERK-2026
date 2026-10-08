@@ -1,0 +1,34 @@
+{
+ "overrides": {
+  "gamma": 0.9959681614992185,
+  "bc_reg": 2.3794662522129344,
+  "hidden": 64,
+  "clone_lr": 0.0035623781604653747,
+  "clone_batch": 128,
+  "clone_weight_decay": 0.0001,
+  "clone_class_power": 0.13569395684118885,
+  "clone_label_smoothing": 0.05,
+  "clone_patience": 5,
+  "lr": 0.001575430032972541,
+  "n_step": 4,
+  "batch": 128,
+  "target_sync": 2000,
+  "eps_decay_frac": 0.25607349473581764,
+  "reward_scale": 44.85196741079195,
+  "bc_reg_decay_frac": 0.827198680238987,
+  "bc_guide_prob": 0.24918819130122524
+ },
+ "params": {
+  "lr": 0.001575430032972541,
+  "gamma": 0.9959681614992185,
+  "n_step": 4,
+  "batch": 128,
+  "target_sync": 2000,
+  "eps_decay_frac": 0.25607349473581764,
+  "reward_scale": 44.85196741079195,
+  "bc_reg": 2.3794662522129344,
+  "bc_reg_decay_frac": 0.827198680238987,
+  "bc_guide_prob": 0.24918819130122524
+ },
+ "trial": 26
+}

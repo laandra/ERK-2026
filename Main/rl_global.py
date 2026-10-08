@@ -657,3 +657,60 @@ class SwitchingPolicy(rbc.Policy):
         with torch.no_grad():
             a = int(net(torch.from_numpy(obs).unsqueeze(0)).argmax(dim=1).item())
         return rl.action_setpoint(a, sig, idx, lo, hi, peak_state, self.respect_peak)
+
+
+# ---------------------------------------------------------------------------
+# A strict acceptance check for a fine-tune: day by day, on unseen days
+# ---------------------------------------------------------------------------
+def daily_costs(net, fb, member, start_day: int, end_day: int, soc_init: float,
+                respect_peak: bool) -> np.ndarray:
+    """Greedy rollout of `net` over [start_day, end_day), the bill per DAY.
+
+    One continuous rollout -- SOC and the ratchet peak carry over midnight, as
+    they do in deployment -- cut into days afterwards, with the terminal-SOC
+    close-out charged to the last day (the same close-out the validation
+    measure uses). Per-day costs are what a paired test needs: a single sum
+    over two weeks cannot say whether a difference is more than noise.
+    """
+    sig, env = member.sig, member.env
+    spd = int(round(24.0 / sig.hours))
+    walk = rl._Walk(sig, member.settle, env, 0.0)
+    soc = soc_init
+    peak = rl.seed_peak_state(env, start_day * spd)
+    out = np.zeros(end_day - start_day)
+    net.eval()
+    with torch.no_grad():
+        for idx in range(start_day * spd, end_day * spd):
+            peak = rl._drop_on_boundary(peak, sig.windows, idx)
+            lo, hi = walk.bounds(soc)
+            obs = np.concatenate([member.static_norm[idx],
+                                  fb.dynamic(sig, idx, soc, peak)])
+            a = int(net(torch.from_numpy(obs).unsqueeze(0)).argmax(dim=1).item())
+            p = float(np.clip(rl.action_setpoint(a, sig, idx, lo, hi, peak,
+                                                 respect_peak), lo, hi))
+            c, soc, peak, _ = walk.step(idx, soc, peak, p)
+            out[idx // spd - start_day] += c
+    rate = float(np.mean(sig.import_rate[start_day * spd:end_day * spd]))
+    out[-1] += (soc_init - soc) / sig.eta_ch * rate
+    return out
+
+
+def accept_fine_tune(candidate, parent, fb, member, start_day, end_day,
+                     soc_init, respect_peak, alpha: float = 0.10) -> dict:
+    """Keep `candidate` only if it beats `parent` on the check days, day by day.
+
+    One-sided paired Wilcoxon on the daily bills, `alpha` 0.10, and a positive
+    mean improvement. The check days must be days neither network was trained,
+    early-stopped or labelled on -- the caller's job -- or the check is the
+    same biased comparison the weak guard already makes.
+    """
+    from scipy.stats import wilcoxon
+    dc = daily_costs(candidate, fb, member, start_day, end_day, soc_init, respect_peak)
+    dp = daily_costs(parent, fb, member, start_day, end_day, soc_init, respect_peak)
+    diff = dp - dc                                    # > 0: candidate cheaper
+    if np.all(np.abs(diff) < 1e-12):
+        p = 1.0
+    else:
+        p = float(wilcoxon(diff, alternative="greater", zero_method="zsplit").pvalue)
+    return {"accept": bool(diff.mean() > 0 and p < alpha), "p": p,
+            "gain": float(diff.sum())}

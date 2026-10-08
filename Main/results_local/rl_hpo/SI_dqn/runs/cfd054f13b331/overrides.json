@@ -1,0 +1,31 @@
+{
+ "overrides": {
+  "gamma": 0.9971426973885589,
+  "n_step": 4,
+  "lr": 0.001317791270478674,
+  "batch": 64,
+  "hidden": 128,
+  "target_sync": 2000,
+  "update_every": 2,
+  "buffer": 400000,
+  "eps_end": 0.08711029525845233,
+  "eps_decay_frac": 0.3894878413281309,
+  "reward_scale": 65.32307098261028,
+  "episode_days": 7
+ },
+ "params": {
+  "lr": 0.001317791270478674,
+  "gamma": 0.9971426973885589,
+  "n_step": 4,
+  "batch": 64,
+  "hidden": 128,
+  "target_sync": 2000,
+  "update_every": 2,
+  "buffer": 400000,
+  "eps_end": 0.08711029525845233,
+  "eps_decay_frac": 0.3894878413281309,
+  "reward_scale": 65.32307098261028,
+  "episode_days": 7
+ },
+ "trial": 35
+}

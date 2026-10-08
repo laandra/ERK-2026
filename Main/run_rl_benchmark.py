@@ -260,10 +260,17 @@ def _digest(*dicts) -> str:
 _BC_FIELDS = ("hidden", "lr", "seed")
 
 
-def _method_config(cfg: rl.TrainConfig, method: str) -> dict:
-    if method == "bc":
-        return {k: getattr(cfg, k) for k in _BC_FIELDS}
-    return cfg.config()
+def _method_config(cfg: rl.TrainConfig, method: str,
+                   clone: rl.BCOptions | None = None) -> dict:
+    """The settings a result depends on. `clone`, the clone's optimiser, enters
+    only for the methods that fit a clone and only through the fields that
+    differ from the defaults -- so every result produced before those options
+    existed keeps its digest (`test_rl_hpo` checks it)."""
+    out = ({k: getattr(cfg, k) for k in _BC_FIELDS} if method == "bc"
+           else cfg.config())
+    if method != "dqn" and clone is not None and clone.changed():
+        out = dict(out, clone=clone.changed())
+    return out
 
 
 def run_digest(cfg: rl.TrainConfig, spec, tariff: str, method: str,
@@ -278,11 +285,12 @@ def run_digest(cfg: rl.TrainConfig, spec, tariff: str, method: str,
     not discard every clone on disk -- and `bc_dqn` carries BOTH, because it is
     a clone that was then fine-tuned and either half moving moves the result.
     """
+    clone = effective_clone(tariff, method, overrides)
     cfg = effective_config(cfg, tariff, method, overrides)
     version = {"bc": (rl.BC_ALGO_VERSION,),
                "dqn": (rl.ALGO_VERSION,),
                "bc_dqn": (rl.BC_ALGO_VERSION, rl.ALGO_VERSION)}[method]
-    return _digest(spec.config(), _method_config(cfg, method),
+    return _digest(spec.config(), _method_config(cfg, method, clone),
                    {"tariff": tariff, "method": method, "algo": version,
                     "train_days": TRAIN_BLOCKS, "val_days": VAL_BLOCKS,
                     "teach_span": TEACH_SPAN})
@@ -349,14 +357,37 @@ TUNED: dict = {
 }
 
 
+# The clone's optimiser (`rl.BCOptions`) travels in the same override dicts as
+# the TrainConfig fields -- a TUNED entry or a search trial is one dict -- under
+# a prefix, because two names would collide: `batch` and `lr` are the DQN's.
+CLONE_PREFIX = "clone_"
+
+
+def effective_clone(tariff: str, method: str,
+                    overrides: dict | None = None) -> rl.BCOptions:
+    """The clone options in force: the `clone_*` keys of TUNED (or of the
+    explicitly given overrides) over `rl.BCOptions()`'s defaults."""
+    over = TUNED.get((tariff, method), {}) if overrides is None else overrides
+    out = rl.BCOptions()
+    for k, v in over.items():
+        if k.startswith(CLONE_PREFIX):
+            name = k[len(CLONE_PREFIX):]
+            if not hasattr(out, name):
+                raise AttributeError(f"BCOptions has no field {name!r}")
+            setattr(out, name, v)
+    return out
+
+
 def tune_tag(overrides: dict) -> str:
     return "_".join(f"{k}{v:g}" for k, v in sorted(overrides.items()))
 
 
 def effective_config(cfg: rl.TrainConfig, tariff: str, method: str,
                      overrides: dict | None = None) -> rl.TrainConfig:
-    """`cfg` with the tuned (or the explicitly given) settings applied."""
+    """`cfg` with the tuned (or the explicitly given) settings applied.
+    Clone options (`clone_*`) are skipped here; `effective_clone` reads them."""
     over = TUNED.get((tariff, method), {}) if overrides is None else overrides
+    over = {k: v for k, v in over.items() if not k.startswith(CLONE_PREFIX)}
     if not over:
         return cfg
     out = copy.copy(cfg)
@@ -388,14 +419,18 @@ def run_one(prep, variant: str, method: str, cfg: rl.TrainConfig,
     `overrides` replaces the TUNED settings (the grid point being tried).
     """
     ident, tariff = prep["ident"], prep["tariff"]
-    cfg = effective_config(cfg, tariff, method, overrides)
+    cfg_in = cfg
+    cfg = effective_config(cfg_in, tariff, method, overrides)
+    clone = effective_clone(tariff, method, overrides)
     spec = variant_specs(tariff)[variant]
     respect_peak = tariff == "SI"
     key = f"{variant}__{method}"
     out_dir = os.path.join(out_root, tariff, key)
     os.makedirs(out_dir, exist_ok=True)
     result_path = os.path.join(out_dir, f"{ident}.json")
-    digest = run_digest(cfg, spec, tariff, method, overrides={})
+    # Digested from the config as given plus the overrides, exactly as the
+    # sweep's cache check computes it -- clone options included.
+    digest = run_digest(cfg_in, spec, tariff, method, overrides)
     if os.path.exists(result_path):
         with open(result_path, encoding="utf-8") as fh:
             existing = json.load(fh)
@@ -422,7 +457,7 @@ def run_one(prep, variant: str, method: str, cfg: rl.TrainConfig,
             train["sig"], train["settle"], train["env"], fb, static_norm,
             setpoints, start=a * H, stop=b * H,
             soc_init=SOC_INIT_USABLE, respect_peak=respect_peak, cfg=cfg,
-            verbose=verbose, holdout_days=VAL_BLOCKS)
+            verbose=verbose, holdout_days=VAL_BLOCKS, opts=clone)
     if method in ("dqn", "bc_dqn"):
         bc_net = net if method == "bc_dqn" else None
         init = net if method == "bc_dqn" else None
@@ -472,6 +507,8 @@ def run_one(prep, variant: str, method: str, cfg: rl.TrainConfig,
         "train_config": cfg.config(),
         "model_path": os.path.relpath(model_path, HERE),
     }
+    if method != "dqn" and clone.changed():
+        result["clone_options"] = clone.changed()
     if not score_test:
         result["wall_s"] = time.time() - t0
         with open(result_path, "w", encoding="utf-8") as fh:

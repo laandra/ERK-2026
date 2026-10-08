@@ -489,6 +489,44 @@ class TrainConfig:
         return asdict(self)
 
 
+@dataclass
+class BCOptions:
+    """The clone's own optimiser: what `train_bc` reads besides `hidden`.
+
+    These were constants inside `train_bc` until the hyperparameter search
+    (`rl_hpo`) needed to vary them. The DEFAULTS are those constants, so
+    `BCOptions()` reproduces every clone on disk bit for bit and no
+    BC_ALGO_VERSION bump was needed -- `test_rl_hpo` retrains the panel's clone
+    for Ausgrid 138 and compares the stored validation bill.
+
+    Kept out of TrainConfig on purpose: every DQN digest is over the WHOLE
+    TrainConfig (`run_rl_benchmark._method_config`), so a new field there would
+    have reported 840 valid reinforcement runs stale.
+    """
+
+    # None: TrainConfig.lr -- how bc_dqn's clone has always been fitted, at the
+    # fine-tune's own rate. Set explicitly once that rate is searched.
+    lr: float | None = None
+    batch: int = 512
+    max_epochs: int = 200
+    patience: int = 10
+    weight_decay: float = 0.0
+    # Exponent on the inverse-frequency class weights: 1 is inverse frequency
+    # (the original fit, introduced because an unweighted fit collapsed onto
+    # idle), 0 is unweighted.
+    class_power: float = 1.0
+    label_smoothing: float = 0.0
+
+    def config(self) -> dict:
+        return asdict(self)
+
+    def changed(self) -> dict:
+        """The fields that differ from the defaults -- all a digest needs, so a
+        default clone keeps the digest it always had."""
+        base = BCOptions()
+        return {k: v for k, v in asdict(self).items() if getattr(base, k) != v}
+
+
 # ---------------------------------------------------------------------------
 # The environment walk shared by training, validation and cloning
 # ---------------------------------------------------------------------------
@@ -978,8 +1016,12 @@ def teacher_actions(sig, settle, env, setpoints_kwh: np.ndarray,
 def train_bc(sig, settle, env, fb: FeatureBuilder, static_norm: np.ndarray,
              setpoints_kwh: np.ndarray, start: int, stop: int,
              soc_init: float, respect_peak: bool, cfg: TrainConfig,
-             verbose: bool = True, holdout_days=None):
+             verbose: bool = True, holdout_days=None,
+             opts: BCOptions | None = None):
     """Clone the MILP's action choices. Returns (net, history).
+
+    `opts` is the clone's optimiser (`BCOptions`); None is the defaults, the
+    settings every clone before the hyperparameter search was fitted with.
 
     Plain cross-entropy with inverse-frequency class weights -- idle and
     self-consumption dominate an optimal year, and an unweighted fit collapses
@@ -993,6 +1035,7 @@ def train_bc(sig, settle, env, fb: FeatureBuilder, static_norm: np.ndarray,
     The teacher is still WALKED across the held-out days: the states after
     them depend on it, and walking is not fitting.
     """
+    opts = opts or BCOptions()
     rng = np.random.default_rng(cfg.seed)
     torch.manual_seed(cfg.seed)
 
@@ -1024,27 +1067,36 @@ def train_bc(sig, settle, env, fb: FeatureBuilder, static_norm: np.ndarray,
 
     counts = np.bincount(ytr, minlength=N_ACTIONS).astype(float)
     weights = counts.sum() / np.maximum(counts, 1.0)
+    # Each option is applied only when it differs from the default, so the
+    # default path performs exactly the operations it always did.
+    if opts.class_power != 1.0:
+        weights = weights ** opts.class_power
     weights = weights / weights.mean()
 
     net = QNet(X.shape[1], cfg.hidden)
-    opt = torch.optim.Adam(net.parameters(), lr=cfg.lr, foreach=True)
-    lossf = nn.CrossEntropyLoss(weight=torch.from_numpy(weights.astype(np.float32)))
+    lr = cfg.lr if opts.lr is None else opts.lr
+    adam_kw = {"weight_decay": opts.weight_decay} if opts.weight_decay else {}
+    opt = torch.optim.Adam(net.parameters(), lr=lr, foreach=True, **adam_kw)
+    ce_kw = {"label_smoothing": opts.label_smoothing} if opts.label_smoothing else {}
+    lossf = nn.CrossEntropyLoss(
+        weight=torch.from_numpy(weights.astype(np.float32)), **ce_kw)
     Xtr_t, ytr_t = torch.from_numpy(Xtr), torch.from_numpy(ytr)
     Xva_t, yva_t = torch.from_numpy(Xva), torch.from_numpy(yva)
 
     history = {"train_loss": [], "val_loss": [], "val_agreement": [],
-               "label_counts": counts.tolist(), "config": cfg.config()}
+               "label_counts": counts.tolist(), "config": cfg.config(),
+               "bc_options": opts.config()}
     best = np.inf
     best_state = {k: v.clone() for k, v in net.state_dict().items()}
     since_best = 0
-    epochs = 200
+    epochs = opts.max_epochs
     t0 = time.time()
     for ep in range(epochs):
         net.train()
         perm = torch.randperm(len(Xtr_t))
         tot = 0.0
-        for i in range(0, len(perm), 512):
-            j = perm[i:i + 512]
+        for i in range(0, len(perm), opts.batch):
+            j = perm[i:i + opts.batch]
             loss = lossf(net(Xtr_t[j]), ytr_t[j])
             opt.zero_grad()
             loss.backward()
@@ -1064,14 +1116,14 @@ def train_bc(sig, settle, env, fb: FeatureBuilder, static_norm: np.ndarray,
             since_best = 0
         else:
             since_best += 1
-        if verbose and (ep % 10 == 0 or since_best >= 10):
+        if verbose and (ep % 10 == 0 or since_best >= opts.patience):
             print(f"    BC epoch {ep:3d}  val loss {vloss:.4f}  "
                   f"agreement {agree:.3f}", flush=True)
-        if since_best >= 10:
+        if since_best >= opts.patience:
             break
     net.load_state_dict(best_state)
     history["runtime_s"] = time.time() - t0
-    history["converged"] = bool(since_best >= 10)
+    history["converged"] = bool(since_best >= opts.patience)
     history["best_val_loss"] = float(best)
     with torch.no_grad():
         out = net(Xva_t)
