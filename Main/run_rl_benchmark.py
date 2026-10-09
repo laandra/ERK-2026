@@ -339,21 +339,49 @@ TUNE_GRID = {
 TUNE_OUT = os.path.join(HERE, "results_local", "rl_tune")
 TUNE_MODELS = os.path.join(MODELS, "tune")
 
-# {(tariff, method): {field: value}} -- the tune_report() winners, 2026-10-06,
-# ALGO_VERSION 6: no per-cycle wear in the reward, validation on the bill plus
-# the lifetime wear (zero here -- no validation rollout cycles fast enough to
-# shorten the pack's life). 30 households, 140 validation days, test year never
-# evaluated. Ties are kept honest in the comment: on every cell the gamma or
-# n-step runner-up is within noise (p 0.26-0.58) EXCEPT AU, where gamma 0.997
-# beats 0.99 for both methods (p < 0.001). The BC regulariser separates
-# everywhere (p < 0.001) and is 1 on both tariffs: with cycles unpriced there
-# is no longer anything for the fine-tune to gain by drifting off the clone --
-# under the per-cycle price (ALGO 5) SI had picked 0 for exactly that reason.
+# {(tariff, method): {field: value}} -- the winners of the joint hyperparameter
+# search (`rl_hpo.py`, run 2026-10-08), promoted 2026-10-08. Only fields that
+# differ from the TrainConfig / BCOptions defaults are listed; `clone_*` keys
+# are the clone's optimiser (`effective_clone`). Values at full precision on
+# purpose: rounded, they would train a configuration the confirmation never
+# tested.
+#
+# How they were chosen: TPE over 7 (IL), 12 (RL) and 10 (IL+RL fine-tune)
+# settings, on 8-16 households that are NOT study units, scored on the
+# validation weeks only; the top three re-trained under three seeds; the winner
+# then scored ONCE against the previous settings on the 30 study households'
+# test year (three seeds, bill + wear per household-year, Holm over six):
+#
+#     AU  IL +29.4 (25/30 better)  IL+RL +22.4 (26/30)  RL +10.7 (26/30)  all p<.001
+#     SI  IL  +3.4 (19/30, p .09)  IL+RL  +7.0 (18/30, p .11)  RL +17.3 (28/30, p<.001)
+#
+# The SI clone and its fine-tune are promoted on a positive but NOT significant
+# test-year gain (inside the seed noise of the previous model): they are the
+# search's best, not a demonstrated improvement.
+#
+# The SI clone (lr 3e-4, batch 1024, patience 20) is still improving its
+# held-out loss when it meets the 200-epoch cap on 170 of the panel's 210 SI
+# clones, so those report `train_converged` False. That is the configuration
+# the search chose and confirmed, cap included, and the cap is doing work:
+# trained to convergence (clone_max_epochs 1000, every run early-stopped) the
+# same clone saves LESS on the validation weeks of the 16 search households,
+# -0.28 EUR/a, 15 of 16 worse, p 0.0015 (3 seeds; 2026-10-08). Left as is. bc_dqn fine-tunes the IL
+# winner's clone, so its entry carries the clone's settings (`clone_lr`
+# decouples the clone's rate from the fine-tune's `lr`, which the panel used to
+# share). Full study, figures and the untuned comparison: FIGURES_RL_HPO.ipynb.
+#
+# Superseded (the 2026-10-06 `tune()` grid winners, ALGO_VERSION 6, kept for
+# the record -- `rl_hpo` studies freeze them as their "current" comparator):
+#     AU dqn  gamma .997  n_step 8      SI dqn     gamma .997  n_step 1
+#     AU bc_dqn gamma .997 bc_reg 1     SI bc_dqn  gamma .99   bc_reg 1
+#     bc: no entry (TrainConfig lr 1e-3, hidden 128, BCOptions defaults)
 TUNED: dict = {
-    ("AU", "dqn"): {"gamma": 0.997, "n_step": 8},
-    ("SI", "dqn"): {"gamma": 0.997, "n_step": 1},
-    ("AU", "bc_dqn"): {"gamma": 0.997, "bc_reg": 1.0},
-    ("SI", "bc_dqn"): {"gamma": 0.99, "bc_reg": 1.0},
+    ("AU", "bc"): {'lr': 0.0035623781604653747, 'hidden': 64, 'clone_batch': 128, 'clone_weight_decay': 0.0001, 'clone_class_power': 0.13569395684118885, 'clone_label_smoothing': 0.05, 'clone_patience': 5},
+    ("AU", "dqn"): {'gamma': 0.9942142453024336, 'n_step': 16, 'lr': 0.00013614699938730609, 'batch': 256, 'hidden': 64, 'buffer': 400000, 'eps_end': 0.08620434069984391, 'eps_decay_frac': 0.28557072473965717, 'reward_scale': 20.08003867014104, 'episode_days': 14},
+    ("AU", "bc_dqn"): {'gamma': 0.9932653078013979, 'bc_reg': 2.223647695101748, 'hidden': 64, 'clone_lr': 0.0035623781604653747, 'clone_batch': 128, 'clone_weight_decay': 0.0001, 'clone_class_power': 0.13569395684118885, 'clone_label_smoothing': 0.05, 'clone_patience': 5, 'lr': 0.0015022687756600385, 'n_step': 4, 'batch': 256, 'target_sync': 10000, 'eps_decay_frac': 0.29408307741918216, 'reward_scale': 65.76495022613388, 'bc_reg_decay_frac': 0.9904672210048746, 'bc_guide_prob': 0.1619372574084318},
+    ("SI", "bc"): {'lr': 0.0003072447290580936, 'hidden': 64, 'clone_batch': 1024, 'clone_weight_decay': 1e-06, 'clone_class_power': 0.09069586676111847, 'clone_label_smoothing': 0.1, 'clone_patience': 20},
+    ("SI", "dqn"): {'gamma': 0.9986892101114858, 'n_step': 4, 'lr': 0.00011837059141634215, 'hidden': 256, 'target_sync': 5000, 'update_every': 4, 'eps_end': 0.09313675928094435, 'eps_decay_frac': 0.29819306398289275, 'reward_scale': 79.08254001666096, 'episode_days': 14},
+    ("SI", "bc_dqn"): {'gamma': 0.9950258401119726, 'bc_reg': 0.4802916008261753, 'hidden': 64, 'clone_lr': 0.0003072447290580936, 'clone_batch': 1024, 'clone_weight_decay': 1e-06, 'clone_class_power': 0.09069586676111847, 'clone_label_smoothing': 0.1, 'clone_patience': 20, 'lr': 0.0009170960023064919, 'eps_decay_frac': 0.30221356244503306, 'reward_scale': 10.638986573549497, 'bc_reg_decay_frac': 0.5267613690524903, 'bc_guide_prob': 0.25517509327044885},
 }
 
 
@@ -947,6 +975,17 @@ def si_diagnosis_frames(from_checkpoint=None):
     shadow = be.cycle_cost_eur_per_efc(BATTERY_CAP)
     wear = lambda efc: -float(hs.cycle_wear_eur(efc, BATTERY_CAP, "SI"))
     rows, mon = [], []
+    # Refuse a diagnosis of models that are no longer the scored ones. This
+    # reader used to take whatever was on disk, and after the hyperparameter
+    # promotion (2026-10-08) FIGURES_RL drew the UNTUNED models' bill lines
+    # beside the tuned panel -- `si_test_diagnosis` is what rebuilds them.
+    stale = [f[:-5] for f in sorted(os.listdir(DIAG_OUT))
+             if f.endswith(".json") and not _diag_current(f[:-5])]
+    if stale:
+        raise RuntimeError(
+            f"the SI diagnosis of {len(stale)} household(s) was made from models "
+            f"that are no longer the scored ones ({stale[:5]}...): run "
+            f"`run_rl_benchmark.si_test_diagnosis(<ids>, n_jobs=...)` first")
     for f in sorted(os.listdir(DIAG_OUT)):
         if not f.endswith(".json"):
             continue

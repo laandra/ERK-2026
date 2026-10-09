@@ -437,8 +437,11 @@ class TrainConfig:
     # weeks alone (`run_rl_benchmark.tune`): 0.997 won for every tariff and
     # method, decisively only on SI dqn (p 0.03); on AU it is a tie. Safe only
     # because rewards are baseline-subtracted; against raw bills this gamma
-    # would put the Q-scale near 200 EUR. Per-(tariff, method) values live in
-    # `run_rl_benchmark.TUNED`.
+    # would put the Q-scale near 200 EUR. These defaults are the PRE-search
+    # values: the panel trains under `run_rl_benchmark.TUNED`, which since the
+    # joint search (`rl_hpo`, 2026-10-08) overrides most of them per (tariff,
+    # method) -- gamma 0.993-0.999, lr ~1e-4 for the cold DQN, width 64 for
+    # the clones. Read TUNED, not these, for what a result was trained with.
     gamma: float = 0.997
     hidden: int = 128
     buffer: int = 200_000
@@ -478,9 +481,9 @@ class TrainConfig:
     # Q-magnitudes, taking the ranking with them -- measured, `bc_dqn` began
     # its validation trace at 62.6 EUR, where a COLD dqn begins (63.6), rather
     # than where the clone sits. Decays to 0 so reinforcement can eventually
-    # overrule the demonstration it started from. Validation splits it by
-    # tariff (`run_rl_benchmark.TUNED`): kept at 1 on AU, 0 on SI, where the
-    # clone's heavy cycling costs more in wear than it saves on the bill.
+    # overrule the demonstration it started from. The joint search
+    # (`run_rl_benchmark.TUNED`) set it to 2.2 on AU (decaying over almost
+    # the whole run) and 0.48 on SI.
     bc_reg: float = 1.0
     bc_reg_decay_frac: float = 0.5
     seed: int = 0
@@ -511,7 +514,8 @@ class BCOptions:
     max_epochs: int = 200
     patience: int = 10
     weight_decay: float = 0.0
-    # Exponent on the inverse-frequency class weights: 1 is inverse frequency
+    # Exponent on the inverse-frequency class weights (see `train_bc`; the
+    # search's winners are ~0.1): 1 is inverse frequency
     # (the original fit, introduced because an unweighted fit collapsed onto
     # idle), 0 is unweighted.
     class_power: float = 1.0
@@ -1023,9 +1027,15 @@ def train_bc(sig, settle, env, fb: FeatureBuilder, static_norm: np.ndarray,
     `opts` is the clone's optimiser (`BCOptions`); None is the defaults, the
     settings every clone before the hyperparameter search was fitted with.
 
-    Plain cross-entropy with inverse-frequency class weights -- idle and
-    self-consumption dominate an optimal year, and an unweighted fit collapses
-    onto them. Convergence is early-stopping on held-out loss, and the
+    Cross-entropy with class weights `(1 / frequency) ** opts.class_power`.
+    Full inverse frequency (power 1, the default) was introduced on the first
+    screen, when an unweighted fit collapsed onto idle and self-consumption.
+    The joint search (`rl_hpo`, 2026-10-08) found the opposite on the current
+    split and features: near-unweighted fits (power 0.09-0.14, with label
+    smoothing) clone best on both tariffs, while every AU fit with power
+    ~0.5-0.9 collapsed to near-idle -- the weighting strength is the setting
+    the clone is most sensitive to, and the promoted value lives in
+    `run_rl_benchmark.TUNED`. Convergence is early-stopping on held-out loss, and the
     agreement measure is read on the same held-out days.
 
     `holdout_days` (absolute day indices, or blocks) names those days: the

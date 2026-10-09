@@ -539,7 +539,11 @@ def model_digest(tariff, scheme, group, method, g, cfg, bc_digest=None,
     version = {"bc": (rl.BC_ALGO_VERSION,),
                "dqn": (rl.ALGO_VERSION,),
                "bc_dqn": (rl.BC_ALGO_VERSION, rl.ALGO_VERSION)}[method]
-    method_cfg = (rg.BCConfigPool().config() | rb._method_config(cfg, "bc")
+    # The clone's optimiser is the LOCAL clone's (`rb.effective_clone`, TUNED);
+    # with default options this is the digest every clone always had.
+    clone = rb.effective_clone(tariff, "bc")
+    method_cfg = (rg.pool_config_for(clone).config()
+                  | rb._method_config(cfg, "bc", clone)
                   if method == "bc" else cfg.config())
     return _digest(spec.config(), method_cfg,
                    {"tariff": tariff, "scheme": scheme, "group": group,
@@ -728,7 +732,8 @@ def train_group(tariff, scheme, group, g, methods, seed=0, verbose=True):
                 net, hist_bc = rg.train_bc_pool(Xtr, ytr, Xva, yva, cfg,
                                                 verbose=verbose,
                                                 init_net=parent_net,
-                                                lr_scale=0.3 if parent_net else 1.0)
+                                                lr_scale=0.3 if parent_net else 1.0,
+                                                opts=rb.effective_clone(tariff, "bc"))
                 del Xtr, ytr, Xva, yva
             else:
                 mem = pool.rl_members()
@@ -1125,14 +1130,28 @@ def roll_rl_config(tariff, method, seed=0) -> rl.TrainConfig:
     return cfg
 
 
+def roll_clone_config(tariff) -> rl.TrainConfig:
+    """The monthly re-clone's config: the local clone's (TUNED), at seed 0 as
+    the re-clone has always been fitted. It was a bare `rl.TrainConfig(seed=0)`
+    -- identical while the clone had no TUNED entry, silently the OLD settings
+    once it had one."""
+    return rb.effective_config(rb.make_config(LOCAL_STEPS, 0), tariff, "bc")
+
+
 def roll_digest(tariff, seed=0, method="bc", window=56, guard="weak") -> str:
     _, js = _paths(tariff, "global", "all" + seed_tag(seed), "bc")
     with open(js, encoding="utf-8") as fh:
         parent = json.load(fh)["digest"]
+    clone = rb.effective_clone(tariff, "bc")
     base = {"parent": parent, "window": ROLL_WINDOW,
             "holdout": ROLL_HOLDOUT, "lr_scale": 0.3,
-            "pool": rg.BCConfigPool().config(),
+            "pool": rg.pool_config_for(clone).config(),
             "global_algo": rg.GLOBAL_ALGO_VERSION}
+    if clone.changed() or roll_clone_config(tariff).lr != rl.TrainConfig().lr:
+        # The re-clone's optimiser, once it is no longer the defaults it was
+        # first run under (keeps every pre-promotion digest as it was).
+        base = {**base, "clone": clone.changed(),
+                "clone_lr": roll_clone_config(tariff).lr}
     if (window, guard) != (56, "weak"):
         base = {**base, "window": window, "guard": guard,
                 "layout": roll_layout(window, guard), "check_alpha":
@@ -1212,8 +1231,9 @@ def roll_unit(tariff, ident, seed=0, method="bc", window=56, guard="weak"):
                 end = (va[1] - te[0]) * H
                 clone, hist = rg.train_bc_pool(
                     X[:cut], labels[:cut], X[cut:end], labels[cut:end],
-                    rl.TrainConfig(seed=0), verbose=False, init_net=clone_parent,
-                    lr_scale=0.3)
+                    roll_clone_config(tariff), verbose=False,
+                    init_net=clone_parent, lr_scale=0.3,
+                    opts=rb.effective_clone(tariff, "bc"))
                 agree.append(hist["final_val_agreement"])
             if method == "bc":
                 net, parent_net = clone, clone_parent

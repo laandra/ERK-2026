@@ -48,15 +48,26 @@ cfg = rb.make_config(hpo.STEPS, 0)
 spec = {t: rb.variant_specs(t)[hpo.VARIANT] for t in hpo.TARIFFS}
 defaults = {rb.CLONE_PREFIX + k: v for k, v in rl.BCOptions().config().items()
             if v is not None}
+# TUNED carries clone options since the promotion (2026-10-08), so each check
+# is stated against the options IN FORCE, plus the original guarantee on a
+# configuration with no clone keys: spelling out the defaults changes nothing,
+# which is what kept every pre-promotion result's digest.
 for t in hpo.TARIFFS:
     for m in hpo.METHODS:
         tuned = dict(rb.TUNED.get((t, m), {}))
+        bare = {k: v for k, v in tuned.items() if not k.startswith(rb.CLONE_PREFIX)}
+        check(f"{t} {m}: on a config without clone keys, the spelled-out defaults "
+              f"keep the digest",
+              rb.run_digest(cfg, spec[t], t, m, overrides=bare)
+              == rb.run_digest(cfg, spec[t], t, m, overrides=dict(bare, **defaults)))
         a = rb.run_digest(cfg, spec[t], t, m)
-        b = rb.run_digest(cfg, spec[t], t, m, overrides=dict(tuned, **defaults))
-        check(f"{t} {m}: spelling out the default clone options keeps the digest",
-              a == b)
+        eff = {rb.CLONE_PREFIX + k: v for k, v in
+               rb.effective_clone(t, m).config().items() if v is not None}
+        check(f"{t} {m}: spelling out the clone options in force keeps the digest",
+              a == rb.run_digest(cfg, spec[t], t, m, overrides=dict(tuned, **eff)))
+        other = 64 if rb.effective_clone(t, m).batch != 64 else 128
         c = rb.run_digest(cfg, spec[t], t, m,
-                          overrides=dict(tuned, clone_batch=1024))
+                          overrides=dict(tuned, clone_batch=other))
         if m == "dqn":
             check(f"{t} dqn: a clone option cannot move a pure-DQN digest", a == c)
         else:

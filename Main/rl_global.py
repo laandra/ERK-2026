@@ -486,9 +486,18 @@ class BCConfigPool:
                 "patience": self.patience}
 
 
+def pool_config_for(opts: "rl.BCOptions") -> BCConfigPool:
+    """The pooled clone's batch / epochs / patience, taken from the local
+    clone's options -- the same "differ in DATA only" rule as above, now that
+    the local clone's optimiser is tuned (`run_rl_benchmark.effective_clone`)."""
+    return BCConfigPool(batch=opts.batch, max_epochs=opts.max_epochs,
+                        patience=opts.patience)
+
+
 def train_bc_pool(X_tr, y_tr, X_va, y_va, cfg: rl.TrainConfig,
                   pool_cfg: BCConfigPool | None = None, verbose: bool = True,
-                  init_net=None, lr_scale: float = 1.0):
+                  init_net=None, lr_scale: float = 1.0,
+                  opts: "rl.BCOptions | None" = None):
     """Clone the MILP across a pool. Inputs are already-built observations.
 
     `X_tr, y_tr` are the teacher-walk observations and labels of every member's
@@ -502,19 +511,32 @@ def train_bc_pool(X_tr, y_tr, X_va, y_va, cfg: rl.TrainConfig,
     held-out loss of the UNTOUCHED prior is the first bar the fine-tune must
     clear, so a type whose own data cannot improve on the global clone keeps
     the global weights rather than a worse local refit.
+
+    `opts` (`rl.BCOptions`) is the clone's optimiser exactly as `rl.train_bc`
+    reads it -- class-weight power, label smoothing, weight decay, its own
+    learning rate -- applied only where it differs from the defaults, so a
+    default `opts` is the fit this function always performed.
     """
-    pool_cfg = pool_cfg or BCConfigPool()
+    opts = opts or rl.BCOptions()
+    pool_cfg = pool_cfg or pool_config_for(opts)
     rng = np.random.default_rng(cfg.seed)
     torch.manual_seed(cfg.seed)
 
     counts = np.bincount(y_tr, minlength=rl.N_ACTIONS).astype(float)
     weights = counts.sum() / np.maximum(counts, 1.0)
+    if opts.class_power != 1.0:
+        weights = weights ** opts.class_power
     weights = weights / weights.mean()
 
     net = (copy.deepcopy(init_net) if init_net is not None
            else rl.QNet(X_tr.shape[1], cfg.hidden))
-    opt = torch.optim.Adam(net.parameters(), lr=cfg.lr * lr_scale, foreach=True)
-    lossf = nn.CrossEntropyLoss(weight=torch.from_numpy(weights.astype(np.float32)))
+    lr = cfg.lr if opts.lr is None else opts.lr
+    adam_kw = {"weight_decay": opts.weight_decay} if opts.weight_decay else {}
+    opt = torch.optim.Adam(net.parameters(), lr=lr * lr_scale, foreach=True,
+                           **adam_kw)
+    ce_kw = {"label_smoothing": opts.label_smoothing} if opts.label_smoothing else {}
+    lossf = nn.CrossEntropyLoss(weight=torch.from_numpy(weights.astype(np.float32)),
+                                **ce_kw)
     Xtr_t, ytr_t = torch.from_numpy(X_tr), torch.from_numpy(y_tr)
     Xva_t, yva_t = torch.from_numpy(X_va), torch.from_numpy(y_va)
 
@@ -526,7 +548,7 @@ def train_bc_pool(X_tr, y_tr, X_va, y_va, cfg: rl.TrainConfig,
                 out = net(Xva_t[i:i + 65536])
                 tot += float(nn.functional.cross_entropy(
                     out, yva_t[i:i + 65536], weight=lossf.weight,
-                    reduction="sum").item())
+                    reduction="sum", **ce_kw).item())
                 agree += int((out.argmax(dim=1) == yva_t[i:i + 65536]).sum().item())
         # Weighted mean, as `CrossEntropyLoss(weight=...)` reports it.
         wsum = float(lossf.weight[yva_t].sum().item())
@@ -534,7 +556,7 @@ def train_bc_pool(X_tr, y_tr, X_va, y_va, cfg: rl.TrainConfig,
 
     history = {"train_loss": [], "val_loss": [], "val_agreement": [],
                "label_counts": counts.tolist(), "config": cfg.config(),
-               "pool_config": pool_cfg.config(),
+               "pool_config": pool_cfg.config(), "bc_options": opts.config(),
                "n_train_rows": int(len(X_tr)), "n_val_rows": int(len(X_va))}
     best = _val()[0] if init_net is not None else np.inf
     history["init_val_loss"] = None if init_net is None else float(best)
