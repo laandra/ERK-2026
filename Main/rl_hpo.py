@@ -87,6 +87,21 @@ Layout
 A study is `<tariff>_<method>` (plus `_<tag>` for a second study of the same
 pair). `<tag>` of a run directory is a digest of its full override set and is
 spelled out in `runs/<tag>/overrides.json`.
+
+Searching under another reward
+------------------------------
+Everything above describes the panel's reward: the settled bill, validated by
+`rl.validation_rollout`. A study created with `reward="contract"` is the same
+study in every respect but what a run IS -- it trains through
+`run_rl_contract.run_one` (the SI contract charge of `rl_reward`, on the
+study's own monthly contract), and its objective is that module's held-out
+measure, which prices the contract: `val_cost`, against the same measure for a
+battery that never moves. Its space carries the reward's own dial (`weight`)
+beside the learner's, and a longer episode, because under that reward an
+episode is billed as a share of a month. Such a study lives under its own root
+(`CONTRACT_ROOT`), so the panel's studies and their notebook never see it. The
+settings found under the settled bill were found under an objective that could
+not see the standing charge; this asks whether they survive being shown it.
 """
 
 from __future__ import annotations
@@ -128,6 +143,15 @@ N_VAL_DAYS = sum(b - a for a, b in rb.VAL_BLOCKS)
 # study.json, and a study opened under another version is refused rather than
 # extended -- TPE would otherwise model two different objectives as one.
 SPACE_VERSION = 1
+
+# The rewards a study can search under: None is the panel's (the settled
+# bill); "contract" is `rl_reward`'s SI contract charge, on the study's own
+# (monthly) contract. Where a contract study keeps its results.
+REWARDS = (None, "contract")
+CONTRACT = "monthly"
+CONTRACT_ARM = "contract"
+CONTRACT_ROOT = os.path.join(HERE, "results_local", "rl_contract", "_hpo")
+CONTRACT_MODELS = os.path.join(rb.MODELS, "contract", "_hpo")
 
 
 # ---------------------------------------------------------------------------
@@ -224,14 +248,45 @@ CONFIRM_SEEDS = (0, 1, 2)
 PRIOR_EVAL_S = {"bc": 15.0, "dqn": 140.0, "bc_dqn": 150.0}
 
 
-def _space(method):
-    return SPACES[method]
+# What a study under the contract reward searches beside the learner's own
+# settings.
+#
+#   weight        the contract charge's multiplier in the TRAINING reward
+#                 (`rr.ContractOptions`). 1 is the bill. The grid in
+#                 `run_rl_contract.tune` could not tell 0.5, 1 and 2 apart at
+#                 the panel's settings; whether that holds once the learner's
+#                 own settings move with it is this search's question.
+#   episode_days  under "episode" pricing an episode is billed as a share of
+#                 the month it sits in, so its length is how much of a month
+#                 the agent is held responsible for at once. 28 is a whole
+#                 training block (the longest an episode can be). The
+#                 fine-tune has never had this searched; the panel runs it at
+#                 the TrainConfig default, 7.
+_CONTRACT_EXTRA = {
+    "dqn": [("weight", "log", (0.25, 4.0))],
+    "bc_dqn": [("weight", "log", (0.25, 4.0)),
+               ("episode_days", "cat", (7, 14, 28))],
+}
+_CONTRACT_WIDER = {"dqn": {"episode_days": (3, 7, 14, 28)}}
 
 
-def suggest(trial, method: str) -> dict:
+def _space(method, reward=None):
+    if reward is None:
+        return SPACES[method]
+    if reward != "contract":
+        raise ValueError(f"unknown reward {reward!r}; expected one of {REWARDS}")
+    if method not in _CONTRACT_EXTRA:
+        # The clone is not trained on a reward; there is nothing to search.
+        raise ValueError(f"no search under the contract reward for {method!r}")
+    wider = _CONTRACT_WIDER.get(method, {})
+    return ([(n, k, wider.get(n, spec)) for n, k, spec in SPACES[method]]
+            + _CONTRACT_EXTRA[method])
+
+
+def suggest(trial, method: str, reward=None) -> dict:
     """Draw one configuration from `method`'s space on an optuna trial."""
     out = {}
-    for name, kind, spec in _space(method):
+    for name, kind, spec in _space(method, reward):
         if kind == "log":
             out[name] = trial.suggest_float(name, spec[0], spec[1], log=True)
         elif kind == "float":
@@ -243,10 +298,10 @@ def suggest(trial, method: str) -> dict:
     return out
 
 
-def in_space(method: str, params: dict) -> list:
+def in_space(method: str, params: dict, reward=None) -> list:
     """Names whose value lies outside the space (empty = expressible)."""
     bad = []
-    for name, kind, spec in _space(method):
+    for name, kind, spec in _space(method, reward):
         v = params.get(name)
         if kind == "cat":
             ok = v in spec
@@ -258,7 +313,17 @@ def in_space(method: str, params: dict) -> list:
 
 
 def current_value(tariff: str, method: str, name: str, steps: int = STEPS):
-    """What the panel trains `name` at today (TrainConfig + TUNED, or BCOptions)."""
+    """What the panel trains `name` at today (TrainConfig + TUNED, or BCOptions).
+
+    A reward setting (`weight`) is read off `run_rl_contract`: what the
+    contract study trains it at, which is the bill as it is unless its own
+    tune moved it.
+    """
+    if name == "weight":
+        import rl_reward as rr
+        import run_rl_contract as rc
+        return float(rc.CONTRACT_TUNED.get((CONTRACT, method), {})
+                     .get("weight", rr.ContractOptions().weight))
     if name.startswith(rb.CLONE_PREFIX):
         clone = rb.effective_clone(tariff, method)
         return getattr(clone, name[len(rb.CLONE_PREFIX):])
@@ -266,10 +331,11 @@ def current_value(tariff: str, method: str, name: str, steps: int = STEPS):
     return getattr(cfg, name)
 
 
-def incumbent_params(tariff: str, method: str, steps: int = STEPS) -> dict:
+def incumbent_params(tariff: str, method: str, steps: int = STEPS,
+                     reward=None) -> dict:
     """The current settings, as a point of `method`'s space."""
     return {name: current_value(tariff, method, name, steps)
-            for name, _, _ in _space(method)}
+            for name, _, _ in _space(method, reward)}
 
 
 # ---------------------------------------------------------------------------
@@ -356,7 +422,10 @@ def model_root(out_root: str, root=None, models=None) -> str:
     return os.path.join(models or MODELS_ROOT, rel)
 
 
-def _result_path(out_root, tariff, method, ident):
+def _result_path(out_root, tariff, method, ident, reward=None):
+    if reward == "contract":           # `run_rl_contract`'s own layout
+        return os.path.join(out_root, CONTRACT, f"{CONTRACT_ARM}__{method}",
+                            f"{ident}.json")
     return os.path.join(out_root, tariff, f"{VARIANT}__{method}", f"{ident}.json")
 
 
@@ -390,25 +459,58 @@ class _IdleNet:
         return out
 
 
-def _baseline_digest(tariff):
-    return _digest({"tariff": tariff, "val": rb.VAL_BLOCKS,
-                    "soc": rb.SOC_INIT_USABLE, "variant": VARIANT})
+def _baseline_digest(tariff, reward=None):
+    base = {"tariff": tariff, "val": rb.VAL_BLOCKS,
+            "soc": rb.SOC_INIT_USABLE, "variant": VARIANT}
+    if reward is not None:
+        import rl_reward as rr
+        base.update({"reward": reward, "contract": CONTRACT,
+                     "version": rr.REWARD_VERSION})
+    return _digest(base)
 
 
-def baseline_path(tariff, ident, root=None):
-    return os.path.join(root or HPO_ROOT, "baselines", tariff, f"{ident}.json")
+def baseline_path(tariff, ident, root=None, reward=None):
+    sub = tariff if reward is None else f"{tariff}@{reward}"
+    return os.path.join(root or HPO_ROOT, "baselines", sub, f"{ident}.json")
 
 
-def read_baseline(tariff, ident, root=None):
-    p = baseline_path(tariff, ident, root)
+def read_baseline(tariff, ident, root=None, reward=None):
+    p = baseline_path(tariff, ident, root, reward)
     if os.path.exists(p):
         try:
             b = _read_json(p)
-            if b.get("digest") == _baseline_digest(tariff):
+            if b.get("digest") == _baseline_digest(tariff, reward):
                 return float(b["val_idle_cost"])
         except Exception:
             pass
     return None
+
+
+def idle_contract_cost(prep, root=None) -> float:
+    """The contract validation of a battery that never moves, cached.
+
+    The learner's own measure (`SIContractChargeReward.held_out`: the held-out
+    weeks' bill, what their draws add to the contract pool, and their share of
+    the standing charge the rest of the pool sets), handed the no-battery
+    policy -- so the saving a trial reports is against the bill the household
+    would have had, standing charge included.
+    """
+    import rl_reward as rr
+    import Rule_Based_Control as rbc
+    tariff, ident = prep["tariff"], prep["ident"]
+    cached = read_baseline(tariff, ident, root, "contract")
+    if cached is not None:
+        return cached
+    meter = rr.reward_class(tariff, CONTRACT)(
+        prep["train"], None, None, val_blocks=rb.VAL_BLOCKS,
+        soc_init=rb.SOC_INIT_USABLE, respect_peak=True)
+    val = meter.settle_contract(rbc._Idle(), passes=2)
+    prep["train"]["env"].clear_achieved_power()
+    _write_json(baseline_path(tariff, ident, root, "contract"),
+                {"digest": _baseline_digest(tariff, "contract"), "tariff": tariff,
+                 "ident": int(ident), "val_idle_cost": val["cost_eur_closed"],
+                 "val_days": N_VAL_DAYS})
+    return float(val["cost_eur_closed"])
 
 
 def idle_validation_cost(prep, root=None) -> float:
@@ -454,11 +556,16 @@ def _row(ev, res, base) -> dict:
     fit, not the accounting), and the panel's clones still carry the per-cycle
     price they were scored under before the NPV switch (Ausgrid 138 AU: stored
     88.16 = bill 52.51 + 85.6 EFC x 0.417)."""
-    val_net = float(res["val_cost_closed"]) + rb.val_wear_fn(ev["tariff"])(
-        float(res["val_efc"]), N_VAL_DAYS)
+    wear = rb.val_wear_fn(ev["tariff"])(float(res["val_efc"]), N_VAL_DAYS)
+    if ev.get("reward") == "contract":
+        # `run_rl_contract`'s measure: bill + contract on the held-out weeks,
+        # the lifetime wear already in it (`_measure`).
+        val_net, val_bill = float(res["val_cost"]), float(res["val_cost"]) - wear
+    else:
+        val_net, val_bill = float(res["val_cost_closed"]) + wear, float(res["val_cost_closed"])
     row = {k: ev.get(k) for k in _ID_KEYS}
     row.update({
-        "val_net": val_net, "val_bill": float(res["val_cost_closed"]),
+        "val_net": val_net, "val_bill": val_bill,
         "val_efc": float(res["val_efc"]), "val_idle": base,
         # Saving on the held-out weeks against the idle battery, annualised.
         "saving_val_a": (base - val_net) * 365.0 / N_VAL_DAYS,
@@ -487,17 +594,25 @@ def _row(ev, res, base) -> dict:
 def stored_result(ev):
     """`run_one`'s result JSON for this evaluation if it is on disk under the
     evaluation's own digest (and carries a test score when one is wanted)."""
-    path = _result_path(ev["out_root"], ev["tariff"], ev["method"], ev["ident"])
+    reward = ev.get("reward")
+    path = _result_path(ev["out_root"], ev["tariff"], ev["method"], ev["ident"],
+                        reward)
     if not os.path.exists(path):
         return None
     try:
         res = _read_json(path)
     except Exception:
         return None
-    spec = rb.variant_specs(ev["tariff"])[VARIANT]
     cfg = rb.make_config(ev["steps"], ev["seed"])
-    if res.get("digest") != rb.run_digest(cfg, spec, ev["tariff"], ev["method"],
-                                          overrides=ev["overrides"]):
+    if reward == "contract":
+        import run_rl_contract as rc
+        want = rc.run_digest(CONTRACT, CONTRACT_ARM, ev["method"], cfg,
+                             overrides=ev["overrides"])
+    else:
+        spec = rb.variant_specs(ev["tariff"])[VARIANT]
+        want = rb.run_digest(cfg, spec, ev["tariff"], ev["method"],
+                             overrides=ev["overrides"])
+    if res.get("digest") != want:
         return None
     if ev.get("score_test") and "cost_eur_total" not in res:
         return None
@@ -515,7 +630,8 @@ def cached_row(ev):
     res = stored_result(ev)
     if res is None:
         return None
-    base = read_baseline(ev["tariff"], ev["ident"], ev.get("root"))
+    base = read_baseline(ev["tariff"], ev["ident"], ev.get("root"),
+                         ev.get("reward"))
     if base is None:
         return None
     return _row(ev, res, base)
@@ -525,12 +641,16 @@ _PREP = OrderedDict()
 PREP_CACHE = 3          # households a worker keeps prepared (~100 MB each)
 
 
-def _prep(ident, tariff):
-    key = (int(ident), tariff)
+def _prep(ident, tariff, reward=None):
+    key = (int(ident), tariff, reward)
     if key in _PREP:
         _PREP.move_to_end(key)
         return _PREP[key]
-    prep = rb.prepare_household(ident, tariff)
+    if reward == "contract":
+        import run_rl_contract as rc
+        prep = rc.prepare(ident, CONTRACT)
+    else:
+        prep = rb.prepare_household(ident, tariff)
     _PREP[key] = prep
     while len(_PREP) > PREP_CACHE:
         _PREP.popitem(last=False)
@@ -543,9 +663,12 @@ def run_job(job) -> list:
     configuration cannot sink the batch it shares a household with."""
     warnings.simplefilter("ignore")
     rows = []
+    # One job is one study's household, so its evaluations share a reward.
+    reward = job["evals"][0].get("reward")
     try:
-        prep = _prep(job["ident"], job["tariff"])
-        base = idle_validation_cost(prep, job["evals"][0].get("root"))
+        prep = _prep(job["ident"], job["tariff"], reward)
+        base = (idle_contract_cost if reward == "contract"
+                else idle_validation_cost)(prep, job["evals"][0].get("root"))
     except Exception as exc:
         return [dict(_err_row(ev, f"prepare: {exc!r}")) for ev in job["evals"]]
     for ev in job["evals"]:
@@ -560,11 +683,19 @@ def run_job(job) -> list:
             continue
         try:
             cfg = rb.make_config(ev["steps"], ev["seed"])
-            res = rb.run_one(prep, VARIANT, ev["method"], cfg, verbose=False,
-                             out_root=ev["out_root"],
-                             models_root=ev["models_root"],
-                             score_test=bool(ev.get("score_test")),
-                             overrides=ev["overrides"])
+            if reward == "contract":
+                import run_rl_contract as rc
+                res = rc.run_one(prep, CONTRACT_ARM, ev["method"], cfg,
+                                 verbose=False, out_root=ev["out_root"],
+                                 models_root=ev["models_root"],
+                                 score_test=bool(ev.get("score_test")),
+                                 overrides=ev["overrides"])
+            else:
+                res = rb.run_one(prep, VARIANT, ev["method"], cfg, verbose=False,
+                                 out_root=ev["out_root"],
+                                 models_root=ev["models_root"],
+                                 score_test=bool(ev.get("score_test")),
+                                 overrides=ev["overrides"])
             if not ev.get("score_test") and "cost_eur_closed" in res:
                 # A search must never be handed a test number, even one left
                 # on disk by some other path under the same digest.
@@ -605,9 +736,17 @@ def storage(name: str, root=None):
 
 def study_settings(tariff: str, method: str, tag: str = "", households=None,
                    n_households=None, rungs=None, steps: int = STEPS,
-                   clone_source: str = "hpo", root=None) -> dict:
+                   clone_source: str = "hpo", root=None, reward=None) -> dict:
     """What a study is. Frozen into study.json on creation; a reopen under any
-    other value of an identity field is refused (see `open_settings`)."""
+    other value of an identity field is refused (see `open_settings`).
+
+    `reward` is the reward the study trains under (`REWARDS`). It is identity,
+    and it is written only when it is not the panel's: a study.json from
+    before the option existed has no such key and reads as None, which is
+    what it was.
+    """
+    if reward is not None and tariff != "SI":
+        raise ValueError("the contract reward is SI's; AU has no contract")
     d = DEFAULTS[method]
     n = n_households or d["households"]
     hh = list(households) if households is not None else tuning_households(n)
@@ -619,14 +758,23 @@ def study_settings(tariff: str, method: str, tag: str = "", households=None,
         fixed = clone_settings(tariff, clone_source, root)
     name = f"{tariff}_{method}" + (f"_{tag}" if tag else "")
     base = dict(rb.TUNED.get((tariff, method), {}))
-    inc_params = incumbent_params(tariff, method, steps)
+    algo = {"rl": rl.ALGO_VERSION, "bc": rl.BC_ALGO_VERSION}
+    extra = {}
+    if reward is not None:
+        import rl_reward as rr
+        import run_rl_contract as rc
+        base.update(rc.CONTRACT_TUNED.get((CONTRACT, method), {}))
+        algo["reward"] = rr.REWARD_VERSION
+        extra = {"reward": reward, "contract": CONTRACT}
+    inc_params = incumbent_params(tariff, method, steps, reward)
     return {
+        **extra,
         "name": name, "tariff": tariff, "method": method, "variant": VARIANT,
         "households": [int(i) for i in hh], "rungs": list(rungs),
         "steps": int(steps), "space_version": SPACE_VERSION,
-        "space": [[n_, k, list(s)] for n_, k, s in _space(method)],
+        "space": [[n_, k, list(s)] for n_, k, s in _space(method, reward)],
         "fixed": fixed, "clone_source": clone_source if method == "bc_dqn" else None,
-        "algo": {"rl": rl.ALGO_VERSION, "bc": rl.BC_ALGO_VERSION},
+        "algo": algo,
         "split": {"train": rb.TRAIN_BLOCKS, "val": rb.VAL_BLOCKS},
         # Not identity: the reference points, frozen at creation.
         #   base       TUNED's entry for this pair, carried under every trial
@@ -642,7 +790,7 @@ def study_settings(tariff: str, method: str, tag: str = "", households=None,
 
 
 _IDENTITY = ("tariff", "method", "variant", "households", "rungs", "steps",
-             "space_version", "space", "fixed", "algo", "split")
+             "space_version", "space", "fixed", "algo", "split", "reward")
 
 
 def open_settings(settings: dict, root=None) -> dict:
@@ -752,6 +900,7 @@ class SearchSource:
         self.s = settings
         self.name = settings["name"]
         self.tariff, self.method = settings["tariff"], settings["method"]
+        self.reward = settings.get("reward")
         self.hh = settings["households"]
         self.rungs = settings["rungs"]
         self.root, self.models = root, models
@@ -811,7 +960,7 @@ class SearchSource:
 
     def _open_trial(self):
         trial = self.study.ask()
-        params = suggest(trial, self.method)
+        params = suggest(trial, self.method, self.reward)
         over = trial_overrides(self.s["base"], self.s["fixed"], params)
         tag = cfg_tag(over)
         _write_json(os.path.join(study_dir(self.name, self.root), "runs", tag,
@@ -830,7 +979,7 @@ class SearchSource:
                 "tag": st["tag"], "tariff": self.tariff, "method": self.method,
                 "ident": int(ident), "seed": seed, "overrides": st["over"],
                 "steps": self.s["steps"], "score_test": False,
-                "out_root": out_root,
+                "out_root": out_root, "reward": self.reward,
                 "models_root": model_root(out_root, self.root, self.models),
                 "root": self.root}
 
@@ -1244,7 +1393,7 @@ def parse_study(spec: str):
 
 def search(studies, n_jobs=12, trials=None, hours=None, n_households=None,
            tag="", steps=None, clone_source="hpo", root=None, models=None,
-           job_fn=run_job, households=None, verbose=True):
+           job_fn=run_job, households=None, verbose=True, reward=None):
     """Run (or resume) the searches for `studies` [(tariff, method)] together.
 
     `trials` is the TARGET count of finished (complete + pruned) trials per
@@ -1272,7 +1421,8 @@ def search(studies, n_jobs=12, trials=None, hours=None, n_households=None,
                     st = old["steps"]
             s = study_settings(t, m, tag=tag, households=hh,
                                n_households=n_households, steps=st or STEPS,
-                               clone_source=clone_source, root=root)
+                               clone_source=clone_source, root=root,
+                               reward=reward)
             s = open_settings(s, root)
             n = trials or DEFAULTS[m]["trials"]
             src = SearchSource(s, n, deadline=deadline, root=root, models=models,
@@ -1338,7 +1488,7 @@ def _refine_evals(name, seeds, top, root=None, models=None):
                     "tariff": s["tariff"], "method": s["method"],
                     "ident": int(ident), "seed": seed, "overrides": over,
                     "steps": s["steps"], "score_test": False,
-                    "out_root": out_root,
+                    "out_root": out_root, "reward": s.get("reward"),
                     "models_root": model_root(out_root, root, models),
                     "root": root})
     return evals
@@ -1454,6 +1604,7 @@ def _confirm_evals(name, seeds, units, root=None, models=None):
                       "tariff": t, "method": m, "ident": int(ident),
                       "seed": seed, "overrides": over, "steps": s["steps"],
                       "score_test": True, "out_root": out_root,
+                      "reward": s.get("reward"),
                       "models_root": model_root(out_root, root, models),
                       "root": root}
                 if label == "current":
@@ -1462,7 +1613,13 @@ def _confirm_evals(name, seeds, units, root=None, models=None):
                     # default budget (stragglers retrained at 1M do not
                     # match, and are retrained here at the study's budget).
                     # Read only: a worker adds the baseline and never writes.
-                    panel = dict(ev, out_root=rb.OUT, read_only=True)
+                    # A contract study's "panel" is the contract study's own
+                    # result tree (`run_rl_contract.train`).
+                    if s.get("reward") == "contract":
+                        import run_rl_contract as rc
+                        panel = dict(ev, out_root=rc.OUT, read_only=True)
+                    else:
+                        panel = dict(ev, out_root=rb.OUT, read_only=True)
                     if stored_result(panel) is not None:
                         ev = panel
                 evals.append(ev)
@@ -1562,8 +1719,8 @@ def history_frame(name, root=None):
     return df
 
 
-def param_kind(method, name):
-    return next(k for n, k, _ in _space(method) if n == name)
+def param_kind(method, name, reward=None):
+    return next(k for n, k, _ in _space(method, reward) if n == name)
 
 
 def slice_frame(name, root=None):
@@ -1576,7 +1733,7 @@ def slice_frame(name, root=None):
     s = read_settings(name, root)
     tf = tf[tf.state == "COMPLETE"]
     rows = []
-    for pname, kind, _ in _space(s["method"]):
+    for pname, kind, _ in _space(s["method"], s.get("reward")):
         col = f"p_{pname}"
         if col not in tf:
             continue
@@ -1735,7 +1892,9 @@ def tuned_entries(root=None) -> str:
         bco = rl.BCOptions()
         keep = {}
         for k, v in w["overrides"].items():
-            if k.startswith(rb.CLONE_PREFIX):
+            if k == "weight":                 # the reward's, not TrainConfig's
+                dv = 1.0
+            elif k.startswith(rb.CLONE_PREFIX):
                 dv = getattr(bco, k[len(rb.CLONE_PREFIX):])
             else:
                 dv = getattr(base, k)

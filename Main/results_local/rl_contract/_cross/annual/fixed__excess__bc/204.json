@@ -1,0 +1,19 @@
+{
+ "energy_eur": 237.03207986949903,
+ "power_eur": 9.6517911126,
+ "fixed_eur": 199.30238244424464,
+ "termadj_eur": 0.34297435744340304,
+ "cost_eur": 246.68387098209908,
+ "cost_eur_closed": 247.0268453395425,
+ "cost_eur_total": 446.32922778378713,
+ "efc": 41.660510249999994,
+ "peak_import_kw": 5.64,
+ "agreed_power_iters": 2.0,
+ "agreed_power_converged": true,
+ "ident": "204",
+ "tested_on": "annual",
+ "trained_on": "fixed",
+ "arm": "excess",
+ "method": "bc",
+ "source_digest": "77af3c8349406719"
+}

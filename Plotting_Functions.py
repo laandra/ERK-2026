@@ -451,16 +451,27 @@ def finish(ax, *, title=None, xlabel=None, ylabel=None, subtitle=None,
     return ax
 
 
-def key_legend(ax, handles, where="below", ncol=4, **kw):
+def key_legend(ax, handles, where="below", ncol=4, below_in=None, **kw):
     """Place a legend built from explicit handles.
 
     The handles themselves stay in the notebook -- what a colour means is the
     study's semantics. This only decides where the keys go, which is the part
     that was written five times (`below_legend`, `tariff_legend`,
     `soc_mode_legend`, `family_legend`).
+
+    `below_in` puts a "below" legend that many INCHES under the axes instead of
+    the default 16 % of the axes height. The fraction is right for a figure of
+    the standard height and wrong for a short one: on a three-row bar chart
+    built with `figsize(ratio=0.36)` it is a third of an inch, which is where
+    the tick labels and the x label already are, and the keys print through
+    them. Half an inch clears both at any height.
     """
     if where == "below":
-        kw.setdefault("bbox_to_anchor", (0.5, -0.16))
+        drop = 0.16
+        if below_in is not None:
+            axes_in = ax.get_position().height * ax.figure.get_figheight()
+            drop = float(below_in) / max(axes_in, 1e-6)
+        kw.setdefault("bbox_to_anchor", (0.5, -drop))
         kw.setdefault("loc", "upper center")
     else:
         kw.setdefault("loc", where if where != "inside" else "best")

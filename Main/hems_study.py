@@ -1280,19 +1280,41 @@ def build_study_env(sample: pd.DataFrame,
                     delta_t: float,
                     H: int,
                     max_daily_cycles: float | None = None,
-                    cycle_cost_eur_per_efc: float | None = None):
+                    cycle_cost_eur_per_efc: float | None = None,
+                    contracted_power_kw=None,
+                    agreed_power: dict | None = None,
+                    paket_id: str | None = None):
     """The battery, sized by upstream's own factory rather than by hand.
 
     c_rate/inverter are chosen so `step_energy_kwh` lands on this study's p_max:
     a 10 kWh pack at 1.5 kW is C=0.15, well under upstream's residential 0.5
     default, and that difference is a study choice rather than an accident.
+
+    `contracted_power_kw` / `agreed_power` are the factory's own two ways of
+    saying which SI CONTRACT the household is on -- a signed number, or the
+    rule the dogovorjena moc is rolled by -- passed straight through. Both None
+    is the study's contract (re-agreed monthly from the top five peaks of the
+    month before) and is what every arm runs; the contract-type study in
+    `rl_reward` is the one caller that sets them.
+
+    `paket_id` is the supplier PRICE LIST (`si_paketi.PAKETI`). None is the
+    study's, GEN-I Dinamicni for self-supply. Any other list is installed with
+    `meritve_15min=True` in the environment's pricing options, for the reason
+    `si_rate_vectors` gives: on a 30-minute interval the flag auto-resolves to
+    False, which drops a four-tariff ("aktivni") list onto its flat substitute
+    rate -- and the settlement reads the ENVIRONMENT's options while the rate
+    vectors are built with the flag set, so leaving it off here would bill a
+    controller on a flat list while it decided against a four-tariff one. (It
+    is a no-op for the dynamic list, which is why the study's own environment
+    never carried it and is left exactly as it was.)
     """
+    paket = "GENI_SAMO_DINAMICNI" if paket_id is None else str(paket_id)
     c_rate = p_max / float(battery_cap)
-    return build_household_env(
+    env = build_household_env(
         sample,
         capacity_kwh=battery_cap,
         scheme="si_samooskrba",          # unused: pricing stays with TariffCalculator
-        paket_id="GENI_SAMO_DINAMICNI",
+        paket_id=paket,
         pricing_reference_year=2024,
         peak_reset_months=1,
         price_column="SMP",
@@ -1307,7 +1329,16 @@ def build_study_env(sample: pd.DataFrame,
         soc_max_frac=soc_max_pct,
         max_daily_cycles=max_daily_cycles,
         cycle_cost_eur_per_efc=cycle_cost_eur_per_efc,
+        contracted_power_kw=contracted_power_kw,
+        agreed_power=agreed_power,
     )
+    if paket_id is not None and paket != "GENI_SAMO_DINAMICNI":
+        # ADDED to the environment's options, never put in their place: they
+        # also carry the tariff reference year the study pins (2024), and a
+        # list installed without it is billed on the default year's network
+        # rates -- another year's tariff act under the same household.
+        env.pricing_options["meritve_15min"] = True
+    return env
 
 
 def align_envelope(env, p_max, eff, delta_t):
@@ -1847,7 +1878,12 @@ def build_rate_vectors(tariff: str, env, index, smp_eur_per_kwh,
     if tariff == "AU":
         return au_rate_vectors(index, smp_eur_per_kwh, interval_minutes)
     if tariff == "SI":
-        return si_rate_vectors(env, index, smp_eur_per_kwh, interval_minutes)
+        # The price list the ENVIRONMENT is on, so the vectors a controller
+        # decides against and the settlement it is billed by cannot name two
+        # lists. The study's environment carries SI_PAKET_ID.
+        paket = (env.pricing_options or {}).get("paket_id", SI_PAKET_ID)
+        return si_rate_vectors(env, index, smp_eur_per_kwh, interval_minutes,
+                               paket_id=paket)
     raise ValueError(f"unknown tariff {tariff!r}; expected 'AU' or 'SI'")
 
 

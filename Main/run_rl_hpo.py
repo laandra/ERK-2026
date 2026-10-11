@@ -104,6 +104,11 @@ def main(argv=None):
     ap.add_argument("--steps", type=int, default=None,
                     help=f"DQN budget per run (default {hpo.STEPS}, the panel's)")
     ap.add_argument("--tag", default="", help="suffix for a second study of a pair")
+    ap.add_argument("--reward", default=None, choices=["contract"],
+                    help="search under the SI contract-charge reward "
+                         "(`rl_reward`) instead of the settled bill. SI dqn "
+                         "and bc_dqn only; studies are named *_contract and "
+                         "kept under results_local/rl_contract/_hpo")
     ap.add_argument("--clone", default="hpo", choices=["hpo", "current"],
                     help="bc_dqn: fine-tune the IL winner or the panel's clone")
     ap.add_argument("--top", type=int, default=hpo.REFINE_TOP)
@@ -117,6 +122,18 @@ def main(argv=None):
                     help="network root (default rl_models/hpo)")
     args = ap.parse_args(argv)
 
+    if args.reward == "contract":
+        # Its own tree, its own tag: nothing of a contract study may land
+        # among the panel's studies, whose notebook lists every study it finds.
+        args.root = args.root or hpo.CONTRACT_ROOT
+        args.models = args.models or hpo.CONTRACT_MODELS
+        args.tag = args.tag or "contract"
+        if args.studies is None:
+            args.studies = ["SI:dqn", "SI:bc_dqn"]
+        if args.clone == "hpo":
+            # The IL study lives under the panel's root, and its winner IS the
+            # panel's clone since the promotion of 2026-10-08.
+            args.clone = "current"
     if args.phase == "status":
         status(args.root)
         return
@@ -129,7 +146,8 @@ def main(argv=None):
     common = dict(n_jobs=args.jobs, root=args.root, models=args.models)
     search_kw = dict(common, trials=args.trials, hours=args.hours,
                      n_households=args.households, tag=args.tag,
-                     steps=args.steps, clone_source=args.clone)
+                     steps=args.steps, clone_source=args.clone,
+                     reward=args.reward)
     refine_kw = dict(common, top=args.top,
                      seeds=tuple(args.seeds) if args.seeds is not None
                      else hpo.REFINE_SEEDS)

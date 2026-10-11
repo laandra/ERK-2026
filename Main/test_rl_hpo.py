@@ -286,6 +286,70 @@ check("a clone under non-default options trains and differs",
       rows[0].get("error") is None and rows[0]["val_bill"] != r["val_bill"],
       rows[0].get("error"))
 
+# --------------------------------------------------------------------------
+# 5. A study under the contract reward (`reward="contract"`)
+# --------------------------------------------------------------------------
+import run_rl_contract as rc                                     # noqa: E402
+
+for m in ("dqn", "bc_dqn"):
+    inc_c = hpo.incumbent_params("SI", m, reward="contract")
+    check(f"SI {m}: the panel's settings are a point of the contract space, "
+          f"with the bill at weight 1",
+          hpo.in_space(m, inc_c, "contract") == [] and inc_c["weight"] == 1.0)
+    names = [n for n, _, _ in hpo._space(m)]
+    names_c = [n for n, _, _ in hpo._space(m, "contract")]
+    check(f"SI {m}: the contract space is the panel's plus the reward's own "
+          f"settings", names_c[:len(names)] == names and "weight" in names_c
+          and "episode_days" in names_c and names == [n for n, _, _ in hpo.SPACES[m]])
+try:
+    hpo._space("bc", "contract")
+    check("there is no contract search for the clone (it has no reward)", False)
+except ValueError:
+    check("there is no contract search for the clone (it has no reward)", True)
+try:
+    hpo.study_settings("AU", "dqn", households=[1, 2, 3], reward="contract")
+    check("AU cannot be searched under a contract reward", False)
+except ValueError:
+    check("AU cannot be searched under a contract reward", True)
+
+HH3 = [254, 185, 230]
+legacy = hpo.study_settings("SI", "dqn", households=HH3)
+contract = hpo.study_settings("SI", "dqn", tag="contract", households=HH3,
+                              reward="contract")
+check("a study of the panel's reward carries no reward key (its study.json "
+      "reads as it always did)",
+      "reward" not in legacy and "reward" not in legacy["algo"])
+check("a contract study differs in identity from the panel's study of the "
+      "same learner",
+      contract["reward"] == "contract" and contract["name"] == "SI_dqn_contract"
+      and any(legacy.get(k) != contract.get(k) for k in hpo._IDENTITY))
+check("its results live under the contract study's own root and layout",
+      hpo.CONTRACT_ROOT.startswith(rc.OUT)
+      and hpo._result_path("r", "SI", "dqn", 5, "contract")
+      == os.path.join("r", "monthly", "contract__dqn", "5.json")
+      and hpo._result_path("r", "SI", "dqn", 5)
+      == os.path.join("r", "SI", "fc_h24__dqn", "5.json"))
+cfg_c = rb.make_config(hpo.STEPS, 0)
+full = hpo.trial_overrides(contract["base"], contract["fixed"],
+                           contract["incumbent_params"])
+check("the incumbent of a contract study IS the contract study's own run "
+      "(same digest as `run_rl_contract.train`)",
+      rc.run_digest("monthly", "contract", "dqn", cfg_c, overrides=full)
+      == rc.run_digest("monthly", "contract", "dqn", cfg_c))
+check("a reward setting reaches the run's identity",
+      rc.run_digest("monthly", "contract", "dqn", cfg_c,
+                    overrides=dict(full, weight=2.0))
+      != rc.run_digest("monthly", "contract", "dqn", cfg_c))
+ev_c = {"study": "s", "trial": 0, "tag": "t", "tariff": "SI", "method": "dqn",
+        "ident": 138, "seed": 0, "overrides": None, "steps": hpo.STEPS,
+        "score_test": True, "out_root": rc.OUT, "reward": "contract", "root": TMP}
+stored_c = hpo.stored_result(ev_c)
+if os.path.exists(rc._result_path("monthly", "contract", "dqn", 138)):
+    with open(rc._result_path("monthly", "contract", "dqn", 138)) as fh:
+        at_default = json.load(fh)["train_config"]["total_steps"] == hpo.STEPS
+    check("the contract study's own results are read back as its panel",
+          (stored_c is not None) == at_default)
+
 shutil.rmtree(TMP, ignore_errors=True)
 print()
 if FAILURES:

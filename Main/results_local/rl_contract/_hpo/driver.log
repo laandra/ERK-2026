@@ -1,0 +1,138 @@
+== stage 3: search dqn / bc_dqn ==
+[SI_dqn_contract] 0/40 trials finished, 0 re-queued from an interrupted run; 8 households, rungs [3, 8]
+[SI_bc_dqn_contract] 0/40 trials finished, 0 re-queued from an interrupted run; 8 households, rungs [3, 8]
+[SI_dqn_contract] trial   1 complete     48.00/a  best    48.00  (1/40)
+[SI_bc_dqn_contract] trial   1 complete     66.47/a  best    66.47  (1/40)
+-- 10 min elapsed; ~1.6 h left, finishing ~00:07: SI_dqn_contract 1/40 best 48.0 | SI_bc_dqn_contract 1/40 best 66.5
+[SI_bc_dqn_contract] trial   0 complete     71.43/a  best    71.43  (2/40)
+[SI_dqn_contract] trial   0 complete     67.65/a  best    67.65  (2/40)
+[SI_bc_dqn_contract] trial   2 complete     69.40/a  best    71.43  (3/40)
+[SI_dqn_contract] trial   2 complete     36.99/a  best    67.65  (3/40)
+-- 21 min elapsed; ~1.9 h left, finishing ~00:34: SI_dqn_contract 3/40 best 67.6 | SI_bc_dqn_contract 3/40 best 71.4
+[SI_bc_dqn_contract] trial   3 complete     68.57/a  best    71.43  (4/40)
+[SI_dqn_contract] trial   3 complete     33.23/a  best    67.65  (4/40)
+[SI_bc_dqn_contract] trial   4 complete     69.21/a  best    71.43  (5/40)
+-- 31 min elapsed; ~1.9 h left, finishing ~00:47: SI_dqn_contract 4/40 best 67.6 | SI_bc_dqn_contract 5/40 best 71.4
+[SI_dqn_contract] trial   4 complete     59.24/a  best    67.65  (5/40)
+[SI_bc_dqn_contract] trial   5 complete     66.32/a  best    71.43  (6/40)
+[SI_dqn_contract] trial   5 complete     45.56/a  best    67.65  (6/40)
+-- 42 min elapsed; ~2.0 h left, finishing ~01:04: SI_dqn_contract 6/40 best 67.6 | SI_bc_dqn_contract 6/40 best 71.4
+[SI_dqn_contract] trial   6 complete     36.06/a  best    67.65  (7/40)
+[SI_bc_dqn_contract] trial   6 complete     71.50/a  best    71.50  (7/40)
+[SI_bc_dqn_contract] trial   7 complete     70.06/a  best    71.50  (8/40)
+[SI_dqn_contract] trial   9 pruned at 3 hh     22.14/a  best    67.65  (8/40)
+[SI_dqn_contract] trial   7 complete     51.94/a  best    67.65  (9/40)
+[SI_bc_dqn_contract] trial   8 complete     69.60/a  best    71.50  (9/40)
+-- 53 min elapsed; ~1.9 h left, finishing ~01:08: SI_dqn_contract 9/40 best 67.6 | SI_bc_dqn_contract 9/40 best 71.5
+[SI_dqn_contract] trial   8 complete     66.55/a  best    67.65  (10/40)
+[SI_bc_dqn_contract] trial  10 pruned at 3 hh     46.45/a  best    71.50  (10/40)
+[SI_bc_dqn_contract] trial   9 pruned at 3 hh     60.61/a  best    71.50  (11/40)
+[SI_bc_dqn_contract] trial  11 pruned at 3 hh     59.94/a  best    71.50  (12/40)
+[SI_dqn_contract] trial  10 complete     53.77/a  best    67.65  (11/40)
+[SI_bc_dqn_contract] trial  13 pruned at 3 hh     61.98/a  best    71.50  (13/40)
+-- 64 min elapsed; ~1.7 h left, finishing ~01:06: SI_dqn_contract 11/40 best 67.6 | SI_bc_dqn_contract 13/40 best 71.5
+[SI_bc_dqn_contract] trial  14 pruned at 3 hh     61.20/a  best    71.50  (14/40)
+[SI_bc_dqn_contract] trial  15 pruned at 3 hh     56.32/a  best    71.50  (15/40)
+[SI_bc_dqn_contract] trial  12 complete     69.29/a  best    71.50  (16/40)
+[SI_bc_dqn_contract] trial  16 pruned at 3 hh     42.75/a  best    71.50  (17/40)
+[SI_dqn_contract] trial  13 complete     62.19/a  best    67.65  (12/40)
+-- 74 min elapsed; ~1.6 h left, finishing ~01:07: SI_dqn_contract 12/40 best 67.6 | SI_bc_dqn_contract 17/40 best 71.5
+[SI_dqn_contract] trial  11 complete     59.94/a  best    67.65  (13/40)
+[SI_bc_dqn_contract] trial  17 pruned at 3 hh     61.62/a  best    71.50  (18/40)
+[SI_dqn_contract] trial  14 complete     66.22/a  best    67.65  (14/40)
+[SI_bc_dqn_contract] trial  19 pruned at 3 hh     62.10/a  best    71.50  (19/40)
+-- 84 min elapsed; ~1.4 h left, finishing ~01:10: SI_dqn_contract 14/40 best 67.6 | SI_bc_dqn_contract 19/40 best 71.5
+[SI_bc_dqn_contract] trial  18 complete     71.21/a  best    71.50  (20/40)
+[SI_dqn_contract] trial  12 complete     68.74/a  best    68.74  (15/40)
+[SI_bc_dqn_contract] trial  20 complete     72.96/a  best    72.96  (21/40)
+[SI_bc_dqn_contract] trial  21 pruned at 3 hh     60.26/a  best    72.96  (22/40)
+[SI_dqn_contract] trial  17 pruned at 3 hh     36.96/a  best    68.74  (16/40)
+-- 94 min elapsed; ~1.3 h left, finishing ~01:13: SI_dqn_contract 16/40 best 68.7 | SI_bc_dqn_contract 22/40 best 73.0
+[SI_bc_dqn_contract] trial  22 pruned at 3 hh     57.98/a  best    72.96  (23/40)
+[SI_dqn_contract] trial  15 complete     67.26/a  best    68.74  (17/40)
+[SI_dqn_contract] trial  16 complete     60.15/a  best    68.74  (18/40)
+[SI_bc_dqn_contract] trial  24 pruned at 3 hh     62.36/a  best    72.96  (24/40)
+[SI_bc_dqn_contract] trial  25 pruned at 3 hh     62.08/a  best    72.96  (25/40)
+[SI_dqn_contract] trial  19 pruned at 3 hh     45.16/a  best    68.74  (19/40)
+-- 104 min elapsed; ~1.2 h left, finishing ~01:14: SI_dqn_contract 19/40 best 68.7 | SI_bc_dqn_contract 25/40 best 73.0
+[SI_dqn_contract] trial  21 pruned at 3 hh     39.41/a  best    68.74  (20/40)
+[SI_bc_dqn_contract] trial  23 complete     67.53/a  best    72.96  (26/40)
+[SI_bc_dqn_contract] trial  26 pruned at 3 hh     61.75/a  best    72.96  (27/40)
+[SI_bc_dqn_contract] trial  27 pruned at 3 hh     62.29/a  best    72.96  (28/40)
+-- 114 min elapsed; ~1.1 h left, finishing ~01:17: SI_dqn_contract 20/40 best 68.7 | SI_bc_dqn_contract 28/40 best 73.0
+[SI_bc_dqn_contract] trial  28 pruned at 3 hh     62.99/a  best    72.96  (29/40)
+[SI_dqn_contract] trial  18 complete     64.62/a  best    68.74  (21/40)
+[SI_bc_dqn_contract] trial  29 pruned at 3 hh     62.26/a  best    72.96  (30/40)
+[SI_bc_dqn_contract] trial  30 pruned at 3 hh     62.99/a  best    72.96  (31/40)
+[SI_bc_dqn_contract] trial  31 pruned at 3 hh     60.62/a  best    72.96  (32/40)
+-- 125 min elapsed; ~0.9 h left, finishing ~01:16: SI_dqn_contract 21/40 best 68.7 | SI_bc_dqn_contract 32/40 best 73.0
+[SI_dqn_contract] trial  20 complete     66.57/a  best    68.74  (22/40)
+[SI_bc_dqn_contract] trial  32 pruned at 3 hh     63.10/a  best    72.96  (33/40)
+[SI_bc_dqn_contract] trial  33 pruned at 3 hh     60.42/a  best    72.96  (34/40)
+[SI_dqn_contract] trial  22 complete     64.55/a  best    68.74  (23/40)
+[SI_dqn_contract] trial  23 complete     59.81/a  best    68.74  (24/40)
+[SI_dqn_contract] trial  24 pruned at 3 hh     44.46/a  best    68.74  (25/40)
+[SI_dqn_contract] trial  25 pruned at 3 hh     48.68/a  best    68.74  (26/40)
+-- 135 min elapsed; ~0.7 h left, finishing ~01:14: SI_dqn_contract 26/40 best 68.7 | SI_bc_dqn_contract 34/40 best 73.0
+[SI_bc_dqn_contract] trial  34 complete     72.86/a  best    72.96  (35/40)
+[SI_dqn_contract] trial  27 pruned at 3 hh     46.26/a  best    68.74  (27/40)
+[SI_bc_dqn_contract] trial  35 complete     69.76/a  best    72.96  (36/40)
+-- 145 min elapsed; ~0.5 h left, finishing ~01:17: SI_dqn_contract 27/40 best 68.7 | SI_bc_dqn_contract 36/40 best 73.0
+[SI_bc_dqn_contract] trial  36 complete     70.66/a  best    72.96  (37/40)
+[SI_dqn_contract] trial  26 complete     63.82/a  best    68.74  (28/40)
+[SI_dqn_contract] trial  29 pruned at 3 hh     35.63/a  best    68.74  (29/40)
+[SI_bc_dqn_contract] trial  39 pruned at 3 hh     63.40/a  best    72.96  (38/40)
+[SI_dqn_contract] trial  28 complete     63.41/a  best    68.74  (30/40)
+-- 156 min elapsed; ~0.4 h left, finishing ~01:19: SI_dqn_contract 30/40 best 68.7 | SI_bc_dqn_contract 38/40 best 73.0
+[SI_dqn_contract] trial  32 pruned at 3 hh     49.31/a  best    68.74  (31/40)
+[SI_bc_dqn_contract] trial  38 complete     75.80/a  best    75.80  (39/40)
+[SI_bc_dqn_contract] trial  37 complete     70.77/a  best    75.80  (40/40)
+[SI_dqn_contract] trial  30 complete     65.05/a  best    68.74  (32/40)
+[SI_dqn_contract] trial  31 pruned at 3 hh     41.06/a  best    68.74  (33/40)
+-- 167 min elapsed; ~0.3 h left, finishing ~01:22: SI_dqn_contract 33/40 best 68.7 | SI_bc_dqn_contract 40/40 best 75.8
+[SI_dqn_contract] trial  33 complete     67.34/a  best    68.74  (34/40)
+[SI_dqn_contract] trial  35 pruned at 3 hh     51.04/a  best    68.74  (35/40)
+[SI_dqn_contract] trial  36 pruned at 3 hh     50.30/a  best    68.74  (36/40)
+[SI_dqn_contract] trial  37 pruned at 3 hh     44.29/a  best    68.74  (37/40)
+-- 177 min elapsed; ~0.1 h left, finishing ~01:22: SI_dqn_contract 37/40 best 68.7 | SI_bc_dqn_contract 40/40 best 75.8
+[SI_dqn_contract] trial  34 complete     63.72/a  best    68.74  (38/40)
+[SI_dqn_contract] trial  38 complete     62.56/a  best    68.74  (39/40)
+-- 188 min elapsed; ~0.0 h left, finishing ~01:28: SI_dqn_contract 39/40 best 68.7 | SI_bc_dqn_contract 40/40 best 75.8
+[SI_dqn_contract] trial  39 complete     64.58/a  best    68.74  (40/40)
+-- done in 189.7 min: SI_dqn_contract 40/40 best 68.7 | SI_bc_dqn_contract 40/40 best 75.8
+== stage 4: refine dqn / bc_dqn ==
+-- 11 min elapsed; ~0.5 h left, finishing ~02:11: SI_dqn_contract refine 46/96 | SI_bc_dqn_contract refine 45/96
+-- 22 min elapsed; ~0.4 h left, finishing ~02:14: SI_dqn_contract refine 55/96 | SI_bc_dqn_contract refine 62/96
+-- 32 min elapsed; ~0.2 h left, finishing ~02:15: SI_dqn_contract refine 73/96 | SI_bc_dqn_contract refine 76/96
+-- done in 41.1 min: SI_dqn_contract refine 96/96 | SI_bc_dqn_contract refine 96/96
+[SI_dqn_contract] winner: trial 12 (c27b2945d868c), 66.28/a vs incumbent 65.36/a (seed-averaged validation; Δ +0.92, p 0.945, 3/8 households better)
+[SI_bc_dqn_contract] winner: trial 38 (c5fa8b4694e16), 72.35/a vs incumbent 69.13/a (seed-averaged validation; Δ +3.23, p 0.461, 4/8 households better)
+== stage 5: confirm on the study households (test year) ==
+-- 10 min elapsed; ~2.0 h left, finishing ~04:17: SI_dqn_contract confirm 22/180 | SI_bc_dqn_contract confirm 28/180
+-- 21 min elapsed; ~1.7 h left, finishing ~04:13: SI_dqn_contract confirm 47/180 | SI_bc_dqn_contract confirm 51/180
+-- 31 min elapsed; ~1.4 h left, finishing ~04:03: SI_dqn_contract confirm 66/180 | SI_bc_dqn_contract confirm 70/180
+-- 41 min elapsed; ~1.0 h left, finishing ~03:53: SI_dqn_contract confirm 84/180 | SI_bc_dqn_contract confirm 87/180
+-- 51 min elapsed; ~0.8 h left, finishing ~03:50: SI_dqn_contract confirm 102/180 | SI_bc_dqn_contract confirm 105/180
+-- 62 min elapsed; ~0.6 h left, finishing ~03:48: SI_dqn_contract confirm 122/180 | SI_bc_dqn_contract confirm 123/180
+-- 72 min elapsed; ~0.4 h left, finishing ~03:47: SI_dqn_contract confirm 138/180 | SI_bc_dqn_contract confirm 142/180
+-- 82 min elapsed; ~0.2 h left, finishing ~03:46: SI_dqn_contract confirm 157/180 | SI_bc_dqn_contract confirm 159/180
+-- 92 min elapsed; ~0.1 h left, finishing ~03:46: SI_dqn_contract confirm 172/180 | SI_bc_dqn_contract confirm 175/180
+-- done in 96.8 min: SI_dqn_contract confirm 180/180 | SI_bc_dqn_contract confirm 180/180
+driver: not running
+             study  households  complete  pruned  failed  running  waiting  incumbent_val  best_val   winner  winner_delta_val  confirmed_rows
+SI_bc_dqn_contract           8        18      22       0        0        0          71.43     75.80 trial 38              3.23             180
+   SI_dqn_contract           8        27      13       0        0        0          67.65     68.74 trial 12              0.92             180
+
+SI_bc_dqn_contract: winner trial 38 -- validation 72.35/a vs incumbent 69.13/a, Δ +3.23 (p 0.461, 4/8 households)
+
+SI_dqn_contract: winner trial 12 -- validation 66.28/a vs incumbent 65.36/a, Δ +0.92 (p 0.945, 3/8 households)
+
+TEST YEAR, 30 study households, winner vs the panel's settings (gain = lower bill + wear per year, seed-averaged):
+             study tariff method  n  seeds    gain      lo     hi     p  n_better  efc_current  efc_winner  p_holm
+SI_bc_dqn_contract     SI bc_dqn 30      3   1.092  -3.261  4.717 0.064        19      107.799     110.368   0.064
+   SI_dqn_contract     SI    dqn 30      3 -10.247 -13.962 -6.493 0.000         6      155.876     138.961   0.000
+
+winners as TUNED entries (only fields that differ from the TrainConfig / BCOptions defaults; paste by hand, then re-run the panel):
+    ('SI', 'bc_dqn'): {'gamma': 0.998851, 'bc_reg': 0.651351, 'hidden': 64, 'clone_lr': 0.000307, 'clone_batch': 1024, 'clone_weight_decay': 1e-06, 'clone_class_power': 0.090696, 'clone_label_smoothing': 0.1, 'clone_patience': 20, 'lr': 0.000714, 'eps_decay_frac': 0.184117, 'reward_scale': 11.728632, 'bc_reg_decay_frac': 0.308622, 'bc_guide_prob': 0.521074, 'n_step': 1, 'batch': 64, 'weight': 1.980119},
+    ('SI', 'dqn'): {'gamma': 0.996636, 'n_step': 4, 'lr': 0.000111, 'hidden': 256, 'target_sync': 5000, 'update_every': 1, 'eps_end': 0.083375, 'eps_decay_frac': 0.215539, 'reward_scale': 64.911139, 'buffer': 400000, 'weight': 0.851902},
+ALL DONE (all, 327.6 min)

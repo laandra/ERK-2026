@@ -155,6 +155,33 @@ def _calendar(tariff: str) -> None:
     hs.TariffCalculator.LOCAL_TZ = None
 
 
+def build_bundle(tariff: str, df_kwh, df_kw, n_steps: int,
+                 contract: dict | None = None) -> dict:
+    """One environment with its rates, settlement and signals.
+
+    `contract` is passed to `hs.build_study_env` as keywords
+    (`contracted_power_kw=` / `agreed_power=`): the SI contract this bundle is
+    billed under. None is the study's own, which is what the panel trains and
+    scores on; `run_rl_contract` builds the other contract types through here
+    so that they differ from the panel's bundles in the contract and in
+    nothing else.
+    """
+    env = hs.align_envelope(
+        hs.build_study_env(df_kwh, battery_cap=BATTERY_CAP,
+                           soc_min_pct=SOC_MIN, soc_max_pct=SOC_MAX,
+                           p_max=P_MAX, eff=EFF, delta_t=DELTA_T, H=H,
+                           **(contract or {})),
+        P_MAX, EFF, DELTA_T)
+    rates = hs.build_rate_vectors(tariff, env, df_kw.index,
+                                  df_kw["SMP"].values,
+                                  int(round(DELTA_T * 60)))
+    settle = hs.build_settlement(tariff, env, rates, DELTA_T)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        sig = rbc.build_signals(env, n_steps=n_steps, rates=rates)
+    return {"env": env, "rates": rates, "settle": settle, "sig": sig}
+
+
 def prepare_household(ident, tariff: str) -> dict:
     """Everything one household needs, built once: train and sim bundles.
 
@@ -167,25 +194,11 @@ def prepare_household(ident, tariff: str) -> dict:
     frames = hs.load_study_frames(path, H=H, delta_t=DELTA_T, n_train=N_TRAIN,
                                   n_sim=N_SIM)
 
-    def _bundle(df_kwh, df_kw, n_steps):
-        env = hs.align_envelope(
-            hs.build_study_env(df_kwh, battery_cap=BATTERY_CAP,
-                               soc_min_pct=SOC_MIN, soc_max_pct=SOC_MAX,
-                               p_max=P_MAX, eff=EFF, delta_t=DELTA_T, H=H),
-            P_MAX, EFF, DELTA_T)
-        rates = hs.build_rate_vectors(tariff, env, df_kw.index,
-                                      df_kw["SMP"].values,
-                                      int(round(DELTA_T * 60)))
-        settle = hs.build_settlement(tariff, env, rates, DELTA_T)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            sig = rbc.build_signals(env, n_steps=n_steps, rates=rates)
-        return {"env": env, "rates": rates, "settle": settle, "sig": sig}
-
     df_all_kwh = frames["df_all_kwh"]
     df_train_kwh = df_all_kwh.iloc[: N_TRAIN * H]
-    train = _bundle(df_train_kwh, frames["df_train"], N_TRAIN * H)
-    sim = _bundle(frames["df_ctrl_kwh"], frames["df_ctrl"], N_SIM * H)
+    train = build_bundle(tariff, df_train_kwh, frames["df_train"], N_TRAIN * H)
+    sim = build_bundle(tariff, frames["df_ctrl_kwh"], frames["df_ctrl"],
+                       N_SIM * H)
 
     # The causal forecast, built over the WHOLE series once so the sim year's
     # first fortnight reads real history instead of a cold start.
@@ -201,8 +214,15 @@ def prepare_household(ident, tariff: str) -> dict:
     }
 
 
-def teacher_setpoints(prep) -> np.ndarray:
+def teacher_setpoints(prep, contract: dict | None = None,
+                      cache_tag: str | None = None) -> np.ndarray:
     """The whole-period MILP over `TEACH_SPAN`, cached as kWh.
+
+    `contract` / `cache_tag` solve it under another SI contract type
+    (`run_rl_contract`): the environment keywords of that contract, and the
+    directory its solve is cached under -- required together, because a solve
+    under one contract served from the cache of another is a teacher
+    demonstrating the wrong bill.
 
     Solved on its own environment over exactly that span -- the contract it
     decides for itself inside the LP is then the contract of a household whose
@@ -217,7 +237,12 @@ def teacher_setpoints(prep) -> np.ndarray:
     ident, tariff = prep["ident"], prep["tariff"]
     a, b = TEACH_SPAN
     assert b <= N_TRAIN, "the teacher must not see the scored year"
-    cache = os.path.join(MODELS, "teacher", tariff, f"d{a}-{b}", f"{ident}.npz")
+    if (contract is None) != (cache_tag is None):
+        raise ValueError("a teacher under another contract needs its own "
+                         "cache_tag, and a cache_tag needs a contract")
+    cache = os.path.join(MODELS, "teacher",
+                         tariff if cache_tag is None else f"{tariff}@{cache_tag}",
+                         f"d{a}-{b}", f"{ident}.npz")
     if os.path.exists(cache):
         return np.load(cache)["setpoints_kwh"]
 
@@ -226,7 +251,8 @@ def teacher_setpoints(prep) -> np.ndarray:
     env = hs.align_envelope(
         hs.build_study_env(df_teach_kwh, battery_cap=BATTERY_CAP,
                            soc_min_pct=SOC_MIN, soc_max_pct=SOC_MAX,
-                           p_max=P_MAX, eff=EFF, delta_t=DELTA_T, H=H),
+                           p_max=P_MAX, eff=EFF, delta_t=DELTA_T, H=H,
+                           **(contract or {})),
         P_MAX, EFF, DELTA_T)
     rates = hs.build_rate_vectors(tariff, env, df_teach_kwh.index,
                                   df_teach_kwh["SMP"].values,

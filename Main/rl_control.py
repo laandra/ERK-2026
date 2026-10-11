@@ -155,7 +155,13 @@ class FeatureSpec:
     published day-ahead prices; dropping it asks whether a tariff's signal is
     in its prices at all. `peak_features` carries the SI contract state --
     block, agreed power, headroom, running peak; dropping it on SI asks
-    whether the capacity charge can be learned blind.
+    whether the capacity charge can be learned blind. `contract_features`
+    carries the state the CONTRACT CHARGE turns on, which the peak features do
+    not: where the pool the next agreed power is read from already stands --
+    the k-th highest draw so far (`rl_reward.ContractTracker.threshold`), as a
+    distance from the line and from the house's own idle draw. A draw above it
+    raises the next contract; one below it is free. Without it an agent paid
+    for the standing charge is paid for something it cannot see.
     """
 
     horizon: int = 48
@@ -164,6 +170,7 @@ class FeatureSpec:
     price_features: bool = True
     peak_features: bool = False
     n_bins: int = 4
+    contract_features: bool = False
 
     def __post_init__(self):
         for ch in (self.load_channel, self.pv_channel):
@@ -171,13 +178,25 @@ class FeatureSpec:
                 raise ValueError(f"channel must be none|fc|truth, got {ch!r}")
         if self.horizon < 0:
             raise ValueError("horizon must be >= 0")
+        if self.contract_features and not self.peak_features:
+            raise ValueError("contract_features are measured against the "
+                             "agreed power, so they need peak_features")
 
     @property
     def causal(self) -> bool:
         return self.load_channel != "truth" and self.pv_channel != "truth"
 
     def config(self) -> dict:
-        return asdict(self)
+        # `contract_features` is listed only when it is on. This dict is
+        # digested into every result (`run_rl_benchmark.run_digest`), and a new
+        # key with its default would have reported the whole panel -- and every
+        # pooled and searched run behind it -- stale on the day the field was
+        # added, for a setting none of them uses. Same rule as
+        # `BCOptions.changed`.
+        out = asdict(self)
+        if not out["contract_features"]:
+            del out["contract_features"]
+        return out
 
 
 # Bin edges as fractions of the horizon: finer near now, coarser far out,
@@ -279,9 +298,20 @@ class FeatureBuilder:
     # -- dynamic -----------------------------------------------------------
     @property
     def n_dynamic(self) -> int:
+        if self.spec.contract_features:
+            return 4
         return 2 if self.spec.peak_features else 1
 
-    def dynamic(self, sig, idx, soc_kwh, peak_state) -> np.ndarray:
+    def dynamic(self, sig, idx, soc_kwh, peak_state, tau_kw=None) -> np.ndarray:
+        """SOC, and on SI the ratchet and contract state, at act time.
+
+        `tau_kw` is the contract threshold of this interval's block -- the
+        k-th highest draw in the pool the next agreed power will be read from
+        -- and is required exactly when the spec carries contract features.
+        The caller supplies it because only the caller knows the meter's past:
+        the training loop from its episode, the cloner from the teacher's
+        walk, `LearnedPolicy` from what `observe` has shown it.
+        """
         soc_norm = soc_kwh / max(sig.capacity_kwh, _EPS)
         if not self.spec.peak_features:
             return np.array([soc_norm], dtype=np.float32)
@@ -289,7 +319,18 @@ class FeatureBuilder:
         # Peak relative to the line: >0 means this month's charge is sunk up to
         # that level, which is exactly what `ratchet_aware` rules read.
         rel = float(peak_state.get(b, 0.0)) - float(sig.agreed_kw[idx])
-        return np.array([soc_norm, rel / 5.0], dtype=np.float32)
+        if not self.spec.contract_features:
+            return np.array([soc_norm, rel / 5.0], dtype=np.float32)
+        if tau_kw is None:
+            raise ValueError("the spec carries contract features but no "
+                             "contract threshold was supplied")
+        idle_kw = max(sig.consumption[idx] - sig.generation[idx], 0.0) / sig.hours
+        # The threshold against the line (has the pool already caught up with
+        # the contract in force?) and against the house's own draw with the
+        # battery idle (would doing nothing here raise the next contract?).
+        return np.array([soc_norm, rel / 5.0,
+                         (float(tau_kw) - float(sig.agreed_kw[idx])) / 5.0,
+                         (idle_kw - float(tau_kw)) / 5.0], dtype=np.float32)
 
     # -- normalisation -----------------------------------------------------
     def fit_norm(self, static: np.ndarray) -> None:
@@ -306,6 +347,34 @@ class FeatureBuilder:
         if self.norm_mean is None:
             raise RuntimeError("fit_norm was never called")
         return len(self.norm_mean) + self.n_dynamic
+
+    @property
+    def price_columns(self):
+        """Where the price features sit in the static matrix (empty without).
+
+        `build_static` puts them straight after the six calendar columns and
+        the meter's two: import rate, export credit, then the lookahead bins.
+        Named here for the same reason as `agreed_kw_column`.
+        """
+        if not self.spec.price_features:
+            return []
+        return list(range(8, 8 + 2 + len(_BIN_EDGES) - 1))
+
+    @property
+    def agreed_kw_column(self):
+        """Where the agreed power sits in the static matrix, or None.
+
+        `build_static` appends the three contract columns last -- block,
+        agreed kW, headroom -- so this is the second from the end. Named here
+        so that a caller who has to treat that column specially (a contract
+        that is a constant in training: `run_rl_contract`) does not count
+        columns of its own.
+        """
+        if not self.spec.peak_features:
+            return None
+        if self.norm_mean is None:
+            raise RuntimeError("fit_norm was never called")
+        return len(self.norm_mean) - 2
 
 
 # ---------------------------------------------------------------------------
@@ -706,8 +775,20 @@ def train_dqn(sig, settle, env, fb: FeatureBuilder, static_norm: np.ndarray,
               train_days: tuple, val_days: tuple,
               init_net: QNet | None = None, bc_net: QNet | None = None,
               soc_target: float | None = None, verbose: bool = True,
-              val_wear=None):
+              val_wear=None, reward_fn=None):
     """Double DQN on one household's training period.
+
+    `reward_fn` is WHAT THE AGENT IS PAID FOR, as an object from `rl_reward`
+    -- one per tariff and, on SI, per contract type. It supplies the
+    action-independent baseline, any charge the per-interval settlement does
+    not carry (the SI contract charge: what this interval's draw does to the
+    NEXT agreed power), the contract state the features read, and the
+    validation measure, which on a contract the agent moves must re-agree that
+    contract from the agent's own peaks. Left at None the loop is the one
+    every result before `rl_reward` was trained by -- the settled bill against
+    the no-battery bill, validated by `validation_rollout` -- operation for
+    operation, so those results keep their digests (`test_rl_reward` trains
+    both ways and compares the weights).
 
     `val_wear(efc, n_days) -> EUR`, when given, is added to every validation
     rollout's closed cost, so early stopping selects on the bill plus what the
@@ -735,7 +816,8 @@ def train_dqn(sig, settle, env, fb: FeatureBuilder, static_norm: np.ndarray,
     capacity = sig.capacity_kwh
     if soc_target is None:
         soc_target = 0.5 * capacity  # the study's SOC_FRACTION on the usable window
-    baseline = no_battery_cost_trace(sig, settle, env)
+    baseline = (no_battery_cost_trace(sig, settle, env) if reward_fn is None
+                else reward_fn.baseline())
 
     dim = static_norm.shape[1] + fb.n_dynamic
     # DEEP COPIES, both of them. `run_one` hands the same cloned network in as
@@ -798,6 +880,10 @@ def train_dqn(sig, settle, env, fb: FeatureBuilder, static_norm: np.ndarray,
         # January and cannot learn what to do holding one.
         soc = soc_target if rng.random() < 0.5 else float(rng.uniform(0, capacity))
         peak_state = seed_peak_state(env, idx0)
+        # The contract state of this episode: the pool its draws are priced
+        # into and the pool its features read. None on a tariff without one.
+        cstate = (None if reward_fn is None
+                  else reward_fn.start_episode(idx0, ep_steps))
         ep_return = 0.0
 
         # The n-step window, held inside the episode: a return may never span
@@ -834,7 +920,10 @@ def train_dqn(sig, settle, env, fb: FeatureBuilder, static_norm: np.ndarray,
             pending.popleft()
 
         obs = np.concatenate([static_norm[idx0],
-                              fb.dynamic(sig, idx0, soc, peak_state)])
+                              fb.dynamic(sig, idx0, soc, peak_state)
+                              if cstate is None else
+                              fb.dynamic(sig, idx0, soc, peak_state,
+                                         reward_fn.tau(cstate, idx0))])
         for k in range(ep_steps):
             idx = idx0 + k
             peak_state = _drop_on_boundary(peak_state, sig.windows, idx)
@@ -857,7 +946,9 @@ def train_dqn(sig, settle, env, fb: FeatureBuilder, static_norm: np.ndarray,
 
             p = float(np.clip(action_setpoint(a, sig, idx, lo, hi,
                                               peak_state, respect_peak), lo, hi))
-            cost, soc, peak_state, _ = walk.step(idx, soc, peak_state, p)
+            cost, soc, peak_state, net_kwh = walk.step(idx, soc, peak_state, p)
+            if cstate is not None:
+                cost += reward_fn.charge(cstate, idx, net_kwh)
             reward = baseline[idx] - cost
             done = k == ep_steps - 1
             if done:
@@ -869,7 +960,10 @@ def train_dqn(sig, settle, env, fb: FeatureBuilder, static_norm: np.ndarray,
 
             nxt_idx = min(idx + 1, sig.n_steps - 1)
             nxt = np.concatenate([static_norm[nxt_idx],
-                                  fb.dynamic(sig, nxt_idx, soc, peak_state)])
+                                  fb.dynamic(sig, nxt_idx, soc, peak_state)
+                                  if cstate is None else
+                                  fb.dynamic(sig, nxt_idx, soc, peak_state,
+                                             reward_fn.tau(cstate, nxt_idx))])
             pending.append((obs, a, reward * cfg.reward_scale, explored, nxt))
             if done:
                 while pending:                  # every tail return ends here
@@ -918,9 +1012,17 @@ def train_dqn(sig, settle, env, fb: FeatureBuilder, static_norm: np.ndarray,
 
             # -- validate --------------------------------------------------
             if step % cfg.eval_every == 0:
-                val = validation_rollout(net, fb, static_norm, sig, settle,
-                                         env, val_blocks, soc_target,
-                                         respect_peak)
+                if reward_fn is None:
+                    val = validation_rollout(net, fb, static_norm, sig, settle,
+                                             env, val_blocks, soc_target,
+                                             respect_peak)
+                else:
+                    # A reward that re-agrees the contract hands back the
+                    # signals and features under the contract now in force:
+                    # the agent goes on training against the line its own
+                    # peaks just set, which is the line it will be scored on.
+                    val, sig, static_norm = reward_fn.validate(net)
+                    walk.sig = sig
                 if val_wear is not None:
                     val["cost_eur_closed"] += float(val_wear(val["efc"], n_val_days))
                 history["val_step"].append(step)
@@ -1021,8 +1123,14 @@ def train_bc(sig, settle, env, fb: FeatureBuilder, static_norm: np.ndarray,
              setpoints_kwh: np.ndarray, start: int, stop: int,
              soc_init: float, respect_peak: bool, cfg: TrainConfig,
              verbose: bool = True, holdout_days=None,
-             opts: BCOptions | None = None):
+             opts: BCOptions | None = None, reward_fn=None):
     """Clone the MILP's action choices. Returns (net, history).
+
+    `reward_fn` (see `train_dqn`) is read for one thing here: the contract
+    threshold along the TEACHER's walk, for a spec with contract features. A
+    clone has no reward, but it has to be shown the state its teacher was
+    responding to, and on a contract the dispatch moves that state is where
+    the teacher's own peaks stand.
 
     `opts` is the clone's optimiser (`BCOptions`); None is the defaults, the
     settings every clone before the hyperparameter search was fitted with.
@@ -1053,9 +1161,14 @@ def train_bc(sig, settle, env, fb: FeatureBuilder, static_norm: np.ndarray,
         sig, settle, env, setpoints_kwh, start, stop, soc_init, respect_peak)
     n = stop - start
     X = np.zeros((n, static_norm.shape[1] + fb.n_dynamic), dtype=np.float32)
+    taus = (reward_fn.teacher_thresholds(setpoints_kwh, start, stop, soc_trace)
+            if fb.spec.contract_features else None)
     for j, idx in enumerate(range(start, stop)):
         X[j] = np.concatenate([static_norm[idx],
-                               fb.dynamic(sig, idx, soc_trace[j], peaks[j])])
+                               fb.dynamic(sig, idx, soc_trace[j], peaks[j])
+                               if taus is None else
+                               fb.dynamic(sig, idx, soc_trace[j], peaks[j],
+                                          taus[j])])
     y = labels
 
     # Hold out whole days, not random intervals: adjacent intervals are nearly
@@ -1157,7 +1270,8 @@ class LearnedPolicy(rbc.Policy):
 
     def __init__(self, net: QNet, fb: FeatureBuilder, respect_peak: bool,
                  load_fc=None, pv_fc=None, name: str = "rl_dqn",
-                 label: str = "RL: DQN", causal: bool = True):
+                 label: str = "RL: DQN", causal: bool = True,
+                 tracker_factory=None):
         self.net = net
         self.fb = fb
         self.respect_peak = bool(respect_peak)
@@ -1167,15 +1281,34 @@ class LearnedPolicy(rbc.Policy):
         self.label = label
         self.causal = bool(causal)
         self._static = None
+        # `tracker_factory(sig)` builds the contract tracker a spec with
+        # contract features reads its threshold from. It starts empty and is
+        # fed by `observe`, one metered interval at a time -- so the deployed
+        # agent knows where its contract pool stands exactly as a household's
+        # controller would: from its own meter, never from the future.
+        self.tracker_factory = tracker_factory
+        self._tracker = None
+        if fb.spec.contract_features and tracker_factory is None:
+            raise ValueError("a spec with contract features needs a "
+                             "tracker_factory")
 
     def reset(self, sig):
         static = self.fb.build_static(sig, load_fc=self.load_fc, pv_fc=self.pv_fc)
         self._static = self.fb.normalize(static)
+        self._tracker = (self.tracker_factory(sig)
+                         if self.fb.spec.contract_features else None)
         self.net.eval()
+
+    def observe(self, sig, idx, net_kwh, setpoint_kwh):
+        if self._tracker is not None:
+            self._tracker.push(idx, max(float(net_kwh), 0.0) / sig.hours)
 
     def setpoint(self, sig, idx, soc_kwh, lo, hi, peak_state):
         obs = np.concatenate([self._static[idx],
-                              self.fb.dynamic(sig, idx, soc_kwh, peak_state)])
+                              self.fb.dynamic(sig, idx, soc_kwh, peak_state)
+                              if self._tracker is None else
+                              self.fb.dynamic(sig, idx, soc_kwh, peak_state,
+                                              self._tracker.threshold_at(idx))])
         with torch.no_grad():
             a = int(self.net(torch.from_numpy(obs).unsqueeze(0))
                     .argmax(dim=1).item())

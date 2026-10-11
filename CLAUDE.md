@@ -129,12 +129,25 @@ Main/                    the study
   tune_rules.py          re-tune price-reading rules per tariff
   tune_fixed_schedule.py where FIXED_SCHEDULE_WINDOWS came from
   run_hbd_benchmark.py   resumable screen of the ported forecaster
+  rl_control.py          learned controllers as Policies: DQN, behaviour cloning of
+                         the MILP, and the clone fine-tuned by the DQN
+  rl_reward.py           what a learned controller is PAID for: one reward function
+                         per tariff and per SI contract type (the contract charge)
+  run_rl_benchmark.py    the learned panel: split, TUNED hyperparameters, one JSON
+                         per (tariff, variant, method, household)
+  run_rl_contract.py     learned controllers under each SI contract type -- price
+                         list (dynamic / active / single-tariff) and agreed-power
+                         rule (signed / monthly / rolling 12 months) -- cross-evaluated
+  rl_global.py, run_rl_global.py   pooled / localised models over the 300 households
+  rl_hpo.py, run_rl_hpo.py         hyperparameter search for the learners
   test_*.py              invariant checks (see Testing)
   CODE.ipynb             the notebook of record (all arms)
   CODE_PV_FORECAST.ipynb deployable arms: one method, both channels
   CODE_PV_PERFECT.ipynb  perfect roof on top of a real load model
   CODE_PV_VALUE.ipynb    the difference between the two — a measurement, not a ranking
   FIGURES_FORECAST.ipynb forecast-method figures + the anomaly story
+  FIGURES_RL*.ipynb      the learned controllers: panel, pooled models, search, and
+                         FIGURES_RL_CONTRACT (rewards and SI contract types)
 
 Clustering/              cluster_households.py + committed Ausgrid cluster CSVs
 Input data/              Ausgrid (300), Fluvius variants, GreekSmartHome, SMP (per
@@ -170,6 +183,16 @@ These are load-bearing. Breaking one makes two numbers in the paper incomparable
   `Cost_EUR_Closed` values a rule's shortfall so the comparison is fair.
 - **Causality.** Every controller except `price_oracle` (a deliberate diagnostic)
   uses only the past, the calendar and the day-ahead price.
+- **A reward is a property of the bill.** A learned controller is trained on the
+  reward of the tariff AND contract it is billed under (`rl_reward.REWARDS`): AU
+  has no capacity charge and is paid for energy alone; an SI contract the dispatch
+  re-agrees is also paid the contract charge. "Contract" on SI is two choices --
+  the supplier's PRICE LIST (`rl_reward.PRICE_TYPES`; `build_study_env(paket_id=)`)
+  and the AGREED-POWER rule (`CONTRACT_TYPES`) -- and every arm of the main study
+  runs one of each: GEN-I Dinamicni, re-agreed monthly. The reward is the training signal
+  only -- scoring is `run_policy`, whatever the reward was. Results trained before
+  `rl_reward` used the settled bill on both tariffs; `reward_fn=None` is that loop,
+  bit for bit, and `test_rl_reward` holds it there.
 
 ## Running things
 
@@ -211,6 +234,8 @@ failure.
 cd Main && python test_hems_study.py      # ~1 min, short slice, no sweep
 cd Main && python test_hbd_forecast.py
 cd Main && python test_pv_split.py
+cd Main && python test_rl_control.py && python test_rl_reward.py   # ~1 min each
+cd Main && python test_rl_global.py && python test_rl_hpo.py
 cd "New pricing functions" && python test_primer.py && python test_souporaba.py
 ```
 

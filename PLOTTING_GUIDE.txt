@@ -235,6 +235,9 @@ panel_grid(n, ncols=4, panel=(3.05, 2.5), sharex=True, sharey=False)
 key_legend(ax, handles, where="below", ncol=4)   placement only; you build the
                                                  handles, because what a colour
                                                  means is the study's semantics
+    below_in=0.5 drops a "below" legend half an inch under the axes instead of
+    16 % of the axes height. Use it on SHORT figures (`figsize(ratio<0.45)`),
+    where 16 % lands on the x label.
 edge_label(ax, y, text, side="right")            annotation pinned to an axes
                                                  edge, on a surface-coloured pad
 mix(a, b, t)                                     blend two hex colours
