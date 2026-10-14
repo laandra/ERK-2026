@@ -1,0 +1,104 @@
+{
+ "picked": {
+  "AU": "groups__h256",
+  "SI": "all_no_ar__h256"
+ },
+ "table": [
+  {
+   "tariff": "AU",
+   "model": "groups__h256",
+   "val_select": 211.1438329993941,
+   "gain_vs_control": 0.30520721878562257,
+   "better_on": 22,
+   "n": 30
+  },
+  {
+   "tariff": "AU",
+   "model": "groups__h64",
+   "val_select": 211.28066052219776,
+   "gain_vs_control": 0.16837969598199626,
+   "better_on": 16,
+   "n": 30
+  },
+  {
+   "tariff": "AU",
+   "model": "fc_h24__h64",
+   "val_select": 211.44904021817976,
+   "gain_vs_control": 0.0,
+   "better_on": 0,
+   "n": 30
+  },
+  {
+   "tariff": "AU",
+   "model": "all_no_ar__h64",
+   "val_select": 211.62273289651395,
+   "gain_vs_control": -0.17369267833416846,
+   "better_on": 19,
+   "n": 30
+  },
+  {
+   "tariff": "AU",
+   "model": "all_no_ar__h256",
+   "val_select": 211.98454602996978,
+   "gain_vs_control": -0.5355058117899785,
+   "better_on": 11,
+   "n": 30
+  },
+  {
+   "tariff": "AU",
+   "model": "fc_h24__h256",
+   "val_select": 212.00206376854106,
+   "gain_vs_control": -0.5530235503613258,
+   "better_on": 11,
+   "n": 30
+  },
+  {
+   "tariff": "SI",
+   "model": "all_no_ar__h256",
+   "val_select": 150.11580724599042,
+   "gain_vs_control": 2.2981990342119145,
+   "better_on": 25,
+   "n": 30
+  },
+  {
+   "tariff": "SI",
+   "model": "groups__h256",
+   "val_select": 150.7477691779137,
+   "gain_vs_control": 1.6662371022886118,
+   "better_on": 23,
+   "n": 30
+  },
+  {
+   "tariff": "SI",
+   "model": "all_no_ar__h64",
+   "val_select": 150.8744125339059,
+   "gain_vs_control": 1.5395937462964395,
+   "better_on": 23,
+   "n": 30
+  },
+  {
+   "tariff": "SI",
+   "model": "groups__h64",
+   "val_select": 151.54116869121827,
+   "gain_vs_control": 0.8728375889840702,
+   "better_on": 23,
+   "n": 30
+  },
+  {
+   "tariff": "SI",
+   "model": "fc_h24__h64",
+   "val_select": 152.4140062802023,
+   "gain_vs_control": 0.0,
+   "better_on": 0,
+   "n": 30
+  },
+  {
+   "tariff": "SI",
+   "model": "fc_h24__h256",
+   "val_select": 152.44501590481542,
+   "gain_vs_control": -0.03100962461306788,
+   "better_on": 15,
+   "n": 30
+  }
+ ]
+}

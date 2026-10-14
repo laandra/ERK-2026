@@ -1,0 +1,16 @@
+{
+ "ident": "179",
+ "tariff": "SI",
+ "variant": "fc_h24",
+ "hidden": 64,
+ "seed": 1,
+ "method": "bc",
+ "digest": "ee24feb258a33e66",
+ "val_cost_closed": 79.75626520099236,
+ "val_efc": 49.8551705,
+ "bc_val_agreement": 0.865643414556458,
+ "val_contract_net": 126.15789234238517,
+ "val_contract_bill": 83.41823318230041,
+ "val_contract_eur": 42.38170667217737,
+ "val_contract_efc": 49.56397880000001
+}

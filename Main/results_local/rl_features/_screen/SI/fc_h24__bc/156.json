@@ -1,0 +1,11 @@
+{
+ "ident": "156",
+ "tariff": "SI",
+ "variant": "fc_h24",
+ "method": "bc",
+ "digest": "72b3f40606ce4537",
+ "val_contract_net": 221.7482738814958,
+ "val_contract_bill": 158.1861972334965,
+ "val_contract_eur": 63.8137609909117,
+ "val_contract_efc": 72.83624225000001
+}

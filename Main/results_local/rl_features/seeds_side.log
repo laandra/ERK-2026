@@ -1,0 +1,16 @@
+seed 2: 0 of 360 run(s) cached
+seed 2: 360 run(s) over 60 household-tariff group(s) on 2 worker(s)
+  seed 2: 6/360 runs, 8 min elapsed, ~472 min left, ETA 13:06
+  seed 2: 12/360 runs, 8 min elapsed, ~241 min left, ETA 09:15
+  seed 2: 18/360 runs, 16 min elapsed, ~296 min left, ETA 10:17
+  seed 2: 24/360 runs, 16 min elapsed, ~224 min left, ETA 09:06
+  seed 2: 30/360 runs, 24 min elapsed, ~267 min left, ETA 09:58
+  seed 2: 36/360 runs, 25 min elapsed, ~221 min left, ETA 09:12
+/Users/summerscholl/Library/Python/3.14/lib/python/site-packages/joblib/externals/loky/backend/resource_tracker.py:359: UserWarning: resource_tracker: There appear to be 8 leaked semlock objects to clean up at shutdown
+  warnings.warn(
+/Users/summerscholl/Library/Python/3.14/lib/python/site-packages/joblib/externals/loky/backend/resource_tracker.py:359: UserWarning: resource_tracker: There appear to be 2 leaked folder objects to clean up at shutdown
+  warnings.warn(
+/Users/summerscholl/Library/Python/3.14/lib/python/site-packages/joblib/externals/loky/backend/resource_tracker.py:375: UserWarning: resource_tracker: /var/folders/39/ydgffyrd3m102wzr66n24xmr0000gr/T/joblib_memmapping_folder_79960_a4a51f36fd144881b224e9ae58d37ea3_336357fd877d4e6da3014c65e21f164b: FileNotFoundError(2, 'No such file or directory')
+  warnings.warn(f"resource_tracker: {name}: {e!r}")
+/Users/summerscholl/Library/Python/3.14/lib/python/site-packages/joblib/externals/loky/backend/resource_tracker.py:375: UserWarning: resource_tracker: /var/folders/39/ydgffyrd3m102wzr66n24xmr0000gr/T/joblib_memmapping_folder_79960_a4a51f36fd144881b224e9ae58d37ea3_22ded29098044e5d9a70a326fb63c093: FileNotFoundError(2, 'No such file or directory')
+  warnings.warn(f"resource_tracker: {name}: {e!r}")

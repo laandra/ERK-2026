@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import dataclasses
 import json
 import os
 import sys
@@ -144,9 +145,15 @@ def arms_for(contract: str) -> list:
     return ["excess"] if contract == "fixed" else ["excess", "contract"]
 
 
-def spec_for(arm: str) -> rl.FeatureSpec:
-    return rl.FeatureSpec(horizon=48, peak_features=True,
-                          contract_features=ARMS[arm]["contract_features"])
+def spec_for(arm: str, base: rl.FeatureSpec | None = None) -> rl.FeatureSpec:
+    """The arm's observation: the panel's `fc_h24`, or `base` -- a wider
+    contract of the feature study (`run_rl_features`) -- with the arm's own
+    contract features switched on or off."""
+    if base is None:
+        return rl.FeatureSpec(horizon=48, peak_features=True,
+                              contract_features=ARMS[arm]["contract_features"])
+    return dataclasses.replace(
+        base, contract_features=ARMS[arm]["contract_features"])
 
 
 def study_ids() -> list:
@@ -258,9 +265,8 @@ def score(bundle, policy, n_steps: int) -> dict:
 
 
 def learned_policy(net, fb, window, prep, which: str, name: str = "learned"):
-    fc = prep["fc_train"] if which == "train" else prep["fc_sim"]
     return rl.LearnedPolicy(
-        net, fb, True, load_fc=fc[0], pv_fc=fc[1], name=name,
+        net, fb, True, name=name, **rb.feature_inputs(prep, fb.spec, which),
         tracker_factory=rr.tracker_factory(
             window if fb.spec.contract_features else None))
 
@@ -338,8 +344,11 @@ _REWARD_KEYS = ("weight", "self_consistent", "pricing")
 CONTRACT_TUNED: dict = {}
 
 
-def run_config(contract, arm, method, cfg, overrides=None):
+def run_config(contract, arm, method, cfg, overrides=None, base=None):
     """(TrainConfig, BCOptions, ContractOptions, spec) for one run.
+
+    `base` is the observation the arm's contract features are added to
+    (`spec_for`); None is the panel's.
 
     `overrides` are laid OVER the panel's TUNED settings, in the three places
     a key can belong: `weight` / `self_consistent` / `pricing` are the
@@ -366,16 +375,18 @@ def run_config(contract, arm, method, cfg, overrides=None):
             raise AttributeError(f"TrainConfig has no field {k!r}")
         setattr(cfg, k, v)
     options = rr.ContractOptions(**{k: over[k] for k in _REWARD_KEYS if k in over})
-    return cfg, clone, options, spec_for(arm)
+    return cfg, clone, options, spec_for(arm, base)
 
 
-def run_digest(contract, arm, method, cfg, overrides=None) -> str:
-    cfg_e, clone, options, spec = run_config(contract, arm, method, cfg, overrides)
+def run_digest(contract, arm, method, cfg, overrides=None, base=None) -> str:
+    cfg_e, clone, options, spec = run_config(contract, arm, method, cfg,
+                                             overrides, base)
     version = {"bc": (rl.BC_ALGO_VERSION,), "dqn": (rl.ALGO_VERSION,),
                "bc_dqn": (rl.BC_ALGO_VERSION, rl.ALGO_VERSION)}[method]
     reward = ({"reward": "contract", "version": rr.REWARD_VERSION,
                **options.config()} if arm == "contract" else {"reward": "excess"})
-    if contract == "monthly" and arm == "excess" and overrides is None:
+    if (contract == "monthly" and arm == "excess" and overrides is None
+            and base is None):
         # This cell is the PANEL's model re-scored, so it is as current as the
         # panel is: retrain the panel and this goes stale with it.
         reward["panel"] = rb.run_digest(cfg, rb.variant_specs(TARIFF)[VARIANT],
@@ -416,9 +427,9 @@ def _measure(prep, net, fb, window, contract) -> dict:
     train = prep["train"]
     n_val_days = sum(b - a for a, b in rb.VAL_BLOCKS)
     wear = rb.val_wear_fn(TARIFF)
+    inputs = rb.feature_inputs(prep, fb.spec, "train")
     if contract == "fixed":
-        static = fb.normalize(fb.build_static(
-            train["sig"], load_fc=prep["fc_train"][0], pv_fc=prep["fc_train"][1]))
+        static = fb.normalize(fb.build_static(train["sig"], **inputs))
         v = rl.validation_rollout(net, fb, static, train["sig"], train["settle"],
                                   train["env"], rb.VAL_BLOCKS,
                                   rb.SOC_INIT_USABLE, True)
@@ -426,8 +437,7 @@ def _measure(prep, net, fb, window, contract) -> dict:
     else:
         cls = rr.reward_class(TARIFF, contract)
         meter = cls(train, fb, None, val_blocks=rb.VAL_BLOCKS,
-                    soc_init=rb.SOC_INIT_USABLE, respect_peak=True,
-                    load_fc=prep["fc_train"][0], pv_fc=prep["fc_train"][1])
+                    soc_init=rb.SOC_INIT_USABLE, respect_peak=True, **inputs)
         # The pool the MODEL's features read is the model's own, not the
         # contract's it is being measured under.
         meter.tracker_factory = lambda: rr.tracker_factory(
@@ -440,8 +450,12 @@ def _measure(prep, net, fb, window, contract) -> dict:
 
 def run_one(prep, arm: str, method: str, cfg, verbose: bool = True,
             out_root: str = OUT, models_root: str = MODELS,
-            score_test: bool = True, overrides: dict | None = None) -> dict:
+            score_test: bool = True, overrides: dict | None = None,
+            base: rl.FeatureSpec | None = None) -> dict:
     """Train one (arm, method) on `prep`'s contract type; score the test year.
+
+    `base` trains the arm under a wider observation (`spec_for`); the prep
+    must then carry what that observation reads (`rb.feature_inputs`).
 
     `monthly`/`excess` is the panel: its stored model is loaded and re-scored
     (and checked against the panel's own stored bill) instead of being trained
@@ -449,7 +463,7 @@ def run_one(prep, arm: str, method: str, cfg, verbose: bool = True,
     """
     ident, contract = prep["ident"], prep["contract"]
     path = _result_path(contract, arm, method, ident, out_root)
-    digest = run_digest(contract, arm, method, cfg, overrides)
+    digest = run_digest(contract, arm, method, cfg, overrides, base)
     if os.path.exists(path):
         with open(path, encoding="utf-8") as fh:
             existing = json.load(fh)
@@ -458,11 +472,13 @@ def run_one(prep, arm: str, method: str, cfg, verbose: bool = True,
         print(f"  [stale] {contract}/{arm}__{method}/{ident}: recomputing")
 
     t0 = time.time()
-    cfg_e, clone, options, spec = run_config(contract, arm, method, cfg, overrides)
+    cfg_e, clone, options, spec = run_config(contract, arm, method, cfg,
+                                             overrides, base)
     train = prep["train"]
     train["env"].clear_achieved_power()
     window = rr.CONTRACT_WINDOW[contract] if arm == "contract" else None
-    panel = contract == "monthly" and arm == "excess" and overrides is None
+    panel = (contract == "monthly" and arm == "excess" and overrides is None
+             and base is None)
     hist_bc = hist_dqn = None
 
     if panel:
@@ -473,8 +489,8 @@ def run_one(prep, arm: str, method: str, cfg, verbose: bool = True,
             stored = json.load(fh)
     else:
         fb = rl.FeatureBuilder(spec)
-        static = fb.build_static(train["sig"], load_fc=prep["fc_train"][0],
-                                 pv_fc=prep["fc_train"][1])
+        inputs = rb.feature_inputs(prep, spec, "train")
+        static = fb.build_static(train["sig"], **inputs)
         # Normalisation from the TRAINING blocks only, as in the panel.
         rows = np.concatenate([np.arange(a * H, b * H) for a, b in rb.TRAIN_BLOCKS])
         fb.fit_norm(static[rows])
@@ -487,8 +503,7 @@ def run_one(prep, arm: str, method: str, cfg, verbose: bool = True,
                 fb.norm_std[col] = max(float(fb.norm_std[col]),
                                        PRICE_SCALE[contract])
         common = dict(val_blocks=rb.VAL_BLOCKS, soc_init=rb.SOC_INIT_USABLE,
-                      respect_peak=True, load_fc=prep["fc_train"][0],
-                      pv_fc=prep["fc_train"][1])
+                      respect_peak=True, **inputs)
         if arm == "contract":
             reward = rr.reward_class(TARIFF, contract)(
                 train, fb, fb.normalize(static), options=options, **common)

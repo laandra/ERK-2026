@@ -519,6 +519,137 @@ def test_wear_reaches_the_objective(kwh, kw):
           f"{cycled[0.0]:.3f} kWh charged unpriced, {cycled[5.0]:.3f} kWh at 5 EUR/EFC")
 
 
+def test_persistent_model_solves_the_rebuilt_model(kwh, kw):
+    """The kept, warm-started HiGHS model must solve the model a rebuild does.
+
+    The MPC used to assemble its model again for every one of 17,520 steps. It
+    now builds each horizon shape once, re-points it at the step's data
+    (`hs._HorizonModel`, `MILP_Household.household_data_bounds`) and continues
+    from the basis the step before left. What that is allowed to change, and
+    what it is not:
+
+      the optimum    NOT. Every solve must reach the rebuilt model's objective.
+                     Audited on every solve here, on a schedule in a sweep.
+      the plan       may. A warm start can return another of several tied
+                     optima, so the executed year is not the rebuilt year --
+                     measured, and the reason the sweep was re-run under
+                     `hs.SOLVER_TAG` (see the note above PERSISTENT_AUDIT_EVERY).
+      the binary     NOT. A MIP has no basis to continue from; those solves are
+      branch         cold and must return the rebuilt plan to the bit.
+      determinism    NOT. The same run twice is the same frame.
+      history        NOT. A run must not depend on what its scheduler solved
+                     before it: the forecast arm and the oracle share one, and
+                     the oracle cache serves one arm's oracle to all of them.
+    """
+    forecast = hs.TruthForecaster(kw.shift(3).bfill(), H)   # wrong on purpose
+    days = len(kwh) // H - 1
+
+    def controller(tariff, horizon=H, wear=None, leak=False, negative=False,
+                   persistent=True):
+        env = hs.align_envelope(
+            hs.build_study_env(kwh, delta_t=DELTA_T, H=H,
+                               cycle_cost_eur_per_efc=wear, **BATTERY),
+            BATTERY["p_max"], BATTERY["eff"], DELTA_T)
+        rates = hs.build_rate_vectors(tariff, env, kwh.index, kwh["SMP"].values, 30)
+        buy = np.array(rates[0], dtype=float)
+        # The slice's own negative interval is lifted, so a case is on the LP
+        # or on the binaries because it says so and not by accident of the data.
+        buy = np.where(buy <= 0.0, 1e-4, buy)
+        if negative:
+            buy[7::H] = -0.05       # one a day: every horizon then holds one
+        sched = hs.UpstreamMILPScheduler(
+            env, delta_t=DELTA_T, parity=False, exclusivity="auto",
+            allow_spill=False, metering_bounds=True, persistent=persistent,
+            **BATTERY)
+        return hs.ReactiveController(
+            scheduler=sched, forecaster=forecast, real_data=kw, soc_init=5.0,
+            horizon_steps=horizon, steps_per_day=H, reoptimize_every=1,
+            freq="30min", rate_vectors=(buy, rates[1], rates[2]),
+            leak_current_interval=leak)
+
+    every = hs.PERSISTENT_AUDIT_EVERY
+    hs.PERSISTENT_AUDIT_EVERY = 1          # audit every solve, not a sample
+    try:
+        for tariff in ("AU", "SI"):
+            for label, kw_args, use_forecast in [
+                    ("oracle, 24 h", {}, False),
+                    ("forecast, 11 h", {"horizon": 22}, True),
+                    ("forecast, wear price, leaked step",
+                     {"wear": 0.417, "leak": True}, True)]:
+                ctrl = controller(tariff, **kw_args)
+                frame = ctrl.run(num_days=days, use_forecast=use_forecast)
+                sched = ctrl.sched
+                again = controller(tariff, **kw_args).run(
+                    num_days=days, use_forecast=use_forecast)
+                check(f"warm-started model reaches the rebuilt optimum: {tariff}, {label}",
+                      sched.n_audits == sched.n_persistent_solves == len(frame)
+                      and sched.max_objective_gap < 1e-9,
+                      f"{sched.n_audits} solves audited, largest objective gap "
+                      f"{sched.max_objective_gap:.1e}")
+                check(f"warm-started run is reproducible: {tariff}, {label}",
+                      frame.equals(again), f"{len(frame)} steps, run twice")
+
+            # The binaries: cold, and the rebuilt plan exactly.
+            kept = controller(tariff, negative=True)
+            a = kept.run(num_days=days, use_forecast=False)
+            b = controller(tariff, negative=True, persistent=False).run(
+                num_days=days, use_forecast=False)
+            check(f"binary branch == rebuilt model, to the bit: {tariff}",
+                  a.equals(b) and kept.sched.n_binary_solves == len(a),
+                  f"{len(a)} steps, all on the binary branch")
+
+            # History: the oracle after a forecast run on the SAME scheduler
+            # must be the oracle a scheduler that never solved anything gives.
+            shared = controller(tariff)
+            shared.run(num_days=days, use_forecast=True)
+            after = shared.run(num_days=days, use_forecast=False)
+            alone = controller(tariff).run(num_days=days, use_forecast=False)
+            check(f"a run does not inherit the scheduler's last basis: {tariff}",
+                  after.equals(alone), f"{len(after)} oracle steps")
+    finally:
+        hs.PERSISTENT_AUDIT_EVERY = every
+
+
+def test_data_bounds_are_what_the_builder_writes(kwh):
+    """`household_data_bounds` must restate `add_household_physics` exactly.
+
+    The two say the same thing twice -- once as constraints, once as the
+    numbers a built block is re-pointed with -- and nothing but this holds them
+    together. Compared on pulp's own reading of the built rows, for data the
+    block was NOT built from, with and without the metering bounds.
+    """
+    import pulp
+    from MILP_Household import (add_household_physics, household_data_bounds,
+                                household_data_rows)
+    env = make_env(kwh)
+    gen = kwh["Energy_Generation"].to_numpy()
+    con = kwh["Energy_Consumption"].to_numpy()
+    for metering in (True, False):
+        built = {}
+        for day, (soc0, soc1) in enumerate([(1.0, 1.0), (6.5, 0.25)]):
+            a, b = day * H, (day + 1) * H
+            prob = pulp.LpProblem("x", pulp.LpMinimize)
+            blk = add_household_physics(
+                prob, env, n_steps=H, gen=gen[a:b].tolist(), con=con[a:b].tolist(),
+                initial_soc_kwh=soc0, final_soc_kwh=soc1,
+                exclusivity="inverter", metering_bounds=metering)
+            built[day] = (blk, (a, b, soc0, soc1))
+        blk0 = built[0][0]
+        blk1, (a, b, soc0, soc1) = built[1]
+        lower, upper, spill = household_data_bounds(
+            blk0, gen=gen[a:b], con=con[a:b],
+            initial_soc_kwh=soc0, final_soc_kwh=soc1)
+        inf = float("inf")
+        want_lo = [(-inf if c.getLb() is None else c.getLb())
+                   for c in household_data_rows(blk1)]
+        want_up = [(inf if c.getUb() is None else c.getUb())
+                   for c in household_data_rows(blk1)]
+        check(f"data bounds == the builder's rows (metering_bounds={metering})",
+              np.array_equal(lower, want_lo) and np.array_equal(upper, want_up)
+              and np.array_equal(spill, [v.upBound for v in blk1.spill]),
+              f"{len(lower)} rows, {len(spill)} spill bounds, for another day's data")
+
+
 def test_full_period_is_a_bound(kwh):
     """F13. The whole-period solve must be below everything it is the bound for.
 
@@ -847,6 +978,8 @@ if __name__ == "__main__":
     test_tuned_parameters_reach_the_rules(kwh)
     test_discharge_window_is_live(kwh)
     test_wear_reaches_the_objective(kwh, kw)
+    test_persistent_model_solves_the_rebuilt_model(kwh, kw)
+    test_data_bounds_are_what_the_builder_writes(kwh)
     test_full_period_is_a_bound(kwh)
     test_accounting_rate_survives_a_zero_dispatch_rate()
     test_a_rule_has_no_objective_to_price()

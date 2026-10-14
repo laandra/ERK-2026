@@ -1,0 +1,12 @@
+{
+ "ident": "142",
+ "tariff": "AU",
+ "variant": "rel",
+ "hidden": 64,
+ "seed": 0,
+ "method": "bc",
+ "digest": "58d4ee768e1410f5",
+ "val_cost_closed": 119.12184623603659,
+ "val_efc": 80.93489225,
+ "bc_val_agreement": 0.8804696209587514
+}

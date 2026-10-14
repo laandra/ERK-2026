@@ -94,7 +94,8 @@ pf.show(fig, "cost_vs_capacity")
 Basic_Functions.py       battery physics helpers shared by env, MILP and rules
 Environment.py           HouseholdEnvironment (gymnasium) + CommunityEnvironment;
                          agreed-power machinery (converge_agreed_power, ...)
-MILP_Household.py        the LP: add_household_physics, add_excess_power_ratchet,
+MILP_Household.py        the LP: add_household_physics (+ household_data_bounds, the
+                         same block re-pointed at new data), add_excess_power_ratchet,
                          add_endogenous_agreed_power, solve_household;
                          build_household_env is THE env factory; battery/solver
                          constants (STEPS_PER_DAY, C_RATE, ...) live here
@@ -138,6 +139,12 @@ Main/                    the study
   run_rl_contract.py     learned controllers under each SI contract type -- price
                          list (dynamic / active / single-tariff) and agreed-power
                          rule (signed / monthly / rolling 12 months) -- cross-evaluated
+  rl_features.py         what a learned controller may be SHOWN beyond the panel's
+                         `fc_h24`: named input groups (price rank, forecast net
+                         load, meter history, working-day calendar, SI peak outlook)
+  run_rl_features.py     the wider-input study: every input alone and together,
+                         chosen on VALIDATION, scored once; local learners and
+                         the pooled clone
   rl_global.py, run_rl_global.py   pooled / localised models over the 300 households
   rl_hpo.py, run_rl_hpo.py         hyperparameter search for the learners
   test_*.py              invariant checks (see Testing)
@@ -146,8 +153,9 @@ Main/                    the study
   CODE_PV_PERFECT.ipynb  perfect roof on top of a real load model
   CODE_PV_VALUE.ipynb    the difference between the two — a measurement, not a ranking
   FIGURES_FORECAST.ipynb forecast-method figures + the anomaly story
-  FIGURES_RL*.ipynb      the learned controllers: panel, pooled models, search, and
-                         FIGURES_RL_CONTRACT (rewards and SI contract types)
+  FIGURES_RL*.ipynb      the learned controllers: panel, pooled models, search,
+                         FIGURES_RL_CONTRACT (rewards and SI contract types) and
+                         FIGURES_RL_FEATURES (what more input buys)
 
 Clustering/              cluster_households.py + committed Ausgrid cluster CSVs
 Input data/              Ausgrid (300), Fluvius variants, GreekSmartHome, SMP (per
@@ -168,6 +176,21 @@ These are load-bearing. Breaking one makes two numbers in the paper incomparable
 - **One env factory.** `MILP_Household.build_household_env`. Nothing about a
   particular study is defaulted there; each study passes its own price list,
   capacity and agreed-power rule.
+- **One MPC model, built once, warm-started.** `UpstreamMILPScheduler` keeps one
+  HiGHS instance per horizon shape, re-points it at each step's data
+  (`MILP_Household.household_data_bounds`) and continues from the previous
+  step's basis instead of rebuilding it 17,520 times a household-year. It is the
+  model `add_household_physics` builds and every solve reaches that model's
+  optimum -- but on a tied horizon it may be ANOTHER optimum than a cold solve
+  returns, so a warm-started year is not the cold year (measured: bills move by
+  cents, rankings and paired tests do not; the note above
+  `hs.PERSISTENT_AUDIT_EVERY` has the numbers). `hs.SOLVER_TAG` in the checkpoint
+  says which vintage a run is. Three things keep it honest: a run never inherits
+  a basis (`ReactiveController.run` calls `scheduler.reset()`, or the oracle would
+  depend on the arm that ran before it), the binary branch stays cold, and the
+  scheduler audits itself against the rebuild path (`persistent=False`) and
+  raises. A data-carrying row added to the builder but not to
+  `household_data_bounds` is what that audit is for.
 - **One battery.** Physical constants in `MILP_Household`, economics in
   `Battery_Economics`, so two studies cannot quietly price the same pack differently.
 - **Physics vs. nameplate.** `battery_capacity_kwh` is the usable window everything
@@ -193,6 +216,33 @@ These are load-bearing. Breaking one makes two numbers in the paper incomparable
   only -- scoring is `run_policy`, whatever the reward was. Results trained before
   `rl_reward` used the settled bill on both tariffs; `reward_fn=None` is that loop,
   bit for bit, and `test_rl_reward` holds it there.
+- **An observation is a `FeatureSpec`, and a new input is a field of it.** What a
+  learned controller sees is digested into every result, so a new input enters as
+  a spec field that is left OUT of `FeatureSpec.config()` at its default
+  (`contract_features`, `forecast`, `groups`) -- otherwise every result on disk
+  goes stale for a setting none of them uses. Inputs that read the household's
+  past take it through `rl_features.Context` (the whole series plus the bundle's
+  offset), never from the bundle alone: the scored year must not open on a cold
+  start. The choice of inputs is made on the validation weeks
+  (`run_rl_features select`); the test year is read once, after it.
+- **The learned controllers of the study run the WIDE contract.**
+  `run_rl_benchmark.WIDE_VARIANT` (`wide_h24`: every `rl_features` group, the AR
+  forecast re-issued every interval, prices against the trailing week) is what
+  `hs.LEARNED_CONTROLLERS` joins onto the study frame and what `FIGURES_RL` and
+  `CODE.ipynb` show. `fc_h24` and its ablations stay as the value-of-information
+  family; the pooled and contract studies still read `fc_h24` by name
+  (`hs.FIRST_LEARNED_CONTROLLERS`).
+- **Tuned settings belong to the contract they were searched under.** `TUNED`
+  (searched under `fc_h24`) is what every contract trains with unless
+  `run_rl_benchmark.VARIANT_TUNED[<variant>]` has an entry for that (tariff,
+  method). Never paste a winner found under another contract into `TUNED`: it
+  re-keys every result of every contract. A search under another contract is
+  `rl_hpo` with `ERK_HPO_VARIANT` / `ERK_HPO_ROOT` set (see
+  `results_local/rl_hpo_wide/run.sh`).
+- **A choice about robustness is made on shifted validation.** The held-out weeks
+  share the training years' price level; the scored year sits 19 % (AU) / 32 %
+  (SI) above it. `run_rl_benchmark.shifted_bundle` is those weeks at the scored
+  year's level; `ERK_HPO_OBJECTIVE=shift` ranks trials on both.
 
 ## Running things
 
@@ -236,6 +286,7 @@ cd Main && python test_hbd_forecast.py
 cd Main && python test_pv_split.py
 cd Main && python test_rl_control.py && python test_rl_reward.py   # ~1 min each
 cd Main && python test_rl_global.py && python test_rl_hpo.py
+cd Main && python test_rl_features.py
 cd "New pricing functions" && python test_primer.py && python test_souporaba.py
 ```
 

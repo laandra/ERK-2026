@@ -1,0 +1,11 @@
+{
+ "ident": "21",
+ "tariff": "SI",
+ "variant": "fc_h24",
+ "method": "dqn",
+ "digest": "f80b5ad014648c14",
+ "val_contract_net": 369.9072555138233,
+ "val_contract_bill": 265.85303370720146,
+ "val_contract_eur": 103.84971954834737,
+ "val_contract_efc": 80.2705814
+}

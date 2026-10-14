@@ -1,0 +1,128 @@
+contract: 270 of 450 run(s) cached
+contract: 180 run(s) over 30 household(s) on 12 worker(s)
+  contract: 6/180 runs, 22 min elapsed, ~637 min left, ETA 14:20
+  contract: 12/180 runs, 23 min elapsed, ~320 min left, ETA 09:04
+  contract: 18/180 runs, 24 min elapsed, ~215 min left, ETA 07:21
+  contract: 24/180 runs, 24 min elapsed, ~156 min left, ETA 06:22
+  contract: 30/180 runs, 25 min elapsed, ~123 min left, ETA 05:49
+  contract: 36/180 runs, 25 min elapsed, ~99 min left, ETA 05:26
+  contract: 42/180 runs, 25 min elapsed, ~82 min left, ETA 05:08
+  contract: 48/180 runs, 25 min elapsed, ~70 min left, ETA 04:57
+  contract: 54/180 runs, 26 min elapsed, ~61 min left, ETA 04:48
+  contract: 60/180 runs, 26 min elapsed, ~52 min left, ETA 04:40
+  contract: 66/180 runs, 27 min elapsed, ~46 min left, ETA 04:35
+  contract: 72/180 runs, 27 min elapsed, ~40 min left, ETA 04:29
+  contract: 78/180 runs, 45 min elapsed, ~59 min left, ETA 05:06
+  contract: 84/180 runs, 48 min elapsed, ~54 min left, ETA 05:04
+  contract: 90/180 runs, 50 min elapsed, ~50 min left, ETA 05:01
+  contract: 96/180 runs, 50 min elapsed, ~44 min left, ETA 04:55
+  contract: 102/180 runs, 50 min elapsed, ~38 min left, ETA 04:50
+  contract: 108/180 runs, 51 min elapsed, ~34 min left, ETA 04:46
+  contract: 114/180 runs, 53 min elapsed, ~31 min left, ETA 04:46
+  contract: 120/180 runs, 53 min elapsed, ~27 min left, ETA 04:42
+  contract: 126/180 runs, 54 min elapsed, ~23 min left, ETA 04:38
+  contract: 132/180 runs, 54 min elapsed, ~20 min left, ETA 04:35
+  contract: 138/180 runs, 54 min elapsed, ~16 min left, ETA 04:32
+  contract: 144/180 runs, 55 min elapsed, ~14 min left, ETA 04:31
+  contract: 150/180 runs, 67 min elapsed, ~13 min left, ETA 04:42
+  contract: 156/180 runs, 69 min elapsed, ~11 min left, ETA 04:41
+  contract: 162/180 runs, 70 min elapsed, ~8 min left, ETA 04:39
+  contract: 168/180 runs, 70 min elapsed, ~5 min left, ETA 04:36
+  contract: 174/180 runs, 71 min elapsed, ~2 min left, ETA 04:35
+  contract: 180/180 runs, 72 min elapsed, ~0 min left, ETA 04:33
+contract: 17 unsettled reinforcement run(s) at 1,000,000 steps
+contract retrain: 17 run(s) over 15 household(s) on 12 worker(s)
+  contract retrain: 1/17 runs, 5 min elapsed, ~74 min left, ETA 05:52
+  contract retrain: 2/17 runs, 5 min elapsed, ~37 min left, ETA 05:15
+  contract retrain: 3/17 runs, 5 min elapsed, ~24 min left, ETA 05:02
+  contract retrain: 4/17 runs, 5 min elapsed, ~17 min left, ETA 04:56
+  contract retrain: 5/17 runs, 5 min elapsed, ~13 min left, ETA 04:51
+  contract retrain: 6/17 runs, 6 min elapsed, ~11 min left, ETA 04:50
+  contract retrain: 7/17 runs, 6 min elapsed, ~9 min left, ETA 04:48
+  contract retrain: 8/17 runs, 6 min elapsed, ~7 min left, ETA 04:47
+  contract retrain: 9/17 runs, 7 min elapsed, ~6 min left, ETA 04:46
+  contract retrain: 10/17 runs, 7 min elapsed, ~5 min left, ETA 04:45
+  contract retrain: 11/17 runs, 8 min elapsed, ~4 min left, ETA 04:46
+  contract retrain: 13/17 runs, 10 min elapsed, ~3 min left, ETA 04:46
+  contract retrain: 14/17 runs, 10 min elapsed, ~2 min left, ETA 04:45
+  [stale] monthly/contract__dqn/21: recomputing
+  [stale] monthly/contract__dqn/1: recomputing
+  [stale] monthly/contract__dqn/179: recomputing
+  contract retrain: 16/17 runs, 11 min elapsed, ~1 min left, ETA 04:45
+  [stale] monthly/contract__dqn/142: recomputing
+  [stale] monthly/contract__dqn/290: recomputing
+  [stale] monthly/contract__dqn/81: recomputing
+  contract retrain: 17/17 runs, 12 min elapsed, ~0 min left, ETA 04:45
+contract score: 180 run(s) over 30 household(s) on 12 worker(s)
+  contract score: 6/180 runs, 1 min elapsed, ~23 min left, ETA 05:10
+  contract score: 12/180 runs, 1 min elapsed, ~12 min left, ETA 04:58
+  contract score: 18/180 runs, 1 min elapsed, ~8 min left, ETA 04:54
+  contract score: 24/180 runs, 1 min elapsed, ~6 min left, ETA 04:52
+  contract score: 30/180 runs, 1 min elapsed, ~5 min left, ETA 04:51
+  contract score: 36/180 runs, 1 min elapsed, ~4 min left, ETA 04:50
+  contract score: 42/180 runs, 1 min elapsed, ~3 min left, ETA 04:50
+  contract score: 48/180 runs, 1 min elapsed, ~3 min left, ETA 04:49
+  contract score: 54/180 runs, 1 min elapsed, ~3 min left, ETA 04:49
+  contract score: 60/180 runs, 1 min elapsed, ~2 min left, ETA 04:49
+  contract score: 66/180 runs, 1 min elapsed, ~2 min left, ETA 04:48
+  contract score: 72/180 runs, 1 min elapsed, ~2 min left, ETA 04:48
+  contract score: 78/180 runs, 2 min elapsed, ~2 min left, ETA 04:50
+  contract score: 84/180 runs, 2 min elapsed, ~2 min left, ETA 04:50
+  contract score: 90/180 runs, 2 min elapsed, ~2 min left, ETA 04:49
+  contract score: 96/180 runs, 2 min elapsed, ~2 min left, ETA 04:49
+  contract score: 102/180 runs, 2 min elapsed, ~2 min left, ETA 04:49
+  contract score: 108/180 runs, 2 min elapsed, ~1 min left, ETA 04:49
+  contract score: 114/180 runs, 2 min elapsed, ~1 min left, ETA 04:49
+  contract score: 120/180 runs, 2 min elapsed, ~1 min left, ETA 04:49
+  contract score: 126/180 runs, 2 min elapsed, ~1 min left, ETA 04:49
+  contract score: 132/180 runs, 2 min elapsed, ~1 min left, ETA 04:49
+  contract score: 138/180 runs, 2 min elapsed, ~1 min left, ETA 04:48
+  contract score: 144/180 runs, 2 min elapsed, ~1 min left, ETA 04:48
+  contract score: 150/180 runs, 3 min elapsed, ~1 min left, ETA 04:49
+  contract score: 156/180 runs, 3 min elapsed, ~0 min left, ETA 04:49
+  contract score: 162/180 runs, 3 min elapsed, ~0 min left, ETA 04:49
+  contract score: 168/180 runs, 3 min elapsed, ~0 min left, ETA 04:48
+  contract score: 174/180 runs, 3 min elapsed, ~0 min left, ETA 04:48
+  contract score: 180/180 runs, 3 min elapsed, ~0 min left, ETA 04:48
+
+==============================================================================
+SI, learners PAID FOR THE CONTRACT: mean saving against no battery, total bill + wear, EUR/a
+==============================================================================
+method            bc   dqn  bc_dqn
+variant                           
+all_coarse      61.5  55.5    56.8
+all_coarse_rel  67.3  59.5    67.3
+fc_h24          53.7  59.7    46.8
+groups          60.3  55.8    57.1
+peak            49.8  53.7    47.8
+rel             64.8  64.0    65.7
+
+gain over that arm's own fc_h24 on the test year (positive = cheaper)
+method        variant  selected  n    mean  median  better_on      p      efc  p_holm
+    bc           peak     False 30 -3.9438 -1.3902          9 0.0093  86.3110     NaN
+    bc         groups      True 30  6.6088  6.7032         22 0.0050 123.2579   0.005
+    bc     all_coarse     False 30  7.7676  7.7092         22 0.0007 121.2370     NaN
+    bc            rel     False 30 11.0914  9.5949         24 0.0003 144.6139     NaN
+    bc all_coarse_rel     False 30 13.5675 15.2787         26 0.0001 151.3600     NaN
+   dqn           peak     False 30 -5.9646 -3.6412          8 0.0006 153.0544     NaN
+   dqn         groups     False 30 -3.8500 -4.6235         12 0.0919 139.5850     NaN
+   dqn     all_coarse     False 30 -4.1807 -5.5040         10 0.0667 132.5911     NaN
+   dqn            rel     False 30  4.3351  6.5199         21 0.0128 148.0368     NaN
+   dqn all_coarse_rel     False 30 -0.2108  1.3691         16 0.8078 142.9250     NaN
+bc_dqn           peak     False 30  1.0229  1.2952         16 0.4522 101.9410     NaN
+bc_dqn         groups     False 30 10.2987 10.8317         21 0.0022 133.4077     NaN
+bc_dqn     all_coarse      True 30 10.0003 14.1172         23 0.0020 130.1249   0.004
+bc_dqn            rel     False 30 18.9235 21.1477         28 0.0000 144.7117     NaN
+bc_dqn all_coarse_rel     False 30 20.5353 20.5020         28 0.0000 151.3355     NaN
+CONTRACT DONE
+  [stale] monthly/contract__dqn/172: recomputing
+  [stale] monthly/contract__dqn/172: recomputing
+  [stale] monthly/contract__dqn/180: recomputing
+  [stale] monthly/contract__dqn/137: recomputing
+  [stale] monthly/contract__dqn/223: recomputing
+  [stale] monthly/contract__dqn/223: recomputing
+  [stale] monthly/contract__dqn/249: recomputing
+  [stale] monthly/contract__dqn/247: recomputing
+  [stale] monthly/contract__dqn/127: recomputing
+  [stale] monthly/contract__dqn/156: recomputing
+  [stale] monthly/contract__dqn/204: recomputing

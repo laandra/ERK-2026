@@ -1,0 +1,12 @@
+{
+ "ident": "66",
+ "tariff": "AU",
+ "variant": "groups",
+ "hidden": 64,
+ "seed": 1,
+ "method": "bc",
+ "digest": "ed4888f0eba11408",
+ "val_cost_closed": 52.76055925284907,
+ "val_efc": 61.242968749999974,
+ "bc_val_agreement": 0.908234790571747
+}

@@ -91,7 +91,7 @@
     "soc_init": 5.0,
     "soc_max_pct": 0.8,
     "soc_min_pct": 0.1,
-    "solver": "HiGHS",
+    "solver": "HiGHS+warm",
     "start_ts": "2010-07-01 00:30:00",
     "tariff": "AU"
   },
@@ -100,10 +100,10 @@
     "cost_oracle": 809.8666869854021,
     "cost_prophet": 901.8383932110179,
     "buy_no_battery": 5669.514999999999,
-    "buy_oracle": 5364.082670997231,
+    "buy_oracle": 5364.08267099723,
     "buy_prophet": 6007.270426885701,
     "sell_no_battery": 591.292,
-    "sell_oracle": 15.159975069252104,
+    "sell_oracle": 15.15997506925235,
     "sell_prophet": 654.8510726565612,
     "gross_oracle": 809.1303407566286,
     "energy_oracle": 809.1303407566286,
@@ -174,7 +174,7 @@
     "con_skill_vs_naive": -0.16488662979261193,
     "con_mae_first_month": 0.4615680359723974,
     "con_mae_last_month": 0.4833456317418819,
-    "runtime_s": 108.40734320800402,
+    "runtime_s": 5.740487249917351,
     "cycle_cost_reporting_eur_per_efc": 0.4166666666666667
   }
 }

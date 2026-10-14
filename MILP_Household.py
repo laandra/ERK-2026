@@ -9,6 +9,8 @@ appended to whatever `pulp.LpProblem` the caller is building:
 
     add_household_physics     buy/sell/spill/charge/discharge/SOC and the
                               constraints that tie them together
+    household_data_bounds     the same block re-pointed at new data, for a
+                              caller that solves it again every interval
     add_excess_power_ratchet  the presezna-moc charge, per (block, month)
     agreed_power_by_month     the per-month dogovorjena obracunska moc
     month_calendar            the local-time month bookkeeping all of the above index by
@@ -30,7 +32,7 @@ particular study is defaulted here.
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Optional
@@ -353,6 +355,27 @@ class HouseholdNames:
 
 
 @dataclass
+class HouseholdRows:
+    """The rows of a block whose right-hand side is DATA, not structure.
+
+    Everything else `add_household_physics` writes -- the SOC recursion, the
+    inverter bound, the binaries -- depends on the battery alone and is the same
+    at every step of a receding horizon. These are the rows that are not: they
+    carry the opening and closing SOC and the interval's generation and
+    consumption. Kept as the constraint objects themselves rather than as
+    positions, so a caller that re-points a built block at new data
+    (`household_data_bounds`) does not depend on the order the builder emits its
+    rows in -- which is load-bearing for other reasons and must stay free to be.
+    """
+
+    soc_initial: Optional[object] = None    # soc[0] == opening SOC
+    soc_final: Optional[object] = None      # soc[n] >= terminal floor
+    balance: list = field(default_factory=list)     # one per interval, ==
+    meter_sell: list = field(default_factory=list)  # one per interval, <=
+    meter_buy: list = field(default_factory=list)   # one per interval, <=
+
+
+@dataclass
 class HouseholdBlock:
     """The variables one household contributes to a problem."""
 
@@ -366,6 +389,12 @@ class HouseholdBlock:
     max_discharge_ac: float
     capacity_kwh: float          # the usable window, what the physics sees
     nominal_capacity_kwh: float  # the pack on the invoice
+    rows: Optional[HouseholdRows] = None    # the data-carrying rows, see above
+
+
+def _clamped_soc(soc_kwh, capacity):
+    """An opening or terminal SOC, held inside the usable window."""
+    return min(max(0.0, float(soc_kwh)), capacity)
 
 
 def add_household_physics(
@@ -447,13 +476,20 @@ def add_household_physics(
         for t in range(n_steps)
     ]
 
+    # The rows written from DATA are kept by handle as they are added -- the
+    # same constraint objects, in the same order, so the model is unchanged.
+    # `household_data_bounds` is their other half and must say what they say.
+    rows = HouseholdRows()
+
     if soc is not None:
         if initial_soc_kwh is None:
             initial_soc_kwh = capacity / 2.0
-        prob += (soc[0] == min(max(0.0, float(initial_soc_kwh)), capacity))
+        rows.soc_initial = (soc[0] == _clamped_soc(initial_soc_kwh, capacity))
+        prob += rows.soc_initial
         # Terminal floor, so the opening charge cannot be sold off as a saving.
         if final_soc_kwh is not None:
-            prob += (soc[n_steps] >= min(max(0.0, float(final_soc_kwh)), capacity))
+            rows.soc_final = (soc[n_steps] >= _clamped_soc(final_soc_kwh, capacity))
+            prob += rows.soc_final
 
     inverter_kwh = max(max_charge_ac, max_discharge_ac)
     for t in range(n_steps):
@@ -469,16 +505,22 @@ def add_household_physics(
                 # to more than the unit can pass.
                 prob += charge[t] + discharge[t] <= inverter_kwh
         # Energy balance with curtailment.
-        prob += (
+        balance = (
             gen[t] + buy[t] + discharge[t]
             == con[t] + sell[t] + charge[t] + spill[t]
         )
+        prob += balance
+        rows.balance.append(balance)
         if metering_bounds:
             # A meter nets import against export inside the interval. These two
             # hold at every physical operating point and bound the LP, which the
             # energy balance alone does not.
-            prob += sell[t] <= max(gen[t] - con[t], 0.0) + discharge[t]
-            prob += buy[t] <= max(con[t] - gen[t], 0.0) + charge[t] + spill[t]
+            meter_sell = sell[t] <= max(gen[t] - con[t], 0.0) + discharge[t]
+            meter_buy = buy[t] <= max(con[t] - gen[t], 0.0) + charge[t] + spill[t]
+            prob += meter_sell
+            prob += meter_buy
+            rows.meter_sell.append(meter_sell)
+            rows.meter_buy.append(meter_buy)
 
     if exclusivity == "binary" and soc is not None:
         flags = [
@@ -530,7 +572,98 @@ def add_household_physics(
         max_charge_ac=max_charge_ac, max_discharge_ac=max_discharge_ac,
         capacity_kwh=capacity,
         nominal_capacity_kwh=float(getattr(env, "nominal_capacity_kwh", capacity)),
+        rows=rows,
     )
+
+
+# ---------------------------------------------------------------------------
+# The data half of the household block
+# ---------------------------------------------------------------------------
+# A receding-horizon controller solves the SAME block thousands of times: the
+# battery does not change between two steps, only the opening SOC and the
+# generation and consumption the window covers. Rebuilding the block for each
+# of them is where such a controller's time went -- measured in the HEMS study,
+# 4.0 of the 5.6 ms a 48-step solve cost was pulp assembling and translating a
+# model whose matrix it had assembled identically the step before, against
+# 1.2 ms of actual optimisation.
+#
+# These two functions are what lets a caller build the block once and re-point
+# it instead. They restate, as numbers, exactly what `add_household_physics`
+# writes from its `gen`/`con`/SOC arguments, and that is a second statement of
+# the same physics -- so it is kept HERE, beside the first, and a caller that
+# relies on it is expected to hold the two together by checking a re-pointed
+# model against a freshly built one (`UpstreamMILPScheduler` does, on a
+# schedule, and `test_hems_study` does on every solve of a slice). Change a
+# data-carrying row in the builder and this must change with it.
+#
+# Nothing here knows about a solver: the bounds come back as plain arrays in the
+# convention pulp's own `getLb`/`getUb` use, row activity on the variables only.
+
+
+def household_data_rows(blk):
+    """The block's data-carrying constraints, in `household_data_bounds` order."""
+    rows = blk.rows
+    if rows is None:
+        raise ValueError("this block predates HouseholdRows; rebuild it with "
+                         "add_household_physics")
+    ordered = [c for c in (rows.soc_initial, rows.soc_final) if c is not None]
+    return ordered + list(rows.balance) + list(rows.meter_sell) + list(rows.meter_buy)
+
+
+def household_data_bounds(blk, *, gen, con, initial_soc_kwh=None, final_soc_kwh=None):
+    """What a built block's data-carrying rows and columns read for NEW data.
+
+    Returns `(row_lower, row_upper, spill_upper)`: the bounds of the rows
+    `household_data_rows(blk)` lists, in that order, and the upper bound of each
+    interval's curtailment variable. Arguments mean what they mean to
+    `add_household_physics`, kWh per interval, and the result is the model that
+    function would have built for them -- provided the block was built with the
+    same options, which is why a terminal floor cannot be added to or dropped
+    from a block here: that is a row, not a number.
+    """
+    rows = blk.rows
+    if rows is None:
+        raise ValueError("this block predates HouseholdRows; rebuild it with "
+                         "add_household_physics")
+    n_steps = len(blk.buy)
+    gen = np.asarray(gen, dtype=float)
+    con = np.asarray(con, dtype=float)
+    if len(gen) != n_steps or len(con) != n_steps:
+        raise ValueError(
+            f"the block covers {n_steps} steps, gen/con cover {len(gen)}/{len(con)}")
+    if (final_soc_kwh is None) != (rows.soc_final is None):
+        raise ValueError(
+            "a terminal SOC floor is a row of the block: it was built "
+            f"{'without' if rows.soc_final is None else 'with'} one and cannot "
+            "be re-pointed the other way")
+
+    capacity = blk.capacity_kwh
+    lower, upper = [], []
+    if rows.soc_initial is not None:
+        if initial_soc_kwh is None:
+            initial_soc_kwh = capacity / 2.0
+        opening = _clamped_soc(initial_soc_kwh, capacity)
+        lower.append([opening])
+        upper.append([opening])
+    if rows.soc_final is not None:
+        lower.append([_clamped_soc(final_soc_kwh, capacity)])
+        upper.append([np.inf])
+
+    # gen + buy + discharge == con + sell + charge + spill, variables on the left.
+    net_load = con - gen
+    lower.append(net_load)
+    upper.append(net_load)
+    if rows.meter_sell:
+        unbounded = np.full(n_steps, -np.inf)
+        # sell <= max(gen - con, 0) + discharge
+        lower.append(unbounded)
+        upper.append(np.maximum(gen - con, 0.0))
+        # buy <= max(con - gen, 0) + charge + spill
+        lower.append(unbounded)
+        upper.append(np.maximum(con - gen, 0.0))
+
+    # Curtailment is bounded by the interval's own generation.
+    return np.concatenate(lower), np.concatenate(upper), gen
 
 
 def add_grid_exclusivity(prob, *, buy_t, sell_t, gen_t, con_t, max_charge_ac,

@@ -1,0 +1,12 @@
+{
+ "ident": "138",
+ "tariff": "AU",
+ "variant": "fc_h24",
+ "hidden": 64,
+ "seed": 0,
+ "method": "bc",
+ "digest": "1ed8a70a48cbdd64",
+ "val_cost_closed": 41.11782980246787,
+ "val_efc": 71.04321025,
+ "bc_val_agreement": 0.8812241200828157
+}

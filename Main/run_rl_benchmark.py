@@ -49,6 +49,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import hems_study as hs                                          # noqa: E402
 import rl_control as rl                                          # noqa: E402
+import rl_features as rf                                         # noqa: E402
 import Rule_Based_Control as rbc                                 # noqa: E402
 import Battery_Economics as be                                   # noqa: E402
 
@@ -104,6 +105,7 @@ TRAIN_BLOCKS = _complement(VAL_BLOCKS, N_TRAIN)   # RL episodes / BC fit
 TEACH_SPAN = (0, N_TRAIN)
 
 DEFAULT_IDS = [138, 127, 65, 148, 223]         # first five study units
+WIDE_VARIANT = "wide_h24"
 
 
 def variant_specs(tariff: str) -> dict:
@@ -125,6 +127,25 @@ def variant_specs(tariff: str) -> dict:
         "truth_h24": rl.FeatureSpec(horizon=48, load_channel="truth",
                                     pv_channel="truth", peak_features=peak),
     }
+    # THE WIDE CONTRACT -- what the learned controllers of the study are shown
+    # since the feature study (`run_rl_features`, FIGURES_RL_FEATURES): every
+    # input group of `rl_features` (price rank, forecast net load, meter
+    # history, working-day calendar and, on SI, the peak outlook), the best
+    # MPC arm's forecast re-issued every interval, and prices measured against
+    # the trailing week instead of as levels. The last is what carries it: the
+    # scored year's prices sit 19 % (AU) and 32 % (SI) above the training
+    # years', and a network shown levels extrapolates all year. Against
+    # `fc_h24`, three seeds, test year: AU +6.5 / +18.7 / +13.9 AUD/a (IL / RL
+    # / IL+RL), SI +13.4 / +12.5 / +17.0 EUR/a.
+    #
+    # The spec is the feature study's `all_coarse_rel`, field for field, so a
+    # run of either name carries one digest. `fc_h24` and its ablations above
+    # stay what they were: the value-of-information questions are asked of the
+    # panel's first contract, and their answers are differences within it.
+    v[WIDE_VARIANT] = rl.FeatureSpec(
+        horizon=48, peak_features=peak, forecast="ar",
+        groups=tuple(g for g in rf.GROUPS if g != "peak" or peak),
+        price_reference="trailing")
     if tariff == "SI":
         # Blind to the contract: no block, agreed power, headroom or running
         # peak. If SI's money is the capacity charge, this one cannot find it.
@@ -411,6 +432,48 @@ TUNED: dict = {
 }
 
 
+# SETTINGS OF A CONTRACT'S OWN. `TUNED` was searched under `fc_h24` and is what
+# every contract trains with -- the ablations on purpose (a value-of-information
+# difference is a difference at one set of settings), the pooled and contract
+# studies because they are built on that panel. A contract searched in its own
+# right keeps its winners HERE, keyed by its name, as the full override set the
+# search confirmed (`rl_hpo.winner(...)["overrides"]`): pasted into TUNED they
+# would have re-keyed every result of every other contract for settings none of
+# them was searched under. A (tariff, method) the contract has no entry for
+# trains under TUNED.
+VARIANT_TUNED: dict = {
+    # The wide contract, searched in its own right on 2026-10-12 (`rl_hpo` under
+    # ERK_HPO_VARIANT=wide_h24, results `results_local/rl_hpo_wide/`): the same
+    # spaces, households and three-stage protocol as the first search, with one
+    # change -- a trial is ranked on the mean of the held-out weeks as they are
+    # and at the scored year's price level (ERK_HPO_OBJECTIVE=shift,
+    # `shifted_bundle`). Verdict on the 30 study households' test year, three
+    # seeds, winner against TUNED, bill + wear per household-year:
+    #
+    #     AU  IL +0.2 (p .08)   IL+RL +0.0 (p .03, by seed +1.6 / -0.7 / -0.8)
+    #         RL: refine kept TUNED (no candidate beat it over three seeds)
+    #     SI  IL +0.4 (p .26)   IL+RL +2.0 (22/30, p_holm .002; +2.0 under
+    #         every seed)       RL: refine kept TUNED
+    #
+    # One entry, then: the SI fine-tune, the only cell where the search's
+    # winner is a demonstrated improvement. Its override set is the search's own
+    # -- TUNED's SI fine-tune entry with the trial's values over it, on the
+    # clone the search's IL stage picked (`clone_*`), which is NOT the SI clone
+    # the panel trains: the IL winner itself was not a demonstrated improvement
+    # (+0.4, opposite signs across seeds) and is not promoted. Everything else
+    # on the wide contract trains under TUNED, which the search could not beat.
+    WIDE_VARIANT: {
+        ("SI", "bc_dqn"): {'gamma': 0.9848553058401908, 'bc_reg': 2.5080720457182144, 'hidden': 64, 'clone_lr': 0.00929438006296402, 'clone_batch': 512, 'clone_weight_decay': 0.0001, 'clone_class_power': 0.05111689716647333, 'clone_label_smoothing': 0.1, 'clone_patience': 5, 'lr': 0.0022971173226331346, 'eps_decay_frac': 0.41404052897615895, 'reward_scale': 64.04496597426444, 'bc_reg_decay_frac': 0.3904078174741372, 'bc_guide_prob': 0.2627715695129176, 'n_step': 2, 'batch': 256, 'target_sync': 1000},
+    },
+}
+
+
+def variant_overrides(variant: str, tariff: str, method: str):
+    """The override set `variant` trains `method` under on `tariff` when it has
+    one of its own, else None -- which every caller reads as "TUNED"."""
+    return VARIANT_TUNED.get(variant, {}).get((tariff, method))
+
+
 # The clone's optimiser (`rl.BCOptions`) travels in the same override dicts as
 # the TrainConfig fields -- a TUNED entry or a search trial is one dict -- under
 # a prefix, because two names would collide: `batch` and `lr` are the DQN's.
@@ -452,20 +515,163 @@ def effective_config(cfg: rl.TrainConfig, tariff: str, method: str,
     return out
 
 
+def ar_forecasts(frames) -> tuple:
+    """`(load, pv)`, each `(n_all, H)` kWh per interval: row t is the forecast
+    a controller holds AT interval t for t+1 .. t+H.
+
+    The forecaster is the `hbd_median14` arm's own object over the arm's own
+    frame, so its fitted AR is read from `hbd_params/` rather than refitted
+    (for a household that arm never ran, it is fitted here, once, and cached
+    there), and what the learner is shown is that arm's model and no other.
+
+    The first fifteen days have neither a fortnight of climatology nor a day
+    of lookback; their rows carry the bare 14-day median the panel uses, which
+    is what the AR falls back to wherever it has nothing to add.
+    """
+    import pandas as pd
+
+    frame = pd.concat([frames["df_train"], frames["df_ctrl"]])
+    fcst = hs.FITTED_KINDS["hbd_median14"](frame, H, len(frames["df_train"]))
+    n = len(frame)
+    first = fcst.M + fcst.climatology_days * H        # first usable anchor
+    out = []
+    for col in ("Energy_Consumption", "Energy_Generation"):
+        kwh = frames["df_all_kwh"][col].to_numpy(dtype=float)[:n]
+        median = rl.median14_forecast(kwh, H)
+        ahead = np.minimum(np.arange(n)[:, None] + 1 + np.arange(H)[None, :],
+                           n - 1)
+        table = median[ahead]
+        # Interval t is known when the controller acts at t (the meter's
+        # current interval, as every rule reads it), so its forecast is the
+        # one anchored at t + 1. kW -> kWh per interval.
+        table[first - 1:] = fcst.rolling_forecasts(
+            col, np.arange(first, n + 1)) * DELTA_T
+        out.append(table.astype(np.float32))
+    return out[0], out[1]
+
+
+def add_context(prep: dict) -> dict:
+    """The household's own past (`rl_features.Context`) for both bundles."""
+    if "context_train" not in prep:
+        kwh = prep["frames"]["df_all_kwh"]
+        load = kwh["Energy_Consumption"].to_numpy(dtype=float)
+        pv = kwh["Energy_Generation"].to_numpy(dtype=float)
+        m14 = (rl.median14_forecast(load, H), rl.median14_forecast(pv, H))
+        for key, offset in (("train", 0), ("sim", N_TRAIN * H)):
+            prep[f"context_{key}"] = rf.Context(load, pv, m14[0], m14[1], offset)
+    return prep
+
+
+def add_ar(prep: dict) -> dict:
+    """The re-issued AR forecast tables for both bundles."""
+    if "fc_ar_train" not in prep:
+        s0 = N_TRAIN * H
+        n_ctrl = len(prep["frames"]["df_ctrl_kwh"])
+        ar_load, ar_pv = ar_forecasts(prep["frames"])
+        prep["fc_ar_train"] = (ar_load[:s0], ar_pv[:s0])
+        prep["fc_ar_sim"] = (ar_load[s0:s0 + n_ctrl], ar_pv[s0:s0 + n_ctrl])
+    return prep
+
+
+def feature_inputs(prep, spec, bundle_key: str) -> dict:
+    """`build_static`'s keyword inputs for one bundle ("train" or "sim"): the
+    forecast arrays the spec's `forecast` names, and the household's past.
+
+    The panel's first specs read the 14-day median and no context, which is
+    all `prepare_household` builds -- it prepares 300 households for the
+    pooled study, and nothing wider is owed to a spec that does not read it.
+    A spec that names the AR forecast or switches on a group has those added
+    to the prep here, the first time one is asked for (`add_ar`,
+    `add_context`), so every driver that goes through this function can train
+    any contract of `variant_specs` without knowing which it is.
+    """
+    if spec.groups:
+        add_context(prep)
+    if spec.forecast == "ar":
+        add_ar(prep)
+    load_fc, pv_fc = (prep[f"fc_{bundle_key}"] if spec.forecast == "median14"
+                      else prep[f"fc_{spec.forecast}_{bundle_key}"])
+    return {"load_fc": load_fc, "pv_fc": pv_fc,
+            "context": prep[f"context_{bundle_key}"] if spec.groups else None}
+
+
+def shifted_bundle(prep) -> dict:
+    """The training bundle with the market price raised to the scored year's
+    level: `{"bundle", "delta"}`, built once per prepared household.
+
+    The held-out weeks are cut from the training years and share their price
+    level; the scored year's does not (+19 % AU, +32 % SI delivered). So a
+    choice that is about surviving that change -- of inputs, of settings --
+    cannot be made on those weeks as they are (`run_rl_features`, section 5 of
+    its notebook). This is the same weeks with SMP raised by the difference
+    between the scored year's mean and the training years': a fact about the
+    price list, known the day it is published, and the only thing of the
+    scored year that enters. Everything else is `build_bundle`.
+    """
+    if "_shifted" not in prep:
+        frames = prep["frames"]
+        s0 = N_TRAIN * H
+        smp = frames["df_all_kwh"]["SMP"].to_numpy(dtype=float)
+        delta = float(smp[s0:s0 + N_SIM * H].mean() - smp[:s0].mean())
+        kwh = frames["df_all_kwh"].iloc[:s0].copy()
+        kw = frames["df_train"].copy()
+        kwh["SMP"] = kwh["SMP"] + delta
+        kw["SMP"] = kw["SMP"] + delta
+        prep["_shifted"] = {"bundle": build_bundle(prep["tariff"], kwh, kw, s0),
+                            "delta": delta}
+    return prep["_shifted"]
+
+
 def _features(prep, spec, bundle_key: str):
     """(FeatureBuilder, normalized static matrix) for one bundle."""
     fb = rl.FeatureBuilder(spec)
     sig = prep[bundle_key]["sig"]
-    fc = prep["fc_train"] if bundle_key == "train" else prep["fc_sim"]
-    static = fb.build_static(sig, load_fc=fc[0], pv_fc=fc[1])
+    static = fb.build_static(sig, **feature_inputs(prep, spec, bundle_key))
     return fb, static
+
+
+def score_test_year(prep, net, fb, spec, method: str, variant: str) -> dict:
+    """One trained network on the TEST year, through the study's own runner.
+
+    The only place the scored year is read. Split out of `run_one` so that a
+    model trained and validated without a test number (`score_test=False`) can
+    be scored later from its saved weights -- the feature study chooses its
+    observation on the validation weeks first and comes here once.
+    """
+    sim = prep["sim"]
+    policy = rl.LearnedPolicy(
+        net, fb, prep["tariff"] == "SI",
+        name=f"{method}_{variant}", label=f"{method.upper()} {variant}",
+        causal=spec.causal, **feature_inputs(prep, spec, "sim"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = rbc.run_policy(sim["env"], policy, n_steps=N_SIM * H,
+                             settle=sim["settle"],
+                             soc_init_kwh=SOC_INIT_USABLE,
+                             rates=sim["rates"])
+    return {
+        "cost_eur_closed": out["Cost_EUR_Closed"],
+        "cost_eur": out["Cost_EUR"],
+        "fixed_eur": out["Fixed_EUR"],
+        "cost_eur_total": out["Cost_EUR_Total"],
+        "efc": out["Equivalent_Full_Cycles"],
+        "import_kwh": out["Import_kWh"], "export_kwh": out["Export_kWh"],
+        "peak_import_kw": out["Peak_Import_kW"],
+        "agreed_power_iters": out["Agreed_Power_Iters"],
+        "agreed_power_converged": out["Agreed_Power_Converged"],
+    }
 
 
 def run_one(prep, variant: str, method: str, cfg: rl.TrainConfig,
             verbose: bool = True, out_root: str = OUT,
             models_root: str = MODELS, score_test: bool = True,
-            overrides: dict | None = None) -> dict:
+            overrides: dict | None = None, specs: dict | None = None) -> dict:
     """Train one (variant, method) for one household; score it on the test year.
+
+    `specs` replaces `variant_specs(tariff)` as the table `variant` is looked
+    up in: the feature study's own observation contracts, trained by this
+    function and no other so they differ from the panel's in the observation
+    alone.
 
     `score_test=False` is the TUNING path: the run is trained and validated,
     and the test year is never evaluated -- the result file carries no test
@@ -474,9 +680,11 @@ def run_one(prep, variant: str, method: str, cfg: rl.TrainConfig,
     """
     ident, tariff = prep["ident"], prep["tariff"]
     cfg_in = cfg
+    if overrides is None:
+        overrides = variant_overrides(variant, tariff, method)
     cfg = effective_config(cfg_in, tariff, method, overrides)
     clone = effective_clone(tariff, method, overrides)
-    spec = variant_specs(tariff)[variant]
+    spec = (variant_specs(tariff) if specs is None else specs)[variant]
     respect_peak = tariff == "SI"
     key = f"{variant}__{method}"
     out_dir = os.path.join(out_root, tariff, key)
@@ -570,31 +778,8 @@ def run_one(prep, variant: str, method: str, cfg: rl.TrainConfig,
         return result
 
     # -- score on the TEST year, through the study's own runner -----------
-    sim = prep["sim"]
-    policy = rl.LearnedPolicy(
-        net, fb, respect_peak,
-        load_fc=prep["fc_sim"][0], pv_fc=prep["fc_sim"][1],
-        name=f"{method}_{variant}", label=f"{method.upper()} {variant}",
-        causal=spec.causal)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        out = rbc.run_policy(sim["env"], policy, n_steps=N_SIM * H,
-                             settle=sim["settle"],
-                             soc_init_kwh=SOC_INIT_USABLE,
-                             rates=sim["rates"])
-
-    result.update({
-        "cost_eur_closed": out["Cost_EUR_Closed"],
-        "cost_eur": out["Cost_EUR"],
-        "fixed_eur": out["Fixed_EUR"],
-        "cost_eur_total": out["Cost_EUR_Total"],
-        "efc": out["Equivalent_Full_Cycles"],
-        "import_kwh": out["Import_kWh"], "export_kwh": out["Export_kWh"],
-        "peak_import_kw": out["Peak_Import_kW"],
-        "agreed_power_iters": out["Agreed_Power_Iters"],
-        "agreed_power_converged": out["Agreed_Power_Converged"],
-        "wall_s": time.time() - t0,
-    })
+    result.update(score_test_year(prep, net, fb, spec, method, variant))
+    result["wall_s"] = time.time() - t0
     result.update(_comparators(ident, tariff))
     with open(result_path, "w", encoding="utf-8") as fh:
         json.dump(result, fh, indent=1)
@@ -666,7 +851,8 @@ def _run_parallel(jobs, cfg, args):
                 with open(path, encoding="utf-8") as fh:
                     existing = json.load(fh)
                 if existing.get("digest") == run_digest(
-                        cfg, variant_specs(tariff)[variant], tariff, method):
+                        cfg, variant_specs(tariff)[variant], tariff, method,
+                        variant_overrides(variant, tariff, method)):
                     cached += 1
                     continue
             except Exception:
@@ -857,6 +1043,16 @@ DIAG_OUT = os.path.join(HERE, "results_local", "rl_si_diagnosis")
 DIAG_RULES = ["no_battery", "self_consumption", "peak_shaving",
               "self_consumption_peak_shaving"]
 DIAG_LEARNED = ["bc", "bc_dqn", "dqn"]
+# The contracts whose learned models are taken apart: the panel's first, on
+# which the diagnosis was made ("the learned controllers do not collect the
+# contract line"), and the wide one the study now runs -- side by side, because
+# what the wide contract changed on SI is that line.
+DIAG_VARIANTS = ["fc_h24", WIDE_VARIANT]
+
+
+def diag_name(method: str, variant: str) -> str:
+    """A learned controller's name in the diagnosis: as in the study frame."""
+    return f"{method}_{variant}"
 
 
 def _diag_one(env, sig, policy, settle, rates):
@@ -904,10 +1100,11 @@ def _scored_digests(ident):
     diagnosis against 44 in the scored panel.
     """
     out = {}
-    for method in DIAG_LEARNED:
-        path = os.path.join(OUT, "SI", f"fc_h24__{method}", f"{ident}.json")
-        with open(path, encoding="utf-8") as fh:
-            out[method] = json.load(fh).get("digest")
+    for variant in DIAG_VARIANTS:
+        for method in DIAG_LEARNED:
+            path = os.path.join(OUT, "SI", f"{variant}__{method}", f"{ident}.json")
+            with open(path, encoding="utf-8") as fh:
+                out[diag_name(method, variant)] = json.load(fh).get("digest")
     return out
 
 
@@ -931,12 +1128,14 @@ def _diag_household(ident):
     res = {}
     for name in DIAG_RULES:
         res[name] = _diag_one(env, sig, roster[name], settle, rates)
-    for method in DIAG_LEARNED:
-        net, fb, spec, _ = rl.load_model(
-            os.path.join(MODELS, "SI", f"fc_h24__{method}", f"{ident}.pt"))
-        pol = rl.LearnedPolicy(net, fb, True, load_fc=prep["fc_sim"][0],
-                               pv_fc=prep["fc_sim"][1], name=method)
-        res[method] = _diag_one(env, sig, pol, settle, rates)
+    for variant in DIAG_VARIANTS:
+        for method in DIAG_LEARNED:
+            net, fb, spec, _ = rl.load_model(
+                os.path.join(MODELS, "SI", f"{variant}__{method}", f"{ident}.pt"))
+            pol = rl.LearnedPolicy(net, fb, True, name=method,
+                                   **feature_inputs(prep, spec, "sim"))
+            res[diag_name(method, variant)] = _diag_one(env, sig, pol, settle,
+                                                        rates)
     os.makedirs(DIAG_OUT, exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         json.dump({"ident": str(ident), "controllers": res,
@@ -957,12 +1156,15 @@ def si_test_diagnosis(ids, n_jobs: int = 1):
     for ident in ids:
         with open(os.path.join(DIAG_OUT, f"{ident}.json"), encoding="utf-8") as fh:
             c = json.load(fh)["controllers"]
-        for method in DIAG_LEARNED:
-            with open(os.path.join(OUT, "SI", f"fc_h24__{method}", f"{ident}.json"),
-                      encoding="utf-8") as fh:
-                scored = json.load(fh)
-            worst = max(worst, abs(c[method]["cost_eur_closed"] - scored["cost_eur_closed"]),
-                        abs(c[method]["fixed_eur"] - scored["fixed_eur"]))
+        for variant in DIAG_VARIANTS:
+            for method in DIAG_LEARNED:
+                with open(os.path.join(OUT, "SI", f"{variant}__{method}",
+                                       f"{ident}.json"), encoding="utf-8") as fh:
+                    scored = json.load(fh)
+                got = c[diag_name(method, variant)]
+                worst = max(worst,
+                            abs(got["cost_eur_closed"] - scored["cost_eur_closed"]),
+                            abs(got["fixed_eur"] - scored["fixed_eur"]))
         ref = _comparators(ident, "SI")
         for name in DIAG_RULES:
             k = f"ref_cost_{name}"
@@ -992,7 +1194,8 @@ def si_diagnosis_frames(from_checkpoint=None):
 
     `monthly`: one row per (household, controller, month, block): the peak drawn
     and the agreed power billed, and both as a change against no battery.
-    Learned controllers are named `<method>_fc_h24`, as in the study frame.
+    Learned controllers are named `<method>_<variant>`, as in the study frame,
+    for each contract of `DIAG_VARIANTS`.
     """
     import pandas as pd
 
@@ -1020,7 +1223,7 @@ def si_diagnosis_frames(from_checkpoint=None):
         ident, ctrls = d["ident"], d["controllers"]
         nb = ctrls[rbc.NO_BATTERY]
         for name, v in ctrls.items():
-            c = f"{name}_fc_h24" if name in DIAG_LEARNED else name
+            c = name
             rows.append({"ident": ident, "controller": c,
                          "energy": nb["energy_eur"] - v["energy_eur"],
                          "power": nb["power_eur"] - v["power_eur"],
@@ -1128,7 +1331,9 @@ def main(argv=None):
             with open(result_path, encoding="utf-8") as fh:
                 existing = json.load(fh)
             spec = variant_specs(tariff)[variant]
-            if existing.get("digest") == run_digest(cfg, spec, tariff, method):
+            if existing.get("digest") == run_digest(
+                    cfg, spec, tariff, method,
+                    variant_overrides(variant, tariff, method)):
                 print(f"{header}: cached "
                       f"({existing['cost_eur_closed']:.2f} closed)", flush=True)
                 done += 1
@@ -1309,6 +1514,10 @@ VOI_QUESTIONS = [
      "fc_h24", "fc_h24_noprice"),
     ("SI: the contract/peak state   (fc_h24 - nopeak)",
      "fc_h24", "fc_h24_nopeak"),
+    # Not a question about a forecast: every input group of `rl_features` and
+    # prices measured against the trailing week, over the panel's first
+    # contract. Asked beside the others because it is the one that moved.
+    ("the wide contract             (wide_h24 - fc_h24)", WIDE_VARIANT, "fc_h24"),
 ]
 
 

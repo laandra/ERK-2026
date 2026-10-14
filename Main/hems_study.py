@@ -331,10 +331,10 @@ FORECAST_CACHE_DIR = os.environ.get(
 # accepts a 0.01 % worse plan 17,520 times is a changed result, not drift.
 #
 # Falls back to CBC when highspy is not installed, so the study still runs on an
-# environment that has only the wheel PuLP ships with. SOLVER_NAME goes into the
-# run checkpoint: which solver produced a number is part of what makes it
-# reproducible, and mixing two vintages in one panel is the thing the
-# checkpoint tag exists to prevent.
+# environment that has only the wheel PuLP ships with. The name goes into the
+# run checkpoint (as SOLVER_TAG, below): which solver produced a number is part
+# of what makes it reproducible, and mixing two vintages in one panel is the
+# thing the checkpoint tag exists to prevent.
 try:
     import highspy as _highspy       # noqa: F401
     SOLVER_NAME = "HiGHS"
@@ -353,6 +353,78 @@ def make_solver():
         return pulp.HiGHS(msg=False, gapRel=0.0, gapAbs=0.0, threads=1)
     return pulp.PULP_CBC_CMD(msg=0)
 
+
+# THE PERSISTENT MODEL -- the same solver, asked the same question, without
+# being handed the model again each time.
+#
+# Moving to HiGHS took the subprocess out of a solve. What was left was not
+# optimisation either. Split by stage on a 48-step horizon (289 columns, 290
+# rows, 300 repeats):
+#
+#     pulp assembling the model          2.42 ms   43 %
+#     pulp -> HiGHS, addCol/addRow       1.60 ms   29 %
+#     HiGHS run()                        1.16 ms   21 %
+#     reading the solution back          0.30 ms    5 %
+#
+# Nearly three quarters of a solve is building a model whose MATRIX is the one
+# built the step before: between two steps of a receding horizon the battery
+# does not change, only the prices, the load and generation the window covers
+# and the SOC it opens on. So `UpstreamMILPScheduler` builds each horizon shape
+# once, keeps the HiGHS instance, and per step rewrites just those numbers
+# (`MILP_Household.household_data_bounds`, plus the two cost vectors). Solved
+# cold on the kept instance that is the rebuilt solve to the last bit -- 1,072
+# solves, every column identical -- at 1.3 ms instead of 6.2.
+#
+# It is NOT a second model. The instance is the one `add_household_physics` and
+# pulp's own translation produce -- same columns, same row order, same options
+# -- so nothing about the battery is restated here; only the data is re-pointed.
+#
+# AND IT IS WARM-STARTED. HiGHS keeps the basis the step before ended on, and
+# the next step -- the same horizon moved one interval on -- starts from it:
+# 11-19 simplex iterations instead of 104-131, an arm-household year in 7 s
+# instead of 16, the 1,050-year sweep in 20 minutes on ten workers.
+#
+# That is a decision about the RESULTS and not only about speed, so what was
+# measured before taking it is kept here (2026-10-13, 24 household-years with
+# every warm solve re-solved cold from the same state, then all 1,050 years
+# against the cold sweep):
+#
+#   each solve   is an optimum of the same model. Largest gap between the two
+#                objectives over 420,000 solves: 3e-14.
+#   each plan    is usually ANOTHER optimum. A time-of-use tariff is full of
+#                ties -- charge now or half an hour later at the same price --
+#                and 95 % of warm plans differ from the cold one somewhere.
+#   the step     that is executed differs in 4-26 solves of a year's 17,520.
+#   the year     then diverges: two plans tied under the forecast are not tied
+#                under what happens next, and the SI capacity charge is not in
+#                this objective at all, so two energy-tied plans can leave
+#                different peaks. 1,012 of 1,050 forecast-MPC bills moved --
+#                median 0.009 a year, 95th percentile 0.07, largest 1.04 (2.26
+#                with the contract it re-agreed), no systematic sign.
+#   the article  per-arm medians moved by at most 0.065; the cost ranking of
+#                the arms, the forecast `best_mpc_arm` picks and every paired
+#                test's win count did not move.
+#
+# So a warm-started year is not the cold year, and SOLVER_TAG says which one a
+# checkpoint holds: the whole sweep was re-run under it rather than resumed
+# into. What the choice costs is that a dispatch is no longer a function of the
+# model alone but of the solves that led to it, which is why
+#   - a run never inherits a basis. The forecast arm and the oracle share one
+#     scheduler; without `reset` the oracle would start from wherever the
+#     forecast arm stopped and stop being a function of `oracle_config`, while
+#     the oracle cache went on serving one arm's oracle to all of them.
+#   - the binary branch stays cold. A MIP has no basis to continue from.
+#
+# What is still held, on a schedule: every PERSISTENT_AUDIT_EVERY-th solve of a
+# shape, and its first two, is solved again by the rebuild path. A warm LP must
+# reach the rebuilt model's OBJECTIVE to solver tolerance, a cold MIP must
+# return the rebuilt PLAN exactly. A data-carrying row added to the builder and
+# not to `household_data_bounds` therefore still stops the run instead of
+# moving a figure.
+PERSISTENT_AUDIT_EVERY = 1000
+
+# What a checkpoint records as its solver: the name, and how it is started.
+SOLVER_TAG = SOLVER_NAME + ("+warm" if SOLVER_NAME == "HiGHS" else "")
 
 
 def config_digest(config: dict) -> str:
@@ -1257,6 +1329,8 @@ from MILP_Household import (            # noqa: E402
     build_household_env,
     floor_export_rates,
     full_period_solver,
+    household_data_bounds,
+    household_data_rows,
     interval_rate_vectors,
     month_calendar,
     step_energy_kwh,
@@ -1397,6 +1471,95 @@ def wear_objective_terms(env, blk, n_steps):
     ]
 
 
+class _HorizonModel:
+    """One HiGHS instance for one horizon shape, re-pointed at each step's data.
+
+    Built from the problem the rebuild path would have solved for the step that
+    first needed it, through pulp's own `buildSolverModel` -- so its columns,
+    rows and options are that path's, by construction rather than by imitation.
+    See "THE PERSISTENT MODEL" above `PERSISTENT_AUDIT_EVERY` for what this buys
+    and what it is held to.
+    """
+
+    def __init__(self, prob, blk, soc_offset):
+        solver = make_solver()
+        solver.createAndConfigureSolver(prob)
+        solver.buildSolverModel(prob)
+        # Both kept alive: `prob` owns the instance, `blk` the handles the data
+        # bounds are derived from.
+        self.prob, self.blk = prob, blk
+        self.highs = prob.solverModel
+        self.soc_offset = soc_offset
+        self.n_solves = 0
+        self.simplex_iterations = 0
+
+        index = lambda items: np.array([x.index for x in items], dtype=np.int32)
+        self.buy, self.sell = index(blk.buy), index(blk.sell)
+        self.charge, self.discharge = index(blk.charge), index(blk.discharge)
+        self.spill = index(blk.spill)
+        self.soc_end = index(blk.soc[1:])
+        self.rows = index(household_data_rows(blk))
+        self.priced = np.concatenate([self.buy, self.sell])
+        self.spill_lower = np.zeros(len(self.spill))
+
+        # The plan's "cost" is pulp's own evaluation of the objective -- a sum
+        # in the order the terms were added, not HiGHS's figure -- so it is
+        # reproduced in that order: buy and sell interleaved per interval, then
+        # the wear terms. The wear coefficients are the battery's and are read
+        # off the built objective rather than derived a second time.
+        self.energy_order = np.column_stack([self.buy, self.sell]).ravel()
+        worn = [v for pair in zip(blk.charge, blk.discharge) for v in pair
+                if v in prob.objective]
+        self.wear_order = index(worn)
+        self.wear_coef = np.array([prob.objective[v] for v in worn], dtype=float)
+
+    def solve(self, buy_rate, export, gen, con, soc0, soc_end, dt, warm):
+        """The plan for this data, or None where HiGHS did not reach optimal.
+
+        `warm` continues from the basis the previous solve left; otherwise the
+        instance is cleared first and solves as a new one would.
+        """
+        h = self.highs
+        lower, upper, spill_upper = household_data_bounds(
+            self.blk, gen=gen, con=con,
+            initial_soc_kwh=soc0, final_soc_kwh=soc_end)
+        h.changeColsCost(len(self.priced), self.priced,
+                         np.concatenate([buy_rate, -export]))
+        h.changeColsBounds(len(self.spill), self.spill,
+                           self.spill_lower, spill_upper)
+        h.changeRowsBounds(len(self.rows), self.rows, lower, upper)
+        # See the note above PERSISTENT_AUDIT_EVERY: this line is the
+        # difference between the rebuilt solve to the bit and another of
+        # several tied optima.
+        if not warm:
+            h.clearSolver()
+        h.run()
+        self.n_solves += 1
+        self.simplex_iterations += h.getInfo().simplex_iteration_count
+        if h.getModelStatus() != _highspy.HighsModelStatus.kOptimal:
+            return None
+
+        x = np.asarray(h.getSolution().col_value, dtype=float)
+        terms = [x[self.energy_order]
+                 * np.column_stack([buy_rate, -export]).ravel()]
+        if len(self.wear_order):
+            terms.append(x[self.wear_order] * self.wear_coef)
+        cost = np.cumsum(np.concatenate(terms))[-1]
+        # `+ 0.0` is the rebuild path's `value or 0.0`: it turns the -0.0 a
+        # simplex vertex can carry into 0.0 and changes nothing else.
+        kw = lambda idx: ((x[idx] + 0.0) / dt).tolist()
+        return {
+            "status":   "Optimal",
+            "x_ch":     kw(self.charge),
+            "x_dis":    kw(self.discharge),
+            "p_buy":    kw(self.buy),
+            "p_sell":   kw(self.sell),
+            "soc_plan": ((x[self.soc_end] + 0.0) + self.soc_offset).tolist(),
+            "spill":    kw(self.spill),
+            "cost":     float(cost or 0.0),
+        }
+
+
 class UpstreamMILPScheduler:
     """MILPScheduler's interface over add_household_physics."""
 
@@ -1404,7 +1567,7 @@ class UpstreamMILPScheduler:
                  soc_max_pct: float, p_max: float, eff: float, delta_t: float,
                  parity: bool = False, exclusivity: str = "binary",
                  allow_spill: bool = True, metering_bounds: bool = True,
-                 solver=None):
+                 solver=None, persistent: bool = True):
         self.env      = env
         self.delta_t  = delta_t
         self.eff      = eff
@@ -1413,6 +1576,23 @@ class UpstreamMILPScheduler:
         self.soc_max  = battery_cap * soc_max_pct
         self.parity   = parity
         self.solver   = solver or make_solver()
+
+        # Build each horizon shape once, re-point it and continue from the
+        # last basis (`_HorizonModel`), or rebuild the model for every solve --
+        # the path this class always took, kept whole as the reference the
+        # persistent one is audited against.
+        # The persistent path is HiGHS's: it needs the in-process instance, so a
+        # caller that brings its own solver, an environment without highspy and
+        # a household without a battery all get the rebuild.
+        self.persistent = (bool(persistent) and solver is None
+                           and SOLVER_NAME == "HiGHS"
+                           and float(env.battery_capacity_kwh) > 0)
+        self._models: dict = {}
+        self.n_persistent_solves = 0
+        self.n_audits = 0
+        # The largest gap an audit found between a warm-started objective and
+        # the rebuilt one. They are the same optimum's, so this is rounding.
+        self.max_objective_gap = 0.0
 
         if parity:
             # Reproduce the old hand-rolled model exactly: symmetric +-p_max AC
@@ -1460,14 +1640,18 @@ class UpstreamMILPScheduler:
         self.n_solves = 0
         self.n_binary_solves = 0
 
-    def solve(self, soc_init: float, buy_rate: list, sell_rate: list,
-              p_gen: list, p_con: list, terminal_soc: float | None = None) -> dict:
-        H  = len(buy_rate)
+    def solve(self, soc_init: float, buy_rate, sell_rate,
+              p_gen, p_con, terminal_soc: float | None = None) -> dict:
         dt = self.delta_t
 
+        # Arrays from here on, whatever the caller held: the controller passes
+        # slices of its own vectors, the tests pass lists.
+        buy_rate = np.asarray(buy_rate, dtype=float)
+        sell_rate = np.asarray(sell_rate, dtype=float)
+
         # kW -> kWh per interval, and into upstream's 0..usable SoC frame.
-        gen = [g * dt for g in p_gen]
-        con = [c * dt for c in p_con]
+        gen = np.asarray(p_gen, dtype=float) * dt
+        con = np.asarray(p_con, dtype=float) * dt
         soc0 = float(np.clip(soc_init - self.soc_min, 0.0,
                              self.env.battery_capacity_kwh))
         soc_end = soc0 if terminal_soc is None else float(np.clip(
@@ -1507,10 +1691,28 @@ class UpstreamMILPScheduler:
         # than a property of the data that happens to be loaded.
         exclusivity = self.exclusivity
         if exclusivity == "auto":
-            exclusivity = "binary" if min(buy_rate) <= 0.0 else "inverter"
+            exclusivity = "binary" if float(buy_rate.min()) <= 0.0 else "inverter"
             self.n_binary_solves += exclusivity == "binary"
             self.n_solves += 1
 
+        step = (soc_init, buy_rate, export, gen, con, soc0, soc_end,
+                exclusivity, n_floored)
+        if self.persistent:
+            plan = self._solve_persistent(*step)
+            # None is HiGHS not reaching optimal. The rebuild path owns what
+            # that means -- the message, the idle plan -- so it is handed over
+            # whole rather than half-answered here.
+            if plan is not None:
+                return plan
+        return self._solve_rebuild(*step)
+
+    def _build(self, buy_rate, export, gen, con, soc0, soc_end, exclusivity):
+        """The problem for one horizon: upstream's physics, this study's bill.
+
+        Takes lists, and that is not incidental: this is the model both paths
+        solve, and it is assembled from the same Python floats it always was.
+        """
+        H = len(buy_rate)
         prob = pulp.LpProblem("MILP_HEMS", pulp.LpMinimize)
         blk = add_household_physics(
             prob, self.env, n_steps=H, gen=gen, con=con,
@@ -1525,6 +1727,15 @@ class UpstreamMILPScheduler:
         prob += pulp.lpSum(
             blk.buy[t] * buy_rate[t] - blk.sell[t] * export[t] for t in range(H)
         ) + pulp.lpSum(wear_objective_terms(self.env, blk, H)), "MinNetCost"
+        return prob, blk
+
+    def _solve_rebuild(self, soc_init, buy_rate, export, gen, con, soc0,
+                       soc_end, exclusivity, n_floored) -> dict:
+        """Assemble the model for this step and solve it. The reference path."""
+        H  = len(buy_rate)
+        dt = self.delta_t
+        prob, blk = self._build(buy_rate.tolist(), export.tolist(), gen.tolist(),
+                                con.tolist(), soc0, soc_end, exclusivity)
 
         prob.solve(self.solver)
         status = pulp.LpStatus[prob.status]
@@ -1553,6 +1764,77 @@ class UpstreamMILPScheduler:
             "cost":     float(pulp.value(prob.objective) or 0.0),
             "n_floored": n_floored,
         }
+
+    def _solve_persistent(self, soc_init, buy_rate, export, gen, con, soc0,
+                          soc_end, exclusivity, n_floored):
+        """Re-point the kept model at this step and solve it. None if not optimal."""
+        # A shape is a horizon length and an exclusivity: the two things that
+        # change the matrix. The length only varies where the data runs out
+        # before the horizon does, the exclusivity only on a negative price.
+        key = (len(buy_rate), exclusivity)
+        model = self._models.get(key)
+        if model is None:
+            model = self._models[key] = _HorizonModel(
+                *self._build(buy_rate.tolist(), export.tolist(), gen.tolist(),
+                             con.tolist(), soc0, soc_end, exclusivity),
+                soc_offset=self.soc_min)
+
+        # The LP continues from its last basis; a MIP has none to continue from.
+        warm = exclusivity == "inverter"
+        plan = model.solve(buy_rate, export, gen, con, soc0, soc_end,
+                           self.delta_t, warm=warm)
+        if plan is None:
+            return None
+        plan["n_floored"] = n_floored
+        self.n_persistent_solves += 1
+
+        # The first solve of a shape re-points the model at the data it was
+        # built from, the second is the first that moves it; both are checked,
+        # and then one in PERSISTENT_AUDIT_EVERY.
+        if model.n_solves <= 2 or model.n_solves % PERSISTENT_AUDIT_EVERY == 0:
+            self.n_audits += 1
+            reference = self._solve_rebuild(soc_init, buy_rate, export, gen, con,
+                                            soc0, soc_end, exclusivity, n_floored)
+            if warm:
+                # A warm start may land on another optimum, so the plan is not
+                # held to the rebuilt one -- its OBJECTIVE is, to the solver's
+                # own tolerance.
+                gap = abs(plan["cost"] - reference["cost"])
+                self.max_objective_gap = max(self.max_objective_gap, gap)
+                if (reference["status"] != "Optimal"
+                        or gap > 1e-6 * max(1.0, abs(reference["cost"]))):
+                    raise RuntimeError(
+                        f"the warm-started {key[0]}-step model is not at an "
+                        f"optimum of the rebuilt one: objective "
+                        f"{plan['cost']:.12f} vs {reference['cost']:.12f} "
+                        f"(status {reference['status']})")
+            elif plan != reference:
+                worst = {
+                    k: float(np.max(np.abs(np.asarray(plan[k], dtype=float)
+                                           - np.asarray(reference[k], dtype=float))))
+                    for k in plan
+                    if k != "status" and k in reference
+                    and plan[k] != reference[k]
+                }
+                raise RuntimeError(
+                    f"the persistent {key[0]}-step '{key[1]}' model no longer "
+                    f"reproduces a freshly built one (solve {model.n_solves} of "
+                    f"this shape; status {plan['status']} vs "
+                    f"{reference['status']}; largest difference per field "
+                    f"{worst}). Either `household_data_bounds` and "
+                    f"`add_household_physics` have drifted apart, or HiGHS no "
+                    f"longer solves a cleared instance as it solves a new one. "
+                    f"persistent=False is the reference path.")
+        return plan
+
+    def reset(self):
+        """Forget every kept basis, so the next solve of each shape is cold.
+
+        What makes a run a function of its own inputs rather than of whatever
+        this scheduler solved last. See the note above PERSISTENT_AUDIT_EVERY.
+        """
+        for model in self._models.values():
+            model.highs.clearSolver()
 
 
 # =====================================================================
@@ -2443,6 +2725,61 @@ class HbdForecaster(_NaiveForecaster):
             "yhat_gen": np.clip(gen, 0.0, None),
         })
 
+    def rolling_forecasts(self, col: str, anchors) -> np.ndarray:
+        """This forecaster RE-ISSUED at every anchor: `(len(anchors), L)`.
+
+        Row r is the forecast for steps `anchors[r] .. anchors[r] + L - 1`, made
+        from rows strictly before `anchors[r]` and from the one fit on the
+        training block. `predict_next_day` serves the MPC arms one forecast per
+        calendar day; a controller that re-reads its meter every interval -- a
+        learned one (`rl_control`) -- can have the same model conditioned on
+        the last 24 h as of NOW, which is where the AR's skill is: over the 30
+        study households (`run_rl_features.ar_skill`, median MAE skill over
+        the bare 14-day median, scored year) +0.23 on load and +0.47 on
+        generation one interval ahead, +0.03 and +0.15 two hours ahead, about
+        +0.01 beyond six. Nothing is refit, so beside a completed
+        `hbd_median14` arm this costs two matrix products per household.
+
+        Anchors inside the training block are IN-SAMPLE for the AR
+        coefficients. On load the in-sample skill is the scored year's to
+        within 0.01 at every lead; on generation it is 0.02 to 0.06 better
+        from one hour out, so a learner trained on these rows trusts the roof
+        forecast slightly more than the scored year deserves.
+
+        Stage 1 is evaluated the way the AR was FIT against it: each past step
+        against the baseline it would itself have been given (`before=None`).
+        `_source_rows` walls the past window at the anchor instead, which lets
+        a 14-day median include the observation it is being subtracted from;
+        over a year of day-ahead anchors the two differ by under 1 % of MAE in
+        either direction, so this is consistency, not a correction.
+        """
+        if self.refit_every_days or self.ar_refit_every_days:
+            raise NotImplementedError(
+                "rolling_forecasts serves the fit-once configuration only")
+        i = np.asarray(anchors, dtype=int)
+        need = self.M + (self.climatology_days * self.spd
+                         if self.baseline_kind == "climatology" else 0)
+        y = self._column(col)
+        if i.min() < need or i.max() > len(y):
+            raise ValueError(
+                f"anchors must lie in [{need}, {len(y)}]: before that there is "
+                f"no lookback, after it no row to have observed")
+        end = self.n_train
+        first = int(i.min()) - self.M
+        # One day past the last anchor is as far as stage 1 is asked to reach.
+        steps = np.arange(first, int(i.max()) + self.L)
+        baseline = self._baseline_at(col, steps, end, None)
+        out = baseline[(i - first)[:, None] + np.arange(self.L)[None, :]]
+        Gamma = self._ar(col, end)
+        if Gamma is not None:
+            observed = steps < len(y)
+            resid = np.zeros(steps.size)
+            resid[observed] = y[steps[observed]] - baseline[observed]
+            past = np.lib.stride_tricks.sliding_window_view(resid, self.M)
+            out = out + past[i - self.M - first] @ Gamma
+        lo, hi = self._range(col, end)
+        return np.clip(out, lo, hi)
+
 
 # =====================================================================
 # 3e — One settlement, and the rule-based roster
@@ -2882,6 +3219,15 @@ class ReactiveController:
         self.leak_current_interval = bool(leak_current_interval)
         self.freq     = freq
         self._fc_cache: dict = {}
+        # The same forecasts as arrays, and the realised columns likewise. The
+        # loop reads a window of each at every one of 17,520 steps; sliced out
+        # of a DataFrame that was two `iloc`s, a `concat` and four `tolist`s a
+        # step -- about 2 ms, more than the solve itself now costs. A slice of
+        # an array is the same numbers without the frame.
+        self._fc_arrays: dict = {}
+        self._gen = real_data["Energy_Generation"].to_numpy()
+        self._con = real_data["Energy_Consumption"].to_numpy()
+        self._smp = real_data["SMP"].to_numpy()
 
         # The default soc_init=10.0 is above soc_max for the study battery
         # (0.80 * 10.0 = 8.0); catch it here rather than in an infeasible LP.
@@ -2909,12 +3255,11 @@ class ReactiveController:
         self.fixed_cost = np.asarray(const, dtype=float)
 
     def _real_slice(self, k: int, h: int) -> tuple:
-        sl = self.data.iloc[k : k + h]
         return (
-            self.buy_rate[k : k + h].tolist(),
-            self.sell_rate[k : k + h].tolist(),
-            sl["Energy_Generation"].tolist(),
-            sl["Energy_Consumption"].tolist(),
+            self.buy_rate[k : k + h],
+            self.sell_rate[k : k + h],
+            self._gen[k : k + h],
+            self._con[k : k + h],
         )
 
     def _forecast_slice(self, k: int, h: int) -> tuple:
@@ -2926,38 +3271,36 @@ class ReactiveController:
                 start_k = d * self.spd
                 if start_k < len(self.data):
                     anchor = self.data.index[start_k]
-                    self._fc_cache[d] = self.fc.predict_next_day(
-                        anchor, self.spd, freq=self.freq)
+                    day = self.fc.predict_next_day(anchor, self.spd, freq=self.freq)
+                    self._fc_cache[d] = day
+                    self._fc_arrays[d] = (
+                        day["yhat_gen"].to_numpy(dtype=float),
+                        day["yhat_con"].to_numpy(dtype=float),
+                    )
 
-        fc_today = self._fc_cache[day_idx]
-        fc_sl    = fc_today.iloc[day_offset : day_offset + h].reset_index(drop=True)
+        gen_today, con_today = self._fc_arrays[day_idx]
+        p_gen_fc = gen_today[day_offset : day_offset + h]
+        p_con_fc = con_today[day_offset : day_offset + h]
 
-        if len(fc_sl) < h and (day_idx + 1) in self._fc_cache:
-            missing     = h - len(fc_sl)
-            fc_tomorrow = self._fc_cache[day_idx + 1]
-            fc_next     = fc_tomorrow.iloc[:missing].reset_index(drop=True)
-            fc_sl       = pd.concat([fc_sl, fc_next], ignore_index=True)
+        if len(p_gen_fc) < h and (day_idx + 1) in self._fc_arrays:
+            missing = h - len(p_gen_fc)
+            gen_next, con_next = self._fc_arrays[day_idx + 1]
+            p_gen_fc = np.concatenate([p_gen_fc, gen_next[:missing]])
+            p_con_fc = np.concatenate([p_con_fc, con_next[:missing]])
 
-        if len(fc_sl) < h:
+        if len(p_gen_fc) < h:
             # Past the end of the forecast table: hold the last known interval.
-            # The `ds` column is rebuilt rather than repeated -- concatenating
-            # the same row n times duplicates its timestamp, and anything that
-            # later joins this frame on `ds` (forecast_error_metrics does) would
-            # silently fan out those rows. Only the final horizon of a run can
-            # reach here, and only when the lookahead tail is short.
-            pad = h - len(fc_sl)
-            last = fc_sl.iloc[[-1]]
-            fc_sl = pd.concat([fc_sl] + [last] * pad, ignore_index=True)
-            step = pd.Timedelta(self.freq)
-            fc_sl.loc[fc_sl.index[-pad:], "ds"] = [
-                fc_sl["ds"].iloc[-pad - 1] + step * (i + 1) for i in range(pad)
-            ]
+            # Only the final horizon of a run can reach here, and only when the
+            # lookahead tail is short. (The frame this used to be done on had
+            # its `ds` column rebuilt as well, so the repeated row would not
+            # repeat a timestamp; nothing but the two value columns ever left
+            # this method, so there is no timestamp to keep straight now.)
+            pad = h - len(p_gen_fc)
+            p_gen_fc = np.concatenate([p_gen_fc, np.full(pad, p_gen_fc[-1])])
+            p_con_fc = np.concatenate([p_con_fc, np.full(pad, p_con_fc[-1])])
 
-        buy_rate_real  = self.buy_rate[k : k + h].tolist()
-        sell_rate_real = self.sell_rate[k : k + h].tolist()
-
-        p_gen_fc = fc_sl["yhat_gen"].tolist()
-        p_con_fc = fc_sl["yhat_con"].tolist()
+        buy_rate_real  = self.buy_rate[k : k + h]
+        sell_rate_real = self.sell_rate[k : k + h]
 
         if self.leak_current_interval:
             # F3 - the applied step's REALIZED generation and consumption,
@@ -2971,8 +3314,13 @@ class ReactiveController:
             #
             # Kept behind a flag rather than deleted so the published numbers
             # remain reproducible and the leak's size is measurable.
-            p_gen_fc[0] = self.data["Energy_Generation"].iloc[k]
-            p_con_fc[0] = self.data["Energy_Consumption"].iloc[k]
+            #
+            # Copied first: the slices above are views of the cached day, and
+            # writing through one would leak the truth into every later horizon
+            # that reads the same interval.
+            p_gen_fc, p_con_fc = p_gen_fc.copy(), p_con_fc.copy()
+            p_gen_fc[0] = self._gen[k]
+            p_con_fc[0] = self._con[k]
 
         return buy_rate_real, sell_rate_real, p_gen_fc, p_con_fc
 
@@ -2981,6 +3329,11 @@ class ReactiveController:
         # would simulate under half the year and quietly report it as a year.
         T_total  = min(num_days * self.spd, len(self.data))
         soc_cur  = self.soc0
+        # A run starts from nothing the scheduler did before it -- see
+        # `UpstreamMILPScheduler.reset`. The hand-rolled reference has no state
+        # to forget.
+        if hasattr(self.sched, "reset"):
+            self.sched.reset()
         plan     = None
         plan_pos = 0
         history  = []
@@ -3060,11 +3413,11 @@ class ReactiveController:
                     f"({act_ch:.9f} / {act_dis:.9f} kW)"
                 )
 
-            real_smp       = self.data["SMP"].iloc[k]
+            real_smp       = self._smp[k]
             real_buy_rate  = self.buy_rate[k]
             real_sell_rate = self.sell_rate[k]
-            real_gen       = self.data["Energy_Generation"].iloc[k]
-            real_con       = self.data["Energy_Consumption"].iloc[k]
+            real_gen       = self._gen[k]
+            real_con       = self._con[k]
 
             p_net_real = real_con + act_ch - real_gen - act_dis
             if p_net_real > 0:
@@ -3922,7 +4275,10 @@ def run_pipeline_for_file(file_path: str,
         # that silently mixes two solvers is the failure the tag guard exists
         # for. Recording it means a solver swap invalidates every checkpoint
         # and the sweep comes back one vintage throughout.
-        solver=SOLVER_NAME,
+        # SOLVER_TAG rather than the name alone, which is the same argument one
+        # step further: the same solver started from the previous basis returns
+        # another of several tied optima, and did on 1,012 of 1,050 years.
+        solver=SOLVER_TAG,
         milp_exclusivity=milp_exclusivity,
         calendar=(holiday_country, holiday_subdiv, tuple(sorted(high_season_months))),
         # The clock every block, local day and clock rule is read on. It changes
@@ -5224,12 +5580,25 @@ def controller_columns(df: pd.DataFrame) -> list:
 # numbers already on disk bit for bit, at about eight hours of compute for the
 # full sweep. The join is the same measurement, not an approximation of it.
 #
-# WHICH TWO, AND WHY NOT THE THIRD. The clone and the fine-tuned clone are the
-# two that earn a place: over 30 households the clone beats plain reinforcement
-# on 29 of them on SI (Wilcoxon p < 1e-4) and ties it on AU, so `dqn` alone is
-# carried in `FIGURES_RL.ipynb` as the comparison it is, not here as an
-# alternative anyone should run.
-LEARNED_CONTROLLERS = [("bc", "fc_h24"), ("bc_dqn", "fc_h24")]
+# WHICH CONTRACT. The learned controllers shown beside the rules and the MILP
+# are the ones trained under the WIDE observation contract
+# (`run_rl_benchmark.WIDE_VARIANT`: every input group of `rl_features`, the
+# best MPC arm's forecast re-issued every interval, prices measured against
+# the trailing week) -- the best this study has trained, not the first. The
+# panel's first contract, `fc_h24`, is `FIRST_LEARNED_CONTROLLERS`: it is what
+# the value-of-information ablations, the pooled study and the contract study
+# were run on, and those still read it by name.
+#
+# ALL THREE LEARNERS. The roster used to carry the clone and its fine-tune
+# only: on `fc_h24` plain reinforcement lost to the clone on 29 of 30 SI
+# households and was shown in `FIGURES_RL.ipynb` as the comparison it was. On
+# the wide contract it is the learner that gained most (AU +19 AUD/a, SI
+# +12 EUR/a over three seeds) and stands within a few per cent of the other
+# two, so it is shown with them.
+LEARNED_VARIANT = "wide_h24"
+LEARNED_CONTROLLERS = [("bc", LEARNED_VARIANT), ("dqn", LEARNED_VARIANT),
+                       ("bc_dqn", LEARNED_VARIANT)]
+FIRST_LEARNED_CONTROLLERS = [("bc", "fc_h24"), ("bc_dqn", "fc_h24")]
 
 # What the published models were trained under. A learned controller is a
 # function of the pack it learned on, so joining one onto an arm with a

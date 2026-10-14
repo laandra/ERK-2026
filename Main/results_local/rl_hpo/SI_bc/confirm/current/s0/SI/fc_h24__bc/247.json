@@ -61,9 +61,9 @@
  "wall_s": 11.686028957366943,
  "ref_cost_no_battery": 268.97245300130004,
  "ref_cost_self_consumption": 245.6683876449436,
- "ref_cost_prophet": 262.415919440784,
- "ref_cost_oracle": 241.3123646549711,
- "ref_cost_milp_full": 233.89217745965848,
+ "ref_cost_prophet": 279.11250599024333,
+ "ref_cost_oracle": 240.77769925284278,
+ "ref_cost_milp_full": 231.7305632967164,
  "ref_cost_price_threshold": 247.6127064206436,
  "ref_cost_self_consumption_peak_shaving": 236.82143931800167,
  "ref_cost_tariff_arbitrage": 249.67869962051753

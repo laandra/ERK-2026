@@ -1,0 +1,16 @@
+{
+ "ident": "168",
+ "tariff": "SI",
+ "variant": "all_no_ar",
+ "hidden": 64,
+ "seed": 1,
+ "method": "bc",
+ "digest": "5881c9a0a4bb3596",
+ "val_cost_closed": 130.08406346724342,
+ "val_efc": 55.98058499999999,
+ "bc_val_agreement": 0.895048475075649,
+ "val_contract_net": 171.56721640708417,
+ "val_contract_bill": 131.0532979091995,
+ "val_contract_eur": 40.16417577064516,
+ "val_contract_efc": 55.09568495
+}

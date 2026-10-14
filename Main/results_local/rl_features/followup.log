@@ -1,0 +1,193 @@
+screen: 210 of 450 run(s) cached
+screen: 240 run(s) over 60 household-tariff group(s) on 12 worker(s)
+Traceback (most recent call last):
+  File "/Users/summerscholl/Documents/ERK-2026/Main/run_rl_features.py", line 1761, in <module>
+    main()
+    ~~~~^^
+  File "/Users/summerscholl/Documents/ERK-2026/Main/run_rl_features.py", line 1739, in main
+    ok = screen(ids, args.tariffs, args.jobs, quiet, args.variants,
+                args.methods)
+  File "/Users/summerscholl/Documents/ERK-2026/Main/run_rl_features.py", line 498, in screen
+    flat = _run_groups(_train_worker, _grouped(todo), n_jobs, "screen",
+                       STEPS, quiet)
+  File "/Users/summerscholl/Documents/ERK-2026/Main/run_rl_features.py", line 465, in _run_groups
+    for part in stream:
+                ^^^^^^
+  File "/Users/summerscholl/Library/Python/3.14/lib/python/site-packages/joblib/parallel.py", line 1682, in _get_outputs
+    yield from self._retrieve()
+  File "/Users/summerscholl/Library/Python/3.14/lib/python/site-packages/joblib/parallel.py", line 1784, in _retrieve
+    self._raise_error_fast()
+    ~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/summerscholl/Library/Python/3.14/lib/python/site-packages/joblib/parallel.py", line 1859, in _raise_error_fast
+    error_job.get_result(self.timeout)
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/Users/summerscholl/Library/Python/3.14/lib/python/site-packages/joblib/parallel.py", line 758, in get_result
+    return self._return_or_raise()
+           ~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/summerscholl/Library/Python/3.14/lib/python/site-packages/joblib/parallel.py", line 773, in _return_or_raise
+    raise self._result
+joblib.externals.loky.process_executor.TerminatedWorkerError: A worker process managed by the executor was unexpectedly terminated. This could be caused by a segmentation fault while calling the function or by an excessive memory usage causing the Operating System to kill the worker.
+
+The exit codes of the workers are {SIGTERM(-15)}
+Detailed tracebacks of the workers should have been printed to stderr in the executor process if faulthandler was not disabled.
+retrain: 0 unsettled reinforcement run(s) at 1,000,000 steps
+retrain: nothing to do
+score: 1980 of 1980 model(s) already scored on the test year
+score: nothing to do
+screen: 210 of 450 run(s) cached
+screen: 240 run(s) over 60 household-tariff group(s) on 12 worker(s)
+  screen: 4/240 runs, 14 min elapsed, ~803 min left, ETA 16:58
+  screen: 8/240 runs, 14 min elapsed, ~402 min left, ETA 10:18
+  screen: 12/240 runs, 14 min elapsed, ~269 min left, ETA 08:05
+  screen: 16/240 runs, 15 min elapsed, ~207 min left, ETA 07:04
+  screen: 20/240 runs, 15 min elapsed, ~166 min left, ETA 06:23
+  screen: 24/240 runs, 15 min elapsed, ~139 min left, ETA 05:57
+  screen: 28/240 runs, 16 min elapsed, ~118 min left, ETA 05:35
+  screen: 32/240 runs, 16 min elapsed, ~102 min left, ETA 05:19
+  screen: 36/240 runs, 16 min elapsed, ~93 min left, ETA 05:11
+  screen: 40/240 runs, 17 min elapsed, ~84 min left, ETA 05:03
+  screen: 44/240 runs, 17 min elapsed, ~75 min left, ETA 04:54
+  screen: 48/240 runs, 17 min elapsed, ~69 min left, ETA 04:49
+  screen: 52/240 runs, 29 min elapsed, ~106 min left, ETA 05:38
+  screen: 56/240 runs, 30 min elapsed, ~98 min left, ETA 05:29
+  screen: 60/240 runs, 30 min elapsed, ~89 min left, ETA 05:21
+  screen: 64/240 runs, 30 min elapsed, ~82 min left, ETA 05:14
+  screen: 68/240 runs, 30 min elapsed, ~76 min left, ETA 05:08
+  screen: 72/240 runs, 30 min elapsed, ~70 min left, ETA 05:03
+  screen: 76/240 runs, 31 min elapsed, ~67 min left, ETA 05:00
+  screen: 80/240 runs, 32 min elapsed, ~63 min left, ETA 04:57
+  screen: 84/240 runs, 32 min elapsed, ~60 min left, ETA 04:55
+  screen: 88/240 runs, 34 min elapsed, ~58 min left, ETA 04:54
+  screen: 92/240 runs, 34 min elapsed, ~54 min left, ETA 04:50
+  screen: 96/240 runs, 34 min elapsed, ~51 min left, ETA 04:47
+  screen: 100/240 runs, 44 min elapsed, ~62 min left, ETA 05:08
+  screen: 104/240 runs, 46 min elapsed, ~60 min left, ETA 05:08
+  screen: 108/240 runs, 47 min elapsed, ~57 min left, ETA 05:06
+  screen: 112/240 runs, 47 min elapsed, ~53 min left, ETA 05:02
+  screen: 116/240 runs, 47 min elapsed, ~50 min left, ETA 04:59
+  screen: 120/240 runs, 47 min elapsed, ~47 min left, ETA 04:57
+  screen: 124/240 runs, 48 min elapsed, ~45 min left, ETA 04:55
+  screen: 128/240 runs, 49 min elapsed, ~43 min left, ETA 04:54
+  screen: 132/240 runs, 49 min elapsed, ~40 min left, ETA 04:52
+  screen: 136/240 runs, 53 min elapsed, ~40 min left, ETA 04:55
+  screen: 140/240 runs, 53 min elapsed, ~38 min left, ETA 04:53
+  screen: 144/240 runs, 53 min elapsed, ~35 min left, ETA 04:51
+  screen: 148/240 runs, 60 min elapsed, ~37 min left, ETA 04:59
+  screen: 152/240 runs, 60 min elapsed, ~35 min left, ETA 04:57
+  screen: 156/240 runs, 61 min elapsed, ~33 min left, ETA 04:55
+  screen: 160/240 runs, 61 min elapsed, ~31 min left, ETA 04:54
+  screen: 164/240 runs, 61 min elapsed, ~28 min left, ETA 04:52
+  screen: 168/240 runs, 62 min elapsed, ~26 min left, ETA 04:50
+  screen: 172/240 runs, 62 min elapsed, ~25 min left, ETA 04:49
+  screen: 176/240 runs, 62 min elapsed, ~23 min left, ETA 04:47
+  screen: 180/240 runs, 64 min elapsed, ~21 min left, ETA 04:47
+  screen: 184/240 runs, 65 min elapsed, ~20 min left, ETA 04:47
+  screen: 188/240 runs, 65 min elapsed, ~18 min left, ETA 04:46
+  screen: 192/240 runs, 66 min elapsed, ~17 min left, ETA 04:45
+  screen: 196/240 runs, 72 min elapsed, ~16 min left, ETA 04:50
+  screen: 200/240 runs, 72 min elapsed, ~14 min left, ETA 04:49
+  screen: 204/240 runs, 73 min elapsed, ~13 min left, ETA 04:48
+  screen: 208/240 runs, 73 min elapsed, ~11 min left, ETA 04:47
+  screen: 212/240 runs, 73 min elapsed, ~10 min left, ETA 04:45
+  screen: 216/240 runs, 74 min elapsed, ~8 min left, ETA 04:44
+  screen: 220/240 runs, 74 min elapsed, ~7 min left, ETA 04:43
+  screen: 224/240 runs, 74 min elapsed, ~5 min left, ETA 04:41
+  screen: 228/240 runs, 75 min elapsed, ~4 min left, ETA 04:41
+  screen: 232/240 runs, 77 min elapsed, ~3 min left, ETA 04:42
+  screen: 236/240 runs, 78 min elapsed, ~1 min left, ETA 04:41
+  screen: 240/240 runs, 78 min elapsed, ~0 min left, ETA 04:40
+screen: 240 run(s) in 78.1 min
+retrain: 14 unsettled reinforcement run(s) at 1,000,000 steps
+retrain: 14 run(s) over 14 household-tariff group(s) on 12 worker(s)
+  retrain: 1/14 runs, 3 min elapsed, ~40 min left, ETA 05:23
+  retrain: 2/14 runs, 3 min elapsed, ~19 min left, ETA 05:03
+  retrain: 3/14 runs, 3 min elapsed, ~12 min left, ETA 04:56
+  retrain: 4/14 runs, 4 min elapsed, ~9 min left, ETA 04:53
+  retrain: 5/14 runs, 4 min elapsed, ~7 min left, ETA 04:50
+  retrain: 6/14 runs, 4 min elapsed, ~5 min left, ETA 04:49
+  retrain: 7/14 runs, 4 min elapsed, ~4 min left, ETA 04:48
+  retrain: 8/14 runs, 4 min elapsed, ~3 min left, ETA 04:47
+  retrain: 9/14 runs, 4 min elapsed, ~2 min left, ETA 04:46
+  retrain: 10/14 runs, 4 min elapsed, ~2 min left, ETA 04:46
+  retrain: 11/14 runs, 4 min elapsed, ~1 min left, ETA 04:45
+  retrain: 12/14 runs, 5 min elapsed, ~1 min left, ETA 04:46
+  retrain: 13/14 runs, 5 min elapsed, ~0 min left, ETA 04:46
+  retrain: 14/14 runs, 5 min elapsed, ~0 min left, ETA 04:46
+retrain: 14 run(s) in 5.3 min
+  [stale] SI/rel__dqn/148: config changed, recomputing
+  [stale] SI/all_coarse_rel__dqn/223: config changed, recomputing
+  [stale] AU/rel__bc_dqn/142: config changed, recomputing
+  [stale] AU/rel__bc_dqn/66: config changed, recomputing
+  [stale] AU/rel__dqn/180: config changed, recomputing
+  [stale] SI/rel__dqn/240: config changed, recomputing
+  [stale] AU/all_coarse_rel__bc_dqn/1: config changed, recomputing
+  [stale] AU/all_coarse_rel__dqn/5: config changed, recomputing
+  [stale] SI/all_coarse_rel__dqn/204: config changed, recomputing
+  [stale] SI/rel__dqn/179: config changed, recomputing
+  [stale] AU/all_coarse_rel__bc_dqn/65: config changed, recomputing
+  [stale] AU/all_coarse_rel__bc_dqn/29: config changed, recomputing
+  [stale] AU/all_coarse_rel__bc_dqn/249: config changed, recomputing
+  [stale] AU/rel__bc_dqn/247: config changed, recomputing
+score: 1980 of 2220 model(s) already scored on the test year
+score: 240 run(s) over 60 household-tariff group(s) on 12 worker(s)
+  score: 4/240 runs, 0 min elapsed, ~16 min left, ETA 05:02
+  score: 8/240 runs, 0 min elapsed, ~8 min left, ETA 04:54
+  score: 12/240 runs, 0 min elapsed, ~5 min left, ETA 04:51
+  score: 16/240 runs, 0 min elapsed, ~4 min left, ETA 04:50
+  score: 20/240 runs, 0 min elapsed, ~3 min left, ETA 04:49
+  score: 24/240 runs, 0 min elapsed, ~2 min left, ETA 04:48
+  score: 28/240 runs, 0 min elapsed, ~2 min left, ETA 04:48
+  score: 32/240 runs, 0 min elapsed, ~2 min left, ETA 04:48
+  score: 36/240 runs, 0 min elapsed, ~2 min left, ETA 04:47
+  score: 40/240 runs, 0 min elapsed, ~1 min left, ETA 04:47
+  score: 44/240 runs, 0 min elapsed, ~1 min left, ETA 04:47
+  score: 48/240 runs, 0 min elapsed, ~1 min left, ETA 04:47
+  score: 52/240 runs, 0 min elapsed, ~2 min left, ETA 04:48
+  score: 56/240 runs, 0 min elapsed, ~2 min left, ETA 04:48
+  score: 60/240 runs, 0 min elapsed, ~1 min left, ETA 04:48
+  score: 64/240 runs, 0 min elapsed, ~1 min left, ETA 04:47
+  score: 68/240 runs, 0 min elapsed, ~1 min left, ETA 04:47
+  score: 72/240 runs, 0 min elapsed, ~1 min left, ETA 04:47
+  score: 76/240 runs, 0 min elapsed, ~1 min left, ETA 04:47
+  score: 80/240 runs, 0 min elapsed, ~1 min left, ETA 04:47
+  score: 84/240 runs, 0 min elapsed, ~1 min left, ETA 04:47
+  score: 88/240 runs, 0 min elapsed, ~1 min left, ETA 04:47
+  score: 92/240 runs, 0 min elapsed, ~1 min left, ETA 04:47
+  score: 96/240 runs, 0 min elapsed, ~1 min left, ETA 04:47
+  score: 100/240 runs, 1 min elapsed, ~1 min left, ETA 04:47
+  score: 104/240 runs, 1 min elapsed, ~1 min left, ETA 04:47
+  score: 108/240 runs, 1 min elapsed, ~1 min left, ETA 04:47
+  score: 112/240 runs, 1 min elapsed, ~1 min left, ETA 04:47
+  score: 116/240 runs, 1 min elapsed, ~1 min left, ETA 04:47
+  score: 120/240 runs, 1 min elapsed, ~1 min left, ETA 04:47
+  score: 124/240 runs, 1 min elapsed, ~1 min left, ETA 04:48
+  score: 128/240 runs, 1 min elapsed, ~1 min left, ETA 04:48
+  score: 132/240 runs, 1 min elapsed, ~1 min left, ETA 04:48
+  score: 136/240 runs, 1 min elapsed, ~1 min left, ETA 04:48
+  score: 140/240 runs, 1 min elapsed, ~1 min left, ETA 04:48
+  score: 144/240 runs, 1 min elapsed, ~1 min left, ETA 04:48
+  score: 148/240 runs, 1 min elapsed, ~1 min left, ETA 04:48
+  score: 152/240 runs, 1 min elapsed, ~1 min left, ETA 04:48
+  score: 156/240 runs, 1 min elapsed, ~1 min left, ETA 04:48
+  score: 160/240 runs, 1 min elapsed, ~1 min left, ETA 04:48
+  score: 164/240 runs, 2 min elapsed, ~1 min left, ETA 04:48
+  score: 168/240 runs, 2 min elapsed, ~1 min left, ETA 04:48
+  score: 172/240 runs, 2 min elapsed, ~1 min left, ETA 04:48
+  score: 176/240 runs, 2 min elapsed, ~1 min left, ETA 04:48
+  score: 180/240 runs, 2 min elapsed, ~1 min left, ETA 04:48
+  score: 184/240 runs, 2 min elapsed, ~1 min left, ETA 04:48
+  score: 188/240 runs, 2 min elapsed, ~1 min left, ETA 04:48
+  score: 192/240 runs, 2 min elapsed, ~1 min left, ETA 04:48
+  score: 196/240 runs, 2 min elapsed, ~0 min left, ETA 04:48
+  score: 200/240 runs, 2 min elapsed, ~0 min left, ETA 04:48
+  score: 204/240 runs, 2 min elapsed, ~0 min left, ETA 04:48
+  score: 208/240 runs, 2 min elapsed, ~0 min left, ETA 04:48
+  score: 212/240 runs, 2 min elapsed, ~0 min left, ETA 04:48
+  score: 216/240 runs, 2 min elapsed, ~0 min left, ETA 04:48
+  score: 220/240 runs, 2 min elapsed, ~0 min left, ETA 04:48
+  score: 224/240 runs, 2 min elapsed, ~0 min left, ETA 04:48
+  score: 228/240 runs, 3 min elapsed, ~0 min left, ETA 04:48
+  score: 232/240 runs, 3 min elapsed, ~0 min left, ETA 04:48
+  score: 236/240 runs, 3 min elapsed, ~0 min left, ETA 04:48
+  score: 240/240 runs, 3 min elapsed, ~0 min left, ETA 04:48
+score: 240 run(s) in 2.6 min

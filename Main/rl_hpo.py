@@ -133,7 +133,22 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 HPO_ROOT = os.environ.get("ERK_HPO_ROOT",
                           os.path.join(HERE, "results_local", "rl_hpo"))
 MODELS_ROOT = os.environ.get("ERK_HPO_MODELS", os.path.join(rb.MODELS, "hpo"))
-VARIANT = rb.TUNE_VARIANT           # fc_h24: the deployable feature set
+# The observation contract a search trains under: the panel's first
+# (`fc_h24`) unless the environment names another of `rb.variant_specs`. An
+# environment variable rather than an argument because it has to be the same in
+# the driver and in every worker it spawns, and it is identity (study.json): a
+# study under another contract lives under its own `ERK_HPO_ROOT`.
+VARIANT = os.environ.get("ERK_HPO_VARIANT", rb.TUNE_VARIANT)
+# What a trial is ranked on. "validation": the held-out weeks as they are (the
+# first studies). "shift": the mean of that and the same weeks with the market
+# price raised to the scored year's level (`rb.shifted_bundle`) -- the held-out
+# weeks share the training years' price level, the scored year does not, and a
+# setting chosen on the former alone is chosen blind to the one change the
+# scored year is known to bring (`FIGURES_RL_FEATURES`, section 5).
+OBJECTIVES = ("validation", "shift")
+OBJECTIVE = os.environ.get("ERK_HPO_OBJECTIVE", "validation")
+if OBJECTIVE not in OBJECTIVES:
+    raise ValueError(f"ERK_HPO_OBJECTIVE must be one of {OBJECTIVES}")
 METHODS = ("bc", "dqn", "bc_dqn")
 TARIFFS = ("AU", "SI")
 STEPS = 500_000                     # the panel's DQN budget (`--steps` default)
@@ -547,6 +562,31 @@ def eval_key(ev) -> tuple:
     return (ev["out_root"], ev["tariff"], ev["method"], int(ev["ident"]))
 
 
+def shift_fields(prep, res) -> dict:
+    """The validation rollout of a trained run, repeated at the scored year's
+    price level, with the idle pack's bill at that level beside it.
+
+    Read from the saved network, so it costs two rollouts and no training,
+    and written back into the run's own result file by `run_job`: a resumed
+    search then resolves it from disk like every other number of the run.
+    """
+    net, fb, spec, _ = rl.load_model(os.path.join(HERE, res["model_path"]))
+    shifted = rb.shifted_bundle(prep)
+    b = shifted["bundle"]
+    static = fb.normalize(fb.build_static(
+        b["sig"], **rb.feature_inputs(prep, spec, "train")))
+    args = (b["sig"], b["settle"], b["env"], rb.VAL_BLOCKS, rb.SOC_INIT_USABLE,
+            prep["tariff"] == "SI")
+    if "idle" not in shifted:
+        shifted["idle"] = float(rl.validation_rollout(
+            _IdleNet(), fb, static, *args)["cost_eur_closed"])
+    v = rl.validation_rollout(net, fb, static, *args)
+    return {"val_shift_cost_closed": float(v["cost_eur_closed"]),
+            "val_shift_efc": float(v["efc"]),
+            "val_shift_idle": shifted["idle"],
+            "val_shift_delta": shifted["delta"]}
+
+
 def _row(ev, res, base) -> dict:
     """What every phase keeps of a run_one result.
 
@@ -574,6 +614,15 @@ def _row(ev, res, base) -> dict:
         "train_steps": res.get("train_steps"),
         "wall_s": res.get("wall_s"), "error": None,
     })
+    if ev.get("objective") == "shift" and "val_shift_cost_closed" in res:
+        # The two price levels, each as a saving against the idle pack at that
+        # level, and their mean: the value a "shift" study ranks on.
+        shift_net = float(res["val_shift_cost_closed"]) + rb.val_wear_fn(
+            ev["tariff"])(float(res["val_shift_efc"]), N_VAL_DAYS)
+        row["saving_plain_a"] = row["saving_val_a"]
+        row["saving_shift_a"] = ((float(res["val_shift_idle"]) - shift_net)
+                                 * 365.0 / N_VAL_DAYS)
+        row["saving_val_a"] = 0.5 * (row["saving_plain_a"] + row["saving_shift_a"])
     if ev.get("score_test"):
         efc = float(res["efc"])
         wear = float(hs.cycle_wear_eur(efc, rb.BATTERY_CAP, ev["tariff"]))
@@ -616,6 +665,9 @@ def stored_result(ev):
         return None
     if ev.get("score_test") and "cost_eur_total" not in res:
         return None
+    if (ev.get("objective") == "shift" and not ev.get("score_test")
+            and "val_shift_cost_closed" not in res):
+        return None                 # a worker adds the shifted rollout
     return res
 
 
@@ -696,6 +748,11 @@ def run_job(job) -> list:
                                  models_root=ev["models_root"],
                                  score_test=bool(ev.get("score_test")),
                                  overrides=ev["overrides"])
+                if (ev.get("objective") == "shift" and not ev.get("score_test")
+                        and "val_shift_cost_closed" not in res):
+                    res = dict(res, **shift_fields(prep, res))
+                    _write_json(_result_path(ev["out_root"], ev["tariff"],
+                                             ev["method"], ev["ident"]), res)
             if not ev.get("score_test") and "cost_eur_closed" in res:
                 # A search must never be handed a test number, even one left
                 # on disk by some other path under the same digest.
@@ -766,6 +823,10 @@ def study_settings(tariff: str, method: str, tag: str = "", households=None,
         base.update(rc.CONTRACT_TUNED.get((CONTRACT, method), {}))
         algo["reward"] = rr.REWARD_VERSION
         extra = {"reward": reward, "contract": CONTRACT}
+    elif OBJECTIVE != "validation":
+        # Written only when it is not the first studies': their study.json has
+        # no such key and reads as None, which is what they were.
+        extra = {"objective": OBJECTIVE}
     inc_params = incumbent_params(tariff, method, steps, reward)
     return {
         **extra,
@@ -790,7 +851,8 @@ def study_settings(tariff: str, method: str, tag: str = "", households=None,
 
 
 _IDENTITY = ("tariff", "method", "variant", "households", "rungs", "steps",
-             "space_version", "space", "fixed", "algo", "split", "reward")
+             "space_version", "space", "fixed", "algo", "split", "reward",
+             "objective")
 
 
 def open_settings(settings: dict, root=None) -> dict:
@@ -980,6 +1042,7 @@ class SearchSource:
                 "ident": int(ident), "seed": seed, "overrides": st["over"],
                 "steps": self.s["steps"], "score_test": False,
                 "out_root": out_root, "reward": self.reward,
+                "objective": self.s.get("objective"),
                 "models_root": model_root(out_root, self.root, self.models),
                 "root": self.root}
 
@@ -1489,6 +1552,7 @@ def _refine_evals(name, seeds, top, root=None, models=None):
                     "ident": int(ident), "seed": seed, "overrides": over,
                     "steps": s["steps"], "score_test": False,
                     "out_root": out_root, "reward": s.get("reward"),
+                    "objective": s.get("objective"),
                     "models_root": model_root(out_root, root, models),
                     "root": root})
     return evals
@@ -1605,6 +1669,7 @@ def _confirm_evals(name, seeds, units, root=None, models=None):
                       "seed": seed, "overrides": over, "steps": s["steps"],
                       "score_test": True, "out_root": out_root,
                       "reward": s.get("reward"),
+                      "objective": s.get("objective"),
                       "models_root": model_root(out_root, root, models),
                       "root": root}
                 if label == "current":

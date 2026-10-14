@@ -590,7 +590,7 @@ class RewardFunction:
     versioned = False                   # legacy rewards carry no REWARD_VERSION
 
     def __init__(self, bundle: dict, fb, static_norm, *, val_blocks, soc_init,
-                 respect_peak: bool, load_fc=None, pv_fc=None):
+                 respect_peak: bool, load_fc=None, pv_fc=None, context=None):
         self.env = bundle["env"]
         self.sig = bundle["sig"]
         self.settle = bundle["settle"]
@@ -600,6 +600,9 @@ class RewardFunction:
         self.soc_init = float(soc_init)
         self.respect_peak = bool(respect_peak)
         self.load_fc, self.pv_fc = load_fc, pv_fc
+        # The household's own past (`rl_features.Context`), for a spec with
+        # feature groups: handed on wherever the features are rebuilt.
+        self.context = context
 
     def config(self) -> dict:
         """What a result trained under this reward depends on (digested)."""
@@ -632,6 +635,7 @@ class RewardFunction:
     def policy(self, net, **kw):
         return rl.LearnedPolicy(net, self.fb, self.respect_peak,
                                 load_fc=self.load_fc, pv_fc=self.pv_fc,
+                                context=self.context,
                                 tracker_factory=self.tracker_factory(), **kw)
 
 
@@ -764,7 +768,8 @@ class SIContractChargeReward(RewardFunction):
         # reads its signals directly and has no features to rebuild.
         if self.fb is not None:
             self.static_norm = self.fb.normalize(self.fb.build_static(
-                self.sig, load_fc=self.load_fc, pv_fc=self.pv_fc))
+                self.sig, load_fc=self.load_fc, pv_fc=self.pv_fc,
+                context=self.context))
 
     # -- the reward ---------------------------------------------------------
     def baseline(self) -> np.ndarray:

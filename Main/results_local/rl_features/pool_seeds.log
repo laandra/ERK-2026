@@ -1,0 +1,90 @@
+pool: 0 of 24 pooled clone(s) trained
+pool AU: 299 members, building the static matrices of 0
+pool AU: built in 0.0 min
+pool SI: 299 members, building the static matrices of 0
+pool SI: built in 0.0 min
+pool: fitting 24 clone(s), 2 at a time on 1 thread(s) each
+  pool: 1/24 AU groups__h256__s2 in 7.2 min; ~166 min left, ETA 03:11
+  pool: 2/24 AU groups__h256__s1 in 9.2 min; ~101 min left, ETA 02:09
+  pool: 3/24 AU all_no_ar__h256__s1 in 9.7 min; ~119 min left, ETA 02:34
+  pool: 4/24 AU all_no_ar__h256__s2 in 11.7 min; ~104 min left, ETA 02:24
+  pool: 5/24 SI groups__h256__s2 in 10.2 min; ~118 min left, ETA 02:48
+  pool: 6/24 SI groups__h256__s1 in 14.8 min; ~95 min left, ETA 02:25
+  pool: 7/24 SI all_no_ar__h256__s1 in 13.4 min; ~108 min left, ETA 02:51
+  pool: 8/24 SI all_no_ar__h256__s2 in 14.9 min; ~93 min left, ETA 02:38
+  pool: 9/24 AU fc_h24__h256__s1 in 3.7 min; ~80 min left, ETA 02:27
+  pool: 10/24 AU fc_h24__h256__s2 in 7.9 min; ~76 min left, ETA 02:29
+  pool: 11/24 SI fc_h24__h256__s1 in 9.2 min; ~68 min left, ETA 02:24
+  pool: 12/24 AU groups__h64__s1 in 4.1 min; ~61 min left, ETA 02:21
+  pool: 13/24 SI fc_h24__h256__s2 in 8.7 min; ~54 min left, ETA 02:15
+  pool: 14/24 AU groups__h64__s2 in 4.1 min; ~47 min left, ETA 02:11
+  pool: 15/24 AU all_no_ar__h64__s1 in 5.5 min; ~41 min left, ETA 02:08
+  pool: 16/24 AU all_no_ar__h64__s2 in 4.0 min; ~35 min left, ETA 02:03
+  pool: 17/24 SI groups__h64__s1 in 15.4 min; ~35 min left, ETA 02:17
+  pool: 18/24 SI groups__h64__s2 in 18.8 min; ~29 min left, ETA 02:16
+  pool: 19/24 SI all_no_ar__h64__s1 in 16.1 min; ~26 min left, ETA 02:25
+  pool: 20/24 SI all_no_ar__h64__s2 in 15.0 min; ~21 min left, ETA 02:22
+  pool: 21/24 AU fc_h24__h64__s1 in 3.8 min; ~15 min left, ETA 02:18
+  pool: 22/24 AU fc_h24__h64__s2 in 6.1 min; ~10 min left, ETA 02:18
+  pool: 23/24 SI fc_h24__h64__s1 in 11.9 min; ~5 min left, ETA 02:20
+  pool: 24/24 SI fc_h24__h64__s2 in 7.3 min; ~0 min left, ETA 02:15
+pool validate: 60 unit-tariff(s) x up to 12 clone(s)
+
+POOLED CLONE, SELECTED ON VALIDATION (gain = control - model, over the 140 held-out days)
+tariff           model  val_select  gain_vs_control  better_on  n
+    AU    groups__h256     211.144            0.305         22 30
+    AU     groups__h64     211.281            0.168         16 30
+    AU     fc_h24__h64     211.449            0.000          0 30
+    AU  all_no_ar__h64     211.623           -0.174         19 30
+    AU all_no_ar__h256     211.985           -0.536         11 30
+    AU    fc_h24__h256     212.002           -0.553         11 30
+    SI all_no_ar__h256     150.116            2.298         25 30
+    SI    groups__h256     150.748            1.666         23 30
+    SI  all_no_ar__h64     150.874            1.540         23 30
+    SI     groups__h64     151.541            0.873         23 30
+    SI     fc_h24__h64     152.414            0.000          0 30
+    SI    fc_h24__h256     152.445           -0.031         15 30
+  picked: {'AU': 'groups__h256', 'SI': 'all_no_ar__h256'}
+pool score: 60 unit-tariff(s) x up to 12 clone(s)
+
+==============================================================================
+POOLED CLONE (299 households), test year: saving against no battery and gains, total bill + wear
+==============================================================================
+tariff           model  seed  picked  saving  vs_local_clone  vs_pooled_control  better_on  n     p     efc  agreement
+    AU all_no_ar__h256     0   False 268.923           7.552              0.075         20 30 0.360 204.492      0.903
+    AU all_no_ar__h256     1   False 268.373           7.002             -1.081         13 30 0.253 208.816      0.904
+    AU all_no_ar__h256     2   False 269.070           7.700              0.538         20 30 0.416 210.418      0.902
+    AU  all_no_ar__h64     0   False 266.924           5.553             -1.924         11 30 0.052 210.363      0.905
+    AU  all_no_ar__h64     1   False 268.204           6.833             -1.250         19 30 0.556 212.304      0.905
+    AU  all_no_ar__h64     2   False 267.588           6.217             -0.945         15 30 0.730 205.958      0.902
+    AU    fc_h24__h256     0   False 265.864           4.493             -2.984          9 30 0.004 202.236      0.881
+    AU    fc_h24__h256     1   False 270.512           9.141              1.058         21 30 0.014 214.968      0.882
+    AU    fc_h24__h256     2   False 264.490           3.119             -4.043          1 30 0.000 202.268      0.882
+    AU     fc_h24__h64     0   False 268.848           7.477              0.000          0 30   NaN 210.502      0.881
+    AU     fc_h24__h64     1   False 269.454           8.083              0.000          0 30   NaN 214.581      0.882
+    AU     fc_h24__h64     2   False 268.533           7.162              0.000          0 30   NaN 210.673      0.882
+    AU    groups__h256     0    True 267.366           5.995             -1.482         14 30 0.229 206.843      0.905
+    AU    groups__h256     1    True 266.814           5.443             -2.639          9 30 0.009 211.232      0.906
+    AU    groups__h256     2    True 268.041           6.670             -0.492         15 30 0.808 203.647      0.906
+    AU     groups__h64     0   False 266.838           5.467             -2.010          9 30 0.003 208.780      0.905
+    AU     groups__h64     1   False 268.395           7.024             -1.059          8 30 0.038 207.639      0.908
+    AU     groups__h64     2   False 268.422           7.051             -0.111         18 30 0.503 208.088      0.908
+    SI all_no_ar__h256     0    True  59.486           5.030              0.498         17 30 0.598 128.627      0.896
+    SI all_no_ar__h256     1    True  59.214           4.757             -3.008         15 30 0.584 139.067      0.896
+    SI all_no_ar__h256     2    True  58.311           3.854             -4.112         14 30 0.271 136.167      0.895
+    SI  all_no_ar__h64     0   False  55.410           0.953             -3.579         11 30 0.382 117.006      0.896
+    SI  all_no_ar__h64     1   False  59.083           4.626             -3.138         16 30 0.670 128.169      0.895
+    SI  all_no_ar__h64     2   False  58.191           3.735             -4.231         14 30 0.516 133.036      0.896
+    SI    fc_h24__h256     0   False  54.100          -0.357             -4.888          5 30 0.006  98.628      0.866
+    SI    fc_h24__h256     1   False  55.386           0.929             -6.836          5 30 0.000  97.572      0.866
+    SI    fc_h24__h256     2   False  54.940           0.483             -7.483          4 30 0.000  93.595      0.865
+    SI     fc_h24__h64     0   False  58.988           4.531              0.000          0 30   NaN 123.908      0.865
+    SI     fc_h24__h64     1   False  62.222           7.765              0.000          0 30   NaN 120.156      0.866
+    SI     fc_h24__h64     2   False  62.422           7.965              0.000          0 30   NaN 119.287      0.865
+    SI    groups__h256     0   False  57.331           2.874             -1.658         17 30 1.000 128.947      0.896
+    SI    groups__h256     1   False  57.059           2.602             -5.163         14 30 0.119 123.041      0.896
+    SI    groups__h256     2   False  53.563          -0.894             -8.859         13 30 0.064 124.195      0.895
+    SI     groups__h64     0   False  51.332          -3.125             -7.657          6 30 0.000  93.095      0.895
+    SI     groups__h64     1   False  46.990          -7.467            -15.232          4 30 0.000  97.265      0.895
+    SI     groups__h64     2   False  50.463          -3.994            -11.959          5 30 0.000 104.810      0.896
+POOL DONE

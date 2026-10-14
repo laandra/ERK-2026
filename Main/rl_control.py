@@ -64,6 +64,7 @@ import torch.nn.functional as F
 
 from Basic_Functions import max_charge_now, max_discharge_now
 import Rule_Based_Control as rbc
+import rl_features as rf
 
 _EPS = 1e-12
 N_ACTIONS = 5
@@ -162,6 +163,28 @@ class FeatureSpec:
     distance from the line and from the house's own idle draw. A draw above it
     raises the next contract; one below it is free. Without it an agent paid
     for the standing charge is paid for something it cannot see.
+
+    Three further fields widen the observation towards what the study's other
+    controllers read (`rl_features`, measured in `run_rl_features`):
+
+    `n_bins` is the lookahead RESOLUTION. 4 is the panel's graded edges
+    (`_BIN_EDGES`); any other count is uniform bins over the horizon, so 24 at
+    a 24 h horizon is the price list and the forecast by the hour. It sat in
+    this dataclass unread until the feature study -- every result on disk was
+    digested with 4 and built with 4, so giving it a meaning moved none.
+    `forecast` names what fills an "fc" channel: "median14", the bare 14-day
+    median, or "ar", the same median plus the study's fitted residual AR
+    re-issued at every interval (`hems_study.HbdForecaster.rolling_forecasts`)
+    -- the forecaster of the best MPC arm. It is a label: the arrays are the
+    caller's, the digest needs to know which they were.
+    `groups` switches on named blocks of extra columns (`rl_features.GROUPS`).
+    `price_reference` is what a price is measured AGAINST: "level" hands the
+    network delivered rates as they are; "trailing" subtracts the mean rate of
+    the week before (`rl_features.trailing_price`) from the current rate, the
+    export credit and every price bin. Same information up to a number the
+    controller already holds -- and the only representation of it that does
+    not leave the range it was trained on when a year's prices settle at a
+    new level, which the scored year's do.
     """
 
     horizon: int = 48
@@ -171,6 +194,9 @@ class FeatureSpec:
     peak_features: bool = False
     n_bins: int = 4
     contract_features: bool = False
+    forecast: str = "median14"     # median14 | ar
+    groups: tuple = ()
+    price_reference: str = "level"  # level | trailing
 
     def __post_init__(self):
         for ch in (self.load_channel, self.pv_channel):
@@ -181,6 +207,24 @@ class FeatureSpec:
         if self.contract_features and not self.peak_features:
             raise ValueError("contract_features are measured against the "
                              "agreed power, so they need peak_features")
+        if self.n_bins < 1:
+            raise ValueError("n_bins must be >= 1")
+        if self.forecast not in ("median14", "ar"):
+            raise ValueError(f"forecast must be median14|ar, got {self.forecast!r}")
+        if self.price_reference not in ("level", "trailing"):
+            raise ValueError("price_reference must be level|trailing, got "
+                             f"{self.price_reference!r}")
+        # Sorted into GROUPS' order and frozen as a tuple: a spec loaded back
+        # from JSON arrives with a list, and two orders of the same groups are
+        # one network (`rl_features.group_columns` emits them in that order).
+        groups = tuple(g for g in rf.GROUPS if g in set(self.groups))
+        if len(groups) != len(set(self.groups)):
+            raise ValueError(f"groups must be a subset of {rf.GROUPS}, "
+                             f"got {tuple(self.groups)}")
+        if "peak" in groups and not self.peak_features:
+            raise ValueError("the peak group is measured against the agreed "
+                             "power, so it needs peak_features")
+        object.__setattr__(self, "groups", groups)
 
     @property
     def causal(self) -> bool:
@@ -192,10 +236,19 @@ class FeatureSpec:
         # key with its default would have reported the whole panel -- and every
         # pooled and searched run behind it -- stale on the day the field was
         # added, for a setting none of them uses. Same rule as
-        # `BCOptions.changed`.
+        # `BCOptions.changed`. `forecast`, `groups` and `price_reference`
+        # follow it.
         out = asdict(self)
+        if out["price_reference"] == "level":
+            del out["price_reference"]
         if not out["contract_features"]:
             del out["contract_features"]
+        if out["forecast"] == "median14":
+            del out["forecast"]
+        if out["groups"]:
+            out["groups"] = list(out["groups"])
+        else:
+            del out["groups"]
         return out
 
 
@@ -207,13 +260,23 @@ _BIN_EDGES = (0.0, 0.125, 0.25, 0.5, 1.0)
 
 
 def _lookahead_bins(arr: np.ndarray, horizon: int, n_steps: int,
-                    mean: bool) -> np.ndarray:
+                    mean: bool, n_bins: int = 4) -> np.ndarray:
     """(n_steps, 4) sums (or means) of `arr` over [t+1+e_k*h, t+1+e_{k+1}*h).
 
     Past the end of the array the future is taken as zero -- the same "no tail
     to spare" behaviour `load_study_frames` documents for the final day.
+
+    Another bin count, or a forecast that is a matrix issued at every step
+    rather than one aligned series, goes through `rl_features.lookahead`. The
+    panel's case -- four graded bins of an aligned series -- stays on the
+    cumulative-sum path below, operation for operation, because every result
+    on disk was built by it.
     """
     arr = np.asarray(arr, dtype=float)
+    if n_bins != len(_BIN_EDGES) - 1 or arr.ndim == 2:
+        return rf.lookahead(arr, horizon, n_steps,
+                            rf.bin_edges(n_bins, _BIN_EDGES),
+                            "mean" if mean else "sum")
     cs = np.concatenate([[0.0], np.cumsum(arr)])
     n = len(arr)
     out = np.zeros((n_steps, len(_BIN_EDGES) - 1), dtype=np.float32)
@@ -249,7 +312,12 @@ class FeatureBuilder:
         self.norm_std = None
 
     # -- static ------------------------------------------------------------
-    def build_static(self, sig, load_fc=None, pv_fc=None) -> np.ndarray:
+    def build_static(self, sig, load_fc=None, pv_fc=None,
+                     context=None) -> np.ndarray:
+        """`load_fc` / `pv_fc` fill the "fc" channels: one array aligned with
+        the bundle, or an `(n, L)` matrix of forecasts issued at every step.
+        `context` (`rl_features.Context`) is the household's own past, needed
+        by the groups that read further back than the bundle starts."""
         spec = self.spec
         n = sig.n_steps
         idx = sig.env.dataset.index[:n]
@@ -265,9 +333,15 @@ class FeatureBuilder:
             sig.consumption[:n], sig.generation[:n],
         ]
         if spec.price_features:
-            cols += [sig.import_rate[:n], sig.export_credit[:n]]
-            bins = _lookahead_bins(sig.import_rate, spec.horizon, n, mean=True)
-            cols += [bins[:, k] for k in range(bins.shape[1])]
+            bins = _lookahead_bins(sig.import_rate, spec.horizon, n, mean=True,
+                                   n_bins=spec.n_bins)
+            if spec.price_reference == "level":
+                cols += [sig.import_rate[:n], sig.export_credit[:n]]
+                cols += [bins[:, k] for k in range(bins.shape[1])]
+            else:
+                ref = rf.trailing_price(sig)
+                cols += [sig.import_rate[:n] - ref, sig.export_credit[:n] - ref]
+                cols += [bins[:, k] - ref for k in range(bins.shape[1])]
 
         def _channel(kind, truth, fc):
             if kind == "none":
@@ -279,11 +353,20 @@ class FeatureBuilder:
                                  "forecast array was provided")
             return np.asarray(fc, dtype=float)[:n]
 
-        for series in (_channel(spec.load_channel, sig.consumption, load_fc),
-                       _channel(spec.pv_channel, sig.generation, pv_fc)):
+        channels = (_channel(spec.load_channel, sig.consumption, load_fc),
+                    _channel(spec.pv_channel, sig.generation, pv_fc))
+        for series in channels:
             if series is not None:
-                bins = _lookahead_bins(series, spec.horizon, n, mean=False)
+                bins = _lookahead_bins(series, spec.horizon, n, mean=False,
+                                       n_bins=spec.n_bins)
                 cols += [bins[:, k] for k in range(bins.shape[1])]
+
+        if spec.groups:
+            # BEFORE the contract columns, which `agreed_kw_column` finds by
+            # counting back from the end.
+            cols += rf.group_columns(spec.groups, sig, context, *channels,
+                                     spec.horizon, _BIN_EDGES,
+                                     spec.peak_features)
 
         if spec.peak_features:
             hours = sig.hours
@@ -358,7 +441,7 @@ class FeatureBuilder:
         """
         if not self.spec.price_features:
             return []
-        return list(range(8, 8 + 2 + len(_BIN_EDGES) - 1))
+        return list(range(8, 8 + 2 + self.spec.n_bins))
 
     @property
     def agreed_kw_column(self):
@@ -1271,12 +1354,16 @@ class LearnedPolicy(rbc.Policy):
     def __init__(self, net: QNet, fb: FeatureBuilder, respect_peak: bool,
                  load_fc=None, pv_fc=None, name: str = "rl_dqn",
                  label: str = "RL: DQN", causal: bool = True,
-                 tracker_factory=None):
+                 tracker_factory=None, context=None):
         self.net = net
         self.fb = fb
         self.respect_peak = bool(respect_peak)
         self.load_fc = load_fc
         self.pv_fc = pv_fc
+        # The household's own past (`rl_features.Context`), for a spec with
+        # feature groups. Static like the forecasts: it is the load and the
+        # roof, never the agent's own meter.
+        self.context = context
         self.name = name
         self.label = label
         self.causal = bool(causal)
@@ -1293,7 +1380,8 @@ class LearnedPolicy(rbc.Policy):
                              "tracker_factory")
 
     def reset(self, sig):
-        static = self.fb.build_static(sig, load_fc=self.load_fc, pv_fc=self.pv_fc)
+        static = self.fb.build_static(sig, load_fc=self.load_fc,
+                                      pv_fc=self.pv_fc, context=self.context)
         self._static = self.fb.normalize(static)
         self._tracker = (self.tracker_factory(sig)
                          if self.fb.spec.contract_features else None)
