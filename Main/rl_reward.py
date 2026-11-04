@@ -656,8 +656,10 @@ class AUEnergyReward(RewardFunction):
 class SIExcessPowerReward(RewardFunction):
     """SI on a contract the dispatch does NOT move: energy + excess power.
 
-    `price_interval`'s `variable`: the delivered energy and the excess-power
-    ratchet above the agreed power in force. Right for a signed contract
+    The arm settlement's `variable`: the delivered energy and the excess-power
+    charge above the agreed power in force -- the statutory norm's increment
+    under `hs.SI_EXCESS_POWER_MODEL="statutory"` (`rbc.price_interval_statutory`),
+    the ratchet under "ratchet" (`rbc.price_interval`). Right for a signed contract
     (`fixed`), where the standing charge is a constant. On a contract the
     dispatch re-agrees this is the reward the panel was trained on before
     `rl_reward` -- the "contract-blind" reward -- and it is kept selectable on

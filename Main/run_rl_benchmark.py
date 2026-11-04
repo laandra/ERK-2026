@@ -176,8 +176,14 @@ def _calendar(tariff: str) -> None:
     hs.TariffCalculator.LOCAL_TZ = None
 
 
+def household_path(ident) -> str:
+    """The household's data file -- which an SI environment needs for its
+    connection and meter history (`hs.SI_CONTRACT`)."""
+    return os.path.join(DATA, f"Ausgrid {ident}.csv")
+
+
 def build_bundle(tariff: str, df_kwh, df_kw, n_steps: int,
-                 contract: dict | None = None) -> dict:
+                 contract: dict | None = None, household: str | None = None) -> dict:
     """One environment with its rates, settlement and signals.
 
     `contract` is passed to `hs.build_study_env` as keywords
@@ -191,6 +197,7 @@ def build_bundle(tariff: str, df_kwh, df_kw, n_steps: int,
         hs.build_study_env(df_kwh, battery_cap=BATTERY_CAP,
                            soc_min_pct=SOC_MIN, soc_max_pct=SOC_MAX,
                            p_max=P_MAX, eff=EFF, delta_t=DELTA_T, H=H,
+                           tariff=tariff, household=household,
                            **(contract or {})),
         P_MAX, EFF, DELTA_T)
     rates = hs.build_rate_vectors(tariff, env, df_kw.index,
@@ -211,15 +218,16 @@ def prepare_household(ident, tariff: str) -> dict:
     evaluation numbers drop into the study's frame without translation.
     """
     _calendar(tariff)
-    path = os.path.join(DATA, f"Ausgrid {ident}.csv")
+    path = household_path(ident)
     frames = hs.load_study_frames(path, H=H, delta_t=DELTA_T, n_train=N_TRAIN,
                                   n_sim=N_SIM)
 
     df_all_kwh = frames["df_all_kwh"]
     df_train_kwh = df_all_kwh.iloc[: N_TRAIN * H]
-    train = build_bundle(tariff, df_train_kwh, frames["df_train"], N_TRAIN * H)
+    train = build_bundle(tariff, df_train_kwh, frames["df_train"], N_TRAIN * H,
+                         household=path)
     sim = build_bundle(tariff, frames["df_ctrl_kwh"], frames["df_ctrl"],
-                       N_SIM * H)
+                       N_SIM * H, household=path)
 
     # The causal forecast, built over the WHOLE series once so the sim year's
     # first fortnight reads real history instead of a cold start.
@@ -233,6 +241,16 @@ def prepare_household(ident, tariff: str) -> dict:
         "fc_train": (fc_con[:s0], fc_gen[:s0]),
         "fc_sim": (fc_con[s0:s0 + n_ctrl], fc_gen[s0:s0 + n_ctrl]),
     }
+
+
+def teacher_dir(tariff: str, cache_tag: str | None = None) -> str:
+    """The teacher cache's directory for a tariff (and SI contract type).
+
+    Carries the excess-power model (`hs.excess_power_suffix`): a teacher solved
+    against the ratchet demonstrates another bill than the statutory one.
+    """
+    base = tariff + hs.excess_power_suffix(tariff)
+    return base if cache_tag is None else f"{base}@{cache_tag}"
 
 
 def teacher_setpoints(prep, contract: dict | None = None,
@@ -261,8 +279,7 @@ def teacher_setpoints(prep, contract: dict | None = None,
     if (contract is None) != (cache_tag is None):
         raise ValueError("a teacher under another contract needs its own "
                          "cache_tag, and a cache_tag needs a contract")
-    cache = os.path.join(MODELS, "teacher",
-                         tariff if cache_tag is None else f"{tariff}@{cache_tag}",
+    cache = os.path.join(MODELS, "teacher", teacher_dir(tariff, cache_tag),
                          f"d{a}-{b}", f"{ident}.npz")
     if os.path.exists(cache):
         return np.load(cache)["setpoints_kwh"]
@@ -273,6 +290,7 @@ def teacher_setpoints(prep, contract: dict | None = None,
         hs.build_study_env(df_teach_kwh, battery_cap=BATTERY_CAP,
                            soc_min_pct=SOC_MIN, soc_max_pct=SOC_MAX,
                            p_max=P_MAX, eff=EFF, delta_t=DELTA_T, H=H,
+                           tariff=tariff, household=household_path(ident),
                            **(contract or {})),
         P_MAX, EFF, DELTA_T)
     rates = hs.build_rate_vectors(tariff, env, df_teach_kwh.index,
@@ -337,10 +355,13 @@ def run_digest(cfg: rl.TrainConfig, spec, tariff: str, method: str,
     version = {"bc": (rl.BC_ALGO_VERSION,),
                "dqn": (rl.ALGO_VERSION,),
                "bc_dqn": (rl.BC_ALGO_VERSION, rl.ALGO_VERSION)}[method]
+    # `excess_power_key`: on SI under the statutory excess charge, which every
+    # reward and every score here is billed through, and empty otherwise, so a
+    # result trained and scored under the ratchet keeps its digest.
     return _digest(spec.config(), _method_config(cfg, method, clone),
                    {"tariff": tariff, "method": method, "algo": version,
                     "train_days": TRAIN_BLOCKS, "val_days": VAL_BLOCKS,
-                    "teach_span": TEACH_SPAN})
+                    "teach_span": TEACH_SPAN, **hs.excess_power_key(tariff)})
 
 
 def make_config(steps: int, seed: int) -> rl.TrainConfig:
@@ -617,7 +638,8 @@ def shifted_bundle(prep) -> dict:
         kw = frames["df_train"].copy()
         kwh["SMP"] = kwh["SMP"] + delta
         kw["SMP"] = kw["SMP"] + delta
-        prep["_shifted"] = {"bundle": build_bundle(prep["tariff"], kwh, kw, s0),
+        prep["_shifted"] = {"bundle": build_bundle(prep["tariff"], kwh, kw, s0,
+                                                   household=household_path(prep["ident"])),
                             "delta": delta}
     return prep["_shifted"]
 
@@ -1370,17 +1392,40 @@ def main(argv=None):
         summarize()
 
 
-def load_results():
+def result_is_current(result: dict) -> bool:
+    """Was this result produced under the settings that would produce it now?
+
+    The digest a run would carry today, at the step budget the stored run was
+    trained with (the unsettled ones were re-trained at 1M). False for a result
+    the driver would re-train: a result from before the statutory excess move
+    is billed under the ratchet, and joined beside statutory bills it is a
+    different quantity under the same column name.
+    """
+    t, v, m = result["tariff"], result["variant"], result["method"]
+    specs = variant_specs(t)
+    if v not in specs:
+        return False
+    steps = (result.get("train_config") or {}).get("total_steps", 500_000)
+    return result.get("digest") == run_digest(
+        make_config(steps, 0), specs[v], t, m, variant_overrides(v, t, m))
+
+
+def load_results(current_only: bool = True):
     """Every result JSON on disk as one long frame, with the saving column.
 
     Savings rather than costs are the comparable axis: absolute annual bills
     differ two-fold across these households, so a mean cost is dominated by
     which households happen to be in the sample, while a saving against each
     household's OWN no-battery reference is not.
+
+    `current_only` drops results the driver would re-train
+    (`result_is_current`) and says how many, as `hs.collect_results` does for
+    the arms: a stale result is not an older answer to the same question.
     """
     import pandas as pd
 
     rows = []
+    stale = {}
     for tariff in ("AU", "SI"):
         base = os.path.join(OUT, tariff)
         if not os.path.isdir(base):
@@ -1392,7 +1437,16 @@ def load_results():
             for f in sorted(os.listdir(d)):
                 if f.endswith(".json"):
                     with open(os.path.join(d, f), encoding="utf-8") as fh:
-                        rows.append(json.load(fh))
+                        r = json.load(fh)
+                    if current_only and not result_is_current(r):
+                        stale[(tariff, key)] = stale.get((tariff, key), 0) + 1
+                        continue
+                    rows.append(r)
+    if stale:
+        print(f"  ! {sum(stale.values())} result(s) predate the current settings "
+              f"and were dropped, not mixed in (re-run the driver to refresh):")
+        for (tariff, key), n in sorted(stale.items()):
+            print(f"      {tariff} {key:32s} {n:3d}")
     if not rows:
         return None
     df = pd.DataFrame(rows)

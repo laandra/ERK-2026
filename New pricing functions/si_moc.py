@@ -8,8 +8,12 @@ module is where that vector is built and constrained.
 VIRI (preverjeno 11. 8. 2026):
   [1] URO — Dogovorjena obračunska moč
       https://www.uro.si/prenova-omreznine/dogovorjena-obracunska-moc
-      => minimalne moči, pravilo o naraščanju po blokih, sprememba do 8. v
-         mesecu z veljavnostjo od naslednjega meseca, brezplačno.
+      => minimalne moči, pravilo o naraščanju po blokih, brezplačna sprememba.
+  [1a] Akt o spremembah in dopolnitvah Akta o metodologiji ... (agen-rs.si,
+      "Sprejeti akt", 6. 10. 2025; velja za 2026), 12. člen (3)
+      => sprememba "najkasneje do 20. v mesecu z veljavnostjo naslednji mesec",
+         brezplačno. (Preverjeno 19. 10. 2026 v Energy_Community; prej tu
+         navedeni "do 8." ne velja.)
   [2] Akt o metodologiji za obračunavanje omrežnine za elektrooperaterje
       (Ur. l. RS 146/22 … 27/25, 76/25), 12. člen in prehodne določbe
       https://pisrs.si/pregledPredpisa?id=AKT_1266
@@ -66,6 +70,28 @@ from typing import Dict, Iterable, Mapping, Optional, Tuple
 from si_cas import bloki_v_mesecu, razpored_za_datum
 
 BLOKI = (1, 2, 3, 4, 5)
+
+#: The day of the month by which next month's agreed power must be filed [1a]:
+#: "najkasneje do 20. v mesecu z veljavnostjo naslednji mesec".
+ROK_SPREMEMBE_DAN = 20
+
+
+def okno_oddaje_id(leto: int, mesec: int, dan: int,
+                   rok_dan: Optional[int] = ROK_SPREMEMBE_DAN) -> int:
+    """The contract window a meter reading on (leto, mesec, dan) falls in.
+
+    An absolute month id, keyed so that month M's contract reads window M-1
+    (`mesecni_razpored(zamik_mesecev=1)`): a reading before the filing day of
+    its month can still inform the figure filed that month, which takes effect
+    the next; one on or after it is first seen by the next month's filing. So
+    window M-1 is the 20th of M-2 up to (not including) the 20th of M-1 -- a
+    figure filed on the 20th has seen days 1..19, meter data of a day reaching
+    the household the day after. `rok_dan=None` keys by the calendar month,
+    which is the rule without a deadline.
+    """
+    mid = int(leto) * 12 + int(mesec) - 1
+    return mid + 1 if rok_dan is not None and int(dan) >= int(rok_dan) else mid
+
 
 #: Agreed power is stated to 0.1 kW, on the bill and in the operator's proposal.
 KORAK_KW = 0.1
@@ -322,12 +348,14 @@ def mesecni_razpored(
     raise the block-2 contract of every low-season month after it -- a winter
     peak inflating a summer bill. Months therefore map to only their own blocks.
 
-    `zamik_mesecev=1` is the rule this study runs: the agreed power in force in
-    month M is read from month M-1. The regulation lets a household change the
-    figure by the 8th with effect from the following month, so a strictly
-    implementable version of the same idea is `zamik_mesecev=2`; at 1 the
-    household is assumed to act on the previous month's meter reading in the
-    same month it closes.
+    `zamik_mesecev=1`: the agreed power in force in month M is read from the
+    "month" keyed M-1. The regulation lets a household change the figure by the
+    20th with effect from the following month [1a], so on CALENDAR months at 1
+    the household is assumed to act on a month of meter data that has not ended
+    when the deadline passes -- about eleven days of it. Keyed by
+    `okno_oddaje_id` instead of the calendar month, the same lag reads exactly
+    the window that ends at the deadline (the 20th of M-2 to the 19th of M-1),
+    which is implementable as filed.
 
     `n_months_window` is how many months back from the lag the peaks are pooled
     over. At 1 the contract is read from a single month, which lets it chase a

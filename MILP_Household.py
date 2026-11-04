@@ -11,7 +11,13 @@ appended to whatever `pulp.LpProblem` the caller is building:
                               constraints that tie them together
     household_data_bounds     the same block re-pointed at new data, for a
                               caller that solves it again every interval
-    add_excess_power_ratchet  the presezna-moc charge, per (block, month)
+    add_excess_power_ratchet  the presezna-moc charge, per (block, month), as the
+                              linear max(peak - A) the study solved until the
+                              statutory form below replaced it on SI
+    add_statutory_excess_power  the same charge as the invoice bills it,
+                              sqrt(sum e^2) with DDV, as cutting planes
+                              (`StatutoryExcess`, `tighten_statutory_excess`);
+                              ported from Energy_Community's MILP_Household
     agreed_power_by_month     the per-month dogovorjena obracunska moc
     month_calendar            the local-time month bookkeeping all of the above index by
     floor_export_rates        the guard that keeps a negative import rate from
@@ -31,6 +37,7 @@ particular study is defaulted here.
 
 from __future__ import annotations
 
+import math
 import sys
 from dataclasses import dataclass, field
 from datetime import date
@@ -59,6 +66,7 @@ if str(_SI_DIR) not in sys.path:
 
 from si_cas import bloki_v_mesecu, je_visja_sezona, v_lokalni_cas  # noqa: E402
 from si_obracun import Pravila  # noqa: E402
+from si_tarife import DDV  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +381,7 @@ class HouseholdRows:
     balance: list = field(default_factory=list)     # one per interval, ==
     meter_sell: list = field(default_factory=list)  # one per interval, <=
     meter_buy: list = field(default_factory=list)   # one per interval, <=
+    fuse: list = field(default_factory=list)        # one per interval, <= (if fused)
 
 
 @dataclass
@@ -390,6 +399,7 @@ class HouseholdBlock:
     capacity_kwh: float          # the usable window, what the physics sees
     nominal_capacity_kwh: float  # the pack on the invoice
     rows: Optional[HouseholdRows] = None    # the data-carrying rows, see above
+    max_import_kwh: Optional[float] = None  # the fuse, per interval; None = none
 
 
 def _clamped_soc(soc_kwh, capacity):
@@ -567,12 +577,29 @@ def add_household_physics(
                 for t in steps
             ) <= budget
 
+    # --- the fuse ------------------------------------------------------------
+    # The connection carries at most `env.max_import_kwh` an interval, and the
+    # battery may not push the draw past it: `buy <= max(fuse, net load)`. On
+    # the truth that is `buy <= fuse` -- the connection is sized to carry the
+    # house (`hems_study.si_connection`). A forecast may predict a net load the
+    # house never drew; the max() keeps that window solvable, and it is exactly
+    # the bound every rule runs under (`Basic_Functions.fuse_charge_headroom`):
+    # charging stops at the fuse, the house is never cut. Last, for the row-order
+    # reason above, and data-carrying, so `household_data_bounds` re-points it.
+    max_import_kwh = getattr(env, "max_import_kwh", None)
+    if max_import_kwh is not None:
+        for t in range(n_steps):
+            fuse = buy[t] <= max(float(max_import_kwh), con[t] - gen[t])
+            prob += fuse
+            rows.fuse.append(fuse)
+
     return HouseholdBlock(
         buy=buy, sell=sell, spill=spill, charge=charge, discharge=discharge, soc=soc,
         max_charge_ac=max_charge_ac, max_discharge_ac=max_discharge_ac,
         capacity_kwh=capacity,
         nominal_capacity_kwh=float(getattr(env, "nominal_capacity_kwh", capacity)),
         rows=rows,
+        max_import_kwh=None if max_import_kwh is None else float(max_import_kwh),
     )
 
 
@@ -607,7 +634,8 @@ def household_data_rows(blk):
         raise ValueError("this block predates HouseholdRows; rebuild it with "
                          "add_household_physics")
     ordered = [c for c in (rows.soc_initial, rows.soc_final) if c is not None]
-    return ordered + list(rows.balance) + list(rows.meter_sell) + list(rows.meter_buy)
+    return (ordered + list(rows.balance) + list(rows.meter_sell) + list(rows.meter_buy)
+            + list(rows.fuse))
 
 
 def household_data_bounds(blk, *, gen, con, initial_soc_kwh=None, final_soc_kwh=None):
@@ -661,6 +689,10 @@ def household_data_bounds(blk, *, gen, con, initial_soc_kwh=None, final_soc_kwh=
         # buy <= max(con - gen, 0) + charge + spill
         lower.append(unbounded)
         upper.append(np.maximum(con - gen, 0.0))
+    if rows.fuse:
+        # buy <= max(fuse, con - gen)
+        lower.append(np.full(n_steps, -np.inf))
+        upper.append(np.maximum(blk.max_import_kwh, con - gen))
 
     # Curtailment is bounded by the interval's own generation.
     return np.concatenate(lower), np.concatenate(upper), gen
@@ -794,6 +826,398 @@ def add_excess_power_ratchet(
 
 
 # ---------------------------------------------------------------------------
+# The excess-power charge as the statute bills it
+# ---------------------------------------------------------------------------
+class StatutoryExcess:
+    """The statutory excess-power charge, as an LP that cutting planes tighten.
+
+    The invoice bills, per block b and calendar month m,
+
+        1.05 x block rate x sqrt(sum over the month's intervals of e_t^2),
+        e_t = max(0, draw_t - A[b, m]),                         plus DDV
+
+    (`si_obracun.MesecniObracun`). The ratchet `add_excess_power_ratchet` puts in
+    an LP instead bills `max_t e_t`, without DDV -- the largest term of the same
+    norm. The two agree when a month exceeds its contract once and part ways
+    with the NUMBER of exceedances: 86 equal exceedances cost sqrt(86) ~ 9.3
+    times what the ratchet charges for them. A model priced on the ratchet
+    therefore signs too little wherever crossing the line often is cheap one
+    interval at a time, which is exactly the levy-carrying block.
+
+    The norm is convex, so its epigraph is the intersection of the half-spaces
+
+        s >= g . e    for every g >= 0 with ||g||_2 = 1
+
+    and any finite set of them is a valid relaxation from below (Kelley's
+    cutting-plane method). Three families are put in:
+
+      * every interval on its own, g = unit vector: s >= draw_t - A. This is
+        the ratchet's constraint set, so round 0 is the ratchet with DDV;
+      * a few tangents read off a reference draw (the no-battery profile),
+        where the exceedance pattern of a lower contract is already visible;
+      * after each solve, the tangent at the point the solve returned,
+        g = e*/||e*||, wherever the model's s falls short of the true norm
+        (`add_cuts`). `tighten_statutory_excess` repeats until the shortfall is below a
+        tolerance in EUR.
+
+    A tangent weights particular intervals, and a battery can move an
+    exceedance off them: measured on a 10 kWh household, forty rounds of
+    tangents left February's block 1 under-priced by a third, a new set of
+    intervals each round. So a (b, m) that a tangent has not closed after
+    `TOPJ_AFTER` rounds also gets the cuts no permutation escapes,
+
+        sqrt(j) * s >= sum of the j largest e_t,     j in TOPJ_LEVELS,
+
+    each exact as an LP through the same k-largest epigraph the contract uses
+    (`add_topk_mean_lower_bound`), with the threshold held at or above zero so
+    it is the sum of the j largest POSITIVE parts. Equal exceedances over j
+    intervals are priced exactly. A battery that runs out of energy leaves a
+    DECAYING tail of exceedances instead, on which the best top-j bound is ~13 %
+    short (a linear decay: sqrt(3)/2), so the same epigraphs then carry the
+    ordered-weighted tangent
+
+        s >= sum_i g_i e_[i],   g decreasing, ||g|| <= 1,   e_[i] the i-th largest,
+
+    valid by Cauchy-Schwarz whatever the order, and linear in the top-j sums
+    (sum_i g_i e_[i] = sum_j (g_j - g_j+1) S_j for a g stepping at the levels).
+    Read off the solution's own sorted exceedances it is the tangent there up to
+    the steps, and no permutation of the intervals escapes it.
+
+    `e_t` variables exist only for the intervals some cut actually weights, so
+    the model grows with the exceedances it has to price and not with the year.
+
+    `carried` opens the norm mid-month. A receding controller plans one day of a
+    month whose earlier exceedances are already on the meter; the charge it can
+    still move is
+
+        rate x sqrt(c0^2 + sum over the window of e_t^2),   c0^2 = metered sum,
+
+    the same cone with one constant coordinate. Every cut above stays valid
+    (each weights a sub-vector of it), the tangents take c0 into their norm, and
+    `s >= c0` joins the interval cuts. What changes is the marginal price, and
+    that is the point: d/de sqrt(c0^2 + e^2) = e / sqrt(c0^2 + e^2), so once a
+    month has been crossed by a lot a SMALL further crossing is nearly free and
+    a large one is not -- neither the ratchet's "free below the running peak"
+    nor its "full rate above it". The rest of the month beyond the window is
+    assumed to add nothing, the same myopia the ratchet's seeded peak has.
+    """
+
+    TOPJ_LEVELS = (1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512)
+    TOPJ_AFTER = 2
+    # A (b, m) of at most this many intervals gets EVERY level 1..n, which makes
+    # the ordered-weighted tangent the exact tangent at the solution and still
+    # blind to which intervals carry the exceedances. Only a receding window's
+    # day-long groups are this small -- a whole month's run to a thousand -- and
+    # on them the stepped levels are what stalls the loop: measured on three
+    # captured windows (Fluvius #3, 10 kWh) the stepped family left the model's
+    # norm fixed while the battery moved the exceedance between intervals, and
+    # 60 rounds did not close 1e-3 EUR; every level closed it in 9-15.
+    TOPJ_ALL_LEVELS_UP_TO = 96
+
+    def __init__(self, prob, buy, *, groups, agreed, coefficient, hours, name, carried=None):
+        self.prob = prob
+        self.buy = buy
+        self.groups = groups                 # (b, m) -> [t, ...]
+        self.agreed = agreed                 # (b, m) -> LpVariable or float
+        self.coefficient = coefficient       # (b, m) -> EUR per RMS kW, DDV in
+        self.hours = float(hours)
+        self.name = name
+        self.s = {key: pulp.LpVariable(name.format(b=key[0], m=key[1]), lowBound=0)
+                  for key in groups}
+        self.e = {}
+        self.n_cuts = 0
+        self.rounds_open = {}                # (b, m) -> tangent rounds it stayed open
+        self.topj = {}                       # (b, m) -> [(j, S_j expression), ...]
+        self.log = []                        # every cut, as data (`replay`)
+        # (b, m) -> sqrt of the squared exceedances the month already metered.
+        self.c0 = {key: math.sqrt(max(0.0, float((carried or {}).get(key, 0.0))))
+                   for key in groups}
+
+    def add_topj_family(self, key):
+        """sqrt(j) s >= sum of the j largest e_t, for every level j up to all."""
+        if key in self.topj:
+            return
+        b, m = key
+        ts = self.groups[key]
+        if len(ts) <= self.TOPJ_ALL_LEVELS_UP_TO:
+            levels = list(range(1, len(ts) + 1))
+        else:
+            levels = [j for j in self.TOPJ_LEVELS if j < len(ts)] + [len(ts)]
+        family = []
+        for j in levels:
+            tau = pulp.LpVariable(f"tauj_b{b}_m{m}_j{j}", lowBound=0)
+            slack = []
+            for t in ts:
+                u = pulp.LpVariable(f"uj_b{b}_m{m}_j{j}_t{t}", lowBound=0)
+                self.prob += u >= self.buy[t] * (1.0 / self.hours) - self.agreed[key] - tau
+                slack.append(u)
+            s_j = j * tau + pulp.lpSum(slack)
+            self.prob += math.sqrt(j) * self.s[key] >= s_j
+            family.append((j, s_j))
+            self.n_cuts += 1
+        self.topj[key] = family
+        self.log.append(("topj", key))
+
+    def add_ordered_tangent(self, key, exceedances):
+        """The ordered-weighted tangent at a sorted exceedance vector.
+
+        g_i = e_[i] / ||e||, stepped DOWN to its value at the end of each level
+        so the stepped g stays decreasing with norm <= 1 -- a valid cut that is
+        the tangent up to the steps. Needs `add_topj_family(key)` first.
+        """
+        e = np.sort(np.asarray([v for v in exceedances if v > 0.0], dtype=float))[::-1]
+        c0 = self.c0.get(key, 0.0)
+        norm = float(np.sqrt(c0 * c0 + np.sum(e * e)))
+        if norm <= 0.0 or key not in self.topj:
+            return False
+        g = e / norm
+        family = self.topj[key]
+        steps = [float(g[j - 1]) if j - 1 < len(g) else 0.0 for j, _ in family]
+        terms = []
+        for i, (j, s_j) in enumerate(family):
+            w = steps[i] - (steps[i + 1] if i + 1 < len(steps) else 0.0)
+            if w > 0.0:
+                terms.append(w * s_j)
+        if not terms:
+            return False
+        if c0 > 0.0:
+            self.prob += self.s[key] >= c0 * c0 / norm + pulp.lpSum(terms)
+        else:
+            self.prob += self.s[key] >= pulp.lpSum(terms)
+        self.n_cuts += 1
+        self.log.append(("ordered", key, tuple(float(v) for v in e)))
+        return True
+
+    def _e(self, t, key):
+        if t not in self.e:
+            v = pulp.LpVariable(f"e_exc_{t}", lowBound=0)
+            self.prob += v >= self.buy[t] * (1.0 / self.hours) - self.agreed[key]
+            self.e[t] = v
+        return self.e[t]
+
+    def add_interval_cuts(self):
+        """s >= draw_t - A for every interval: the ratchet's constraint set."""
+        for key, ts in self.groups.items():
+            for t in ts:
+                self.prob += self.s[key] >= self.buy[t] * (1.0 / self.hours) - self.agreed[key]
+            if self.c0[key] > 0.0:
+                self.prob += self.s[key] >= self.c0[key]
+
+    def add_tangent(self, key, weights):
+        """s >= sum_t g_t e_t with g = weights / ||weights||."""
+        w = {t: float(v) for t, v in weights.items() if v > 0.0}
+        c0 = self.c0.get(key, 0.0)
+        norm = math.sqrt(c0 * c0 + sum(v * v for v in w.values()))
+        if norm <= 0.0 or not w or (len(w) < 2 and c0 <= 0.0):
+            return False                     # a single term is an interval cut
+        if c0 > 0.0:
+            self.prob += self.s[key] >= c0 * c0 / norm + pulp.lpSum(
+                (v / norm) * self._e(t, key) for t, v in w.items())
+        else:
+            self.prob += self.s[key] >= pulp.lpSum((v / norm) * self._e(t, key)
+                                                   for t, v in w.items())
+        self.n_cuts += 1
+        self.log.append(("tangent", key, tuple(sorted(w.items()))))
+        return True
+
+    def replay(self, log):
+        """Put in the cuts another model of the same horizon generated.
+
+        Every cut is valid whatever the dispatch, so cuts found on the LP form
+        of a household (`exclusivity="inverter"`) carry over to its binary form
+        as they are, and the binary solve starts where the LP's loop ended.
+        """
+        for entry in log or ():
+            kind, key = entry[0], tuple(entry[1])
+            if key not in self.groups:
+                continue
+            if kind == "tangent":
+                self.add_tangent(key, dict(entry[2]))
+            elif kind == "topj":
+                self.add_topj_family(key)
+            elif kind == "ordered":
+                self.add_topj_family(key)
+                self.add_ordered_tangent(key, entry[2])
+
+    def add_reference_tangents(self, power_kw, depths=(2, 4, 8, 16, 32, 64, 128)):
+        """Tangents at the contract levels a reference draw puts in reach.
+
+        For each (b, m) and each depth j, the contract A = the j-th largest
+        reference draw, and the tangent of the norm there. On the reference
+        draw itself these are exact at those levels; on any other they are
+        still valid cuts.
+        """
+        power_kw = np.asarray(power_kw, dtype=float)
+        for key, ts in self.groups.items():
+            ts = np.asarray(ts)
+            x = power_kw[ts]
+            order = np.argsort(-x)
+            for j in depths:
+                if j >= len(order):
+                    break
+                level = float(x[order[j]])
+                above = order[:j]
+                self.add_tangent(key, {int(ts[i]): float(x[i]) - level for i in above})
+
+    def objective_terms(self):
+        return [self.coefficient[key] * self.s[key] for key in self.groups]
+
+    def evaluate(self):
+        """{(b, m): (true norm at the solution, the model's s)}."""
+        out = {}
+        for key, ts in self.groups.items():
+            a = _value(self.agreed[key])
+            sq = 0.0
+            for t in ts:
+                d = (self.buy[t].varValue or 0.0) / self.hours - a
+                if d > 0.0:
+                    sq += d * d
+            c0 = self.c0.get(key, 0.0)
+            out[key] = (math.sqrt(c0 * c0 + sq), float(self.s[key].varValue or 0.0))
+        return out
+
+    def shortfall_eur(self, evaluation=None):
+        """What the model under-prices the solution's excess by, EUR."""
+        evaluation = self.evaluate() if evaluation is None else evaluation
+        return sum(self.coefficient[k] * max(0.0, true - s)
+                   for k, (true, s) in evaluation.items())
+
+    def excess_eur(self, evaluation=None):
+        """The statutory excess charge of the solution, EUR (DDV in)."""
+        evaluation = self.evaluate() if evaluation is None else evaluation
+        return sum(self.coefficient[k] * true for k, (true, _) in evaluation.items())
+
+    def add_cuts(self, evaluation=None, rel_tol=1e-6):
+        """The tangent at the current solution wherever s falls short. Returns
+        how many cuts were added, and sets the new variables' values so the
+        previous solution, with s raised to the true norm, is a feasible warm
+        start."""
+        evaluation = self.evaluate() if evaluation is None else evaluation
+        added = 0
+        for key, (true, s) in evaluation.items():
+            if true <= s * (1.0 + rel_tol) + 1e-9:
+                continue
+            a = _value(self.agreed[key])
+            weights = {}
+            for t in self.groups[key]:
+                d = (self.buy[t].varValue or 0.0) / self.hours - a
+                if d > 0.0:
+                    weights[t] = d
+            if len(weights) >= 2 or (weights and self.c0.get(key, 0.0) > 0.0):
+                self.add_tangent(key, weights)
+                added += 1
+            self.rounds_open[key] = self.rounds_open.get(key, 0) + 1
+            if self.rounds_open[key] >= self.TOPJ_AFTER:
+                self.add_topj_family(key)
+                if self.add_ordered_tangent(key, list(weights.values())):
+                    added += 1
+            # Warm start: s at the true norm, every e at its exceedance. The
+            # top-j slacks are left unset; CBC completes a partial start.
+            self.s[key].varValue = true
+            for t in self.groups[key]:
+                if t in self.e:
+                    d = (self.buy[t].varValue or 0.0) / self.hours - a
+                    self.e[t].varValue = max(0.0, d)
+        return added
+
+
+def add_statutory_excess_power(prob, env, buy, *, blocks, month_idx_t, months_sorted,
+                               agreed_by_month, agreed_vars, hours, pravila, n_steps,
+                               reference_power_kw=None, name="S_exc_b{b}_m{m}",
+                               carried_sumsq=None, apply_ddv=True):
+    """The statutory excess charge on `buy`, as a `StatutoryExcess`.
+
+    One `s` per (block, month) that occurs, priced at block rate x
+    `faktor_presezne_moci` x (1 + DDV) -- the invoice's own figure. Months are
+    calendar months; the charge does not telescope across them, so the horizon
+    has to open at a month boundary with nothing carried in (checked by the
+    caller). `reference_power_kw` (a draw over the same horizon, kW) seeds the
+    tangent family; None leaves round 0 at the interval cuts alone.
+    `carried_sumsq` is `{(b, m): kW^2}`, the squared exceedances a month has
+    already metered before the horizon opens (`StatutoryExcess`, `carried`).
+
+    DEPARTURE from Energy_Community: the rate is `statutory_excess_rate`, the one
+    the settlement bills with, and `apply_ddv` follows the environment's pricing
+    options instead of being hard-wired on. Every study here prices with DDV, so
+    the two agree to the bit; the argument exists so they cannot stop agreeing.
+    """
+    def agreed(b, m):
+        if agreed_vars is None:
+            return float(agreed_by_month[m].get(b, 0.0))
+        return agreed_vars[(b, m)]
+
+    groups = {}
+    for t in range(n_steps):
+        groups.setdefault((int(blocks[t]), month_idx_t[t]), []).append(t)
+    coefficient = {}
+    for (b, m) in groups:
+        y, mo = months_sorted[m]
+        coefficient[(b, m)] = statutory_excess_rate(pravila, y, mo, b, apply_ddv=apply_ddv)
+    model = StatutoryExcess(
+        prob, buy, groups=groups, agreed={k: agreed(*k) for k in groups},
+        coefficient=coefficient, hours=hours, name=name, carried=carried_sumsq,
+    )
+    model.add_interval_cuts()
+    if reference_power_kw is not None:
+        model.add_reference_tangents(reference_power_kw)
+    return model
+
+
+def statutory_excess_rate(pravila, year, month, block, apply_ddv=True):
+    """EUR per kW of RMS exceedance, block `block`, calendar month (year, month).
+
+    The invoice's own figure (`si_obracun.MesecniObracun._fiksne`): the block's
+    network power rate in that month's season times `faktor_presezne_moci`, and
+    DDV on top as the invoice applies it to every taxable line. The ONE place
+    that figure is formed: `add_statutory_excess_power` prices the LP with it
+    and `Rule_Based_Control.price_interval_statutory` bills the executed meter
+    with it, so a solve cannot be optimised against one rate and billed at
+    another.
+    """
+    vs = je_visja_sezona(date(int(year), int(month), 1))
+    rate = pravila.omreznina.postavka_moc(int(block), vs) * pravila.omreznina.faktor_presezne_moci
+    return rate * ((1.0 + DDV) if apply_ddv else 1.0)
+
+
+def tighten_statutory_excess(prob, statutory, solve, *, tol_eur, max_rounds,
+                             gap_rel=0.0, verbose=False):
+    """Cut the statutory model until it prices its own solution, or gives up.
+
+    `solve()` re-solves `prob` and returns its pulp status string. The loop is
+    the one `Energy_Community.MILP_Household.solve_household` runs inline,
+    lifted out so the whole-period solve and every receding window run the same
+    one: evaluate the true norm at the returned point, stop once the model
+    under-prices it by at most `tol_eur` -- or by `gap_rel` times the objective,
+    for a MIP returned within a relative gap, which moves its point by that much
+    between re-solves -- otherwise add the tangents there and solve again.
+
+    Returns `(status, rounds, shortfall_eur)`. A shortfall above the tolerance
+    after `max_rounds` is NOT an error: the dispatch is feasible and the bill is
+    computed from the meter, never from `s`. It is the caller's to count and
+    report (`Statutory_Unclosed`).
+    """
+    status = pulp.LpStatus[prob.status]
+    rounds, shortfall = 0, 0.0
+    while status == "Optimal":
+        evaluation = statutory.evaluate()
+        shortfall = statutory.shortfall_eur(evaluation)
+        tol = max(float(tol_eur),
+                  float(gap_rel) * abs(float(pulp.value(prob.objective) or 0.0)))
+        if shortfall <= tol or rounds >= int(max_rounds):
+            break
+        if verbose:
+            worst = sorted(evaluation.items(),
+                           key=lambda kv: -statutory.coefficient[kv[0]] * (kv[1][0] - kv[1][1]))[:3]
+            print(f"  round {rounds}: shortfall {shortfall:.4f} EUR; "
+                  + ", ".join(f"b{k[0]}m{k[1]} {t:.3f}/{s:.3f}" for k, (t, s) in worst))
+        if not statutory.add_cuts(evaluation):
+            break
+        rounds += 1
+        status = solve()
+    return status, rounds, shortfall
+
+
+# ---------------------------------------------------------------------------
 # The contract as a decision, not an input
 # ---------------------------------------------------------------------------
 _AGREED_BLOCKS = (1, 2, 3, 4, 5)
@@ -835,9 +1259,41 @@ def add_endogenous_agreed_power(
     prob, env, *, buy, hours, months_sorted, month_idx_t, blocks, dates,
     interval_minutes, pricing_options, agreed_by_month, n_steps,
     name="A_agreed_b{b}_m{m}", tau_name="tau_b{b}_m{m}",
-    slack_name="sk_b{b}_m{m}_i{i}",
+    slack_name="sk_b{b}_m{m}_i{i}", contract="rule",
 ):
-    """Make the dogovorjena moc a variable set by the solve's OWN peaks.
+    """Make the dogovorjena moc a variable of the solve.
+
+    `contract="rule"` ties it to the solve's OWN peaks, the operator's top-k
+    statistic read with a lag (`_add_endogenous_agreed_power` has the
+    construction). `contract="free"` is the other reading of the Akt: the household FILES its
+    agreed power (12. clen (3), by the 20th for the next month) and may file any
+    figure between the regulatory floor and its connection power. The
+    contract is then a decision in its own right, one variable per billed
+    (block, month) -- every month, the leading ones included, since nothing is
+    read from a predecessor -- bounded by `env.min_agreed_power_kw` and
+    `env.connection_power_kw` and monotone across blocks, with no tie to the
+    peaks. Every contract a rule-following controller can be on lies inside
+    that set, so the solve is a lower bound on all of them, which "rule" (a
+    one-sided `A >= top-k`) is not once the excess charge, as well as the
+    standing charge, falls as `A` rises: under the statutory norm the solve then
+    sits above the rule while the bill applies it.
+"""
+    if contract not in ("rule", "free"):
+        raise ValueError(f"contract must be 'rule' or 'free', got {contract!r}")
+    return _add_endogenous_agreed_power(
+        prob, env, buy=buy, hours=hours, months_sorted=months_sorted,
+        month_idx_t=month_idx_t, blocks=blocks, dates=dates,
+        interval_minutes=interval_minutes, pricing_options=pricing_options,
+        agreed_by_month=agreed_by_month, n_steps=n_steps, name=name,
+        tau_name=tau_name, slack_name=slack_name, contract=contract)
+
+
+def _add_endogenous_agreed_power(
+    prob, env, *, buy, hours, months_sorted, month_idx_t, blocks, dates,
+    interval_minutes, pricing_options, agreed_by_month, n_steps,
+    name, tau_name, slack_name, contract,
+):
+    """`add_endogenous_agreed_power`; the rule form is documented below.
 
     The contract is not exogenous. A household that flattens its profile
     re-agrees its billing power down the following month, and is then billed --
@@ -877,11 +1333,16 @@ def add_endogenous_agreed_power(
     maps every (block, month) to a variable or a float and goes on to
     `add_excess_power_ratchet`.
     """
-    lag = getattr(env, "agreed_power_lag_months", None)
-    if not lag:
+    free = contract == "free"
+    lag = 0 if free else getattr(env, "agreed_power_lag_months", None)
+    if not free and not lag:
         raise ValueError("an endogenous contract needs a rolling agreed power "
                          "(agreed_power_lag_months), not a signed constant.")
-    if env.connection_power_kw is not None:
+    cap_kw = None if env.connection_power_kw is None else float(env.connection_power_kw)
+    if free and cap_kw is not None and float(env.min_agreed_power_kw) > cap_kw:
+        raise ValueError(f"floor {env.min_agreed_power_kw} kW above the connection "
+                         f"power {cap_kw} kW: no contract can be filed")
+    if not free and env.connection_power_kw is not None:
         # uskladi_bloke clips at the connection power; as a constraint that is
         # an upper bound colliding with a lower one, i.e. an infeasible model
         # for any household that exceeds its own connection.
@@ -926,7 +1387,8 @@ def add_endogenous_agreed_power(
         variable_months.append(m)
         for b in _AGREED_BLOCKS:
             agreed_vars[(b, m)] = (
-                pulp.LpVariable(name.format(b=b, m=m), lowBound=floor_kw)
+                pulp.LpVariable(name.format(b=b, m=m), lowBound=floor_kw,
+                                upBound=cap_kw if free else None)
                 if b in billed[m] else 0.0
             )
 
@@ -940,7 +1402,7 @@ def add_endogenous_agreed_power(
         for lower, upper in zip(chain, chain[1:]):
             prob += agreed_vars[(upper, m)] >= agreed_vars[(lower, m)]
 
-    for m in variable_months:
+    for m in ([] if free else variable_months):
         newest = m - lag                    # newest month the contract may read
         oldest = newest - window + 1        # oldest month in the window
         for b in KONICNI_BLOKI:

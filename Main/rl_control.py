@@ -62,7 +62,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from Basic_Functions import max_charge_now, max_discharge_now
+from Basic_Functions import fuse_charge_headroom, max_charge_now, max_discharge_now
 import Rule_Based_Control as rbc
 import rl_features as rf
 
@@ -708,10 +708,15 @@ class _Walk:
         self.eta_dis = sig.eta_dis
         self.capacity = sig.capacity_kwh
 
-    def bounds(self, soc):
-        return (-max_discharge_now(soc, self.eta_dis, self.env.max_discharge_kwh),
-                max_charge_now(soc, self.eta_ch, self.env.max_charge_kwh,
-                               self.capacity))
+    def bounds(self, soc, idx=None):
+        """The setpoint envelope at `soc` -- and, given the interval, the fuse
+        (`Basic_Functions.fuse_charge_headroom`), as `rbc.run_policy` scores it."""
+        hi = max_charge_now(soc, self.eta_ch, self.env.max_charge_kwh, self.capacity)
+        fuse = getattr(self.env, "max_import_kwh", None)
+        if idx is not None and fuse is not None:
+            hi = min(hi, fuse_charge_headroom(self.sig.consumption[idx],
+                                              self.sig.generation[idx], fuse))
+        return (-max_discharge_now(soc, self.eta_dis, self.env.max_discharge_kwh), hi)
 
     def step(self, idx, soc, peak_state, setpoint):
         """Apply one setpoint; returns (cost_eur, new_soc, new_peak_state, net)."""
@@ -732,7 +737,7 @@ def _drop_on_boundary(peak_state, windows, idx):
     return {b: 0.0 for b in _BLOCKS}
 
 
-def seed_peak_state(env, idx: int) -> dict:
+def seed_peak_state(env, idx: int, settle=None) -> dict:
     """The per-block running peak a window STARTING at `idx` inherits.
 
     An episode, a validation rollout and a teacher walk all begin part-way
@@ -748,11 +753,21 @@ def seed_peak_state(env, idx: int) -> dict:
     question -- it is what the environment seeds a mid-dataset episode with --
     so it is asked rather than reimplemented, and it returns zeros of its own
     accord when `idx` does open a window.
+
+    `settle` is the walk's settlement. Under the statutory one
+    (`rbc.price_interval_statutory`) the state also carries the month's running
+    sum of squared exceedances, and a walk opening mid-month inherits that too
+    (`rbc.seed_statutory_state`) for the same reason it inherits the peak: the
+    norm's marginal price is steepest at zero, so an episode started on an empty
+    one is told the month's first crossing is still ahead of it.
     """
     seed = getattr(env, "compute_seed_peak_kw", None)
     if seed is None:
         return {b: 0.0 for b in _BLOCKS}
-    return {int(b): float(v) for b, v in seed(int(idx)).items()}
+    out = {int(b): float(v) for b, v in seed(int(idx)).items()}
+    if settle is rbc.price_interval_statutory:
+        out.update(rbc.seed_statutory_state(env, idx))
+    return out
 
 
 def no_battery_cost_trace(sig, settle, env) -> np.ndarray:
@@ -788,14 +803,14 @@ def greedy_rollout(net, fb, static_norm, sig, settle, env, start: int, stop: int
     """
     walk = _Walk(sig, settle, env, wear_eur_per_efc=0.0)  # bill, not objective
     soc = soc_init
-    peak_state = seed_peak_state(env, start)
+    peak_state = seed_peak_state(env, start, settle)
     cost = 0.0
     discharged = 0.0
     net.eval()
     with torch.no_grad():
         for idx in range(start, stop):
             peak_state = _drop_on_boundary(peak_state, sig.windows, idx)
-            lo, hi = walk.bounds(soc)
+            lo, hi = walk.bounds(soc, idx)
             obs = np.concatenate([static_norm[idx],
                                   fb.dynamic(sig, idx, soc, peak_state)])
             a = int(net(torch.from_numpy(obs).unsqueeze(0)).argmax(dim=1).item())
@@ -962,7 +977,7 @@ def train_dqn(sig, settle, env, fb: FeatureBuilder, static_norm: np.ndarray,
         # half start at a random SOC, or the agent never sees a full pack in
         # January and cannot learn what to do holding one.
         soc = soc_target if rng.random() < 0.5 else float(rng.uniform(0, capacity))
-        peak_state = seed_peak_state(env, idx0)
+        peak_state = seed_peak_state(env, idx0, settle)
         # The contract state of this episode: the pool its draws are priced
         # into and the pool its features read. None on a tariff without one.
         cstate = (None if reward_fn is None
@@ -1010,7 +1025,7 @@ def train_dqn(sig, settle, env, fb: FeatureBuilder, static_norm: np.ndarray,
         for k in range(ep_steps):
             idx = idx0 + k
             peak_state = _drop_on_boundary(peak_state, sig.windows, idx)
-            lo, hi = walk.bounds(soc)
+            lo, hi = walk.bounds(soc, idx)
 
             eps = cfg.eps_end + (eps_start - cfg.eps_end) * max(
                 0.0, 1.0 - step / decay_steps)
@@ -1177,14 +1192,14 @@ def teacher_actions(sig, settle, env, setpoints_kwh: np.ndarray,
     """
     walk = _Walk(sig, settle, env, wear_eur_per_efc=0.0)
     soc = soc_init
-    peak_state = seed_peak_state(env, start)
+    peak_state = seed_peak_state(env, start, settle)
     n = stop - start
     labels = np.zeros(n, dtype=np.int64)
     soc_trace = np.zeros(n, dtype=np.float64)
     peaks = []
     for j, idx in enumerate(range(start, stop)):
         peak_state = _drop_on_boundary(peak_state, sig.windows, idx)
-        lo, hi = walk.bounds(soc)
+        lo, hi = walk.bounds(soc, idx)
         soc_trace[j] = soc
         peaks.append(dict(peak_state))
         target = float(np.clip(setpoints_kwh[idx - start], lo, hi))

@@ -19,6 +19,21 @@ def max_charge_now(soc_kwh, charge_efficiency, max_charge_kwh, capacity_kwh):
     return (1 / charge_efficiency) * min(capacity_kwh - soc_kwh, max_charge_kwh)
 
 
+def fuse_charge_headroom(consumption_kwh, generation_kwh, max_import_kwh):
+    """Largest charge setpoint the connection's fuse leaves room for, kWh AC.
+
+    The grid draw of an interval is `consumption + charge - generation -
+    discharge`, and the fuse caps it at `max_import_kwh` (the connection power
+    times the interval). Discharging only lowers the draw, so the fuse binds on
+    charging alone: whatever the house does not already take. `max_import_kwh`
+    None is no fuse. Never negative -- a connection is sized to carry the house
+    itself, and a runner that met one that is not must not be told to discharge.
+    """
+    if max_import_kwh is None:
+        return float("inf")
+    return max(float(max_import_kwh) - (float(consumption_kwh) - float(generation_kwh)), 0.0)
+
+
 def pv_surplus(generation_kwh, consumption_kwh):
     """PV energy left over after serving the house."""
     return max(generation_kwh - consumption_kwh, 0.0)

@@ -427,6 +427,263 @@ PERSISTENT_AUDIT_EVERY = 1000
 SOLVER_TAG = SOLVER_NAME + ("+warm" if SOLVER_NAME == "HiGHS" else "")
 
 
+# HOW THE SI EXCESS-POWER CHARGE IS PRICED -- by the optimizers and by the
+# evaluator alike, because the two must be the same thing.
+#
+#   "statutory"  THE STUDY'S. What the invoice bills (`si_obracun`): per block
+#                and month, rate x faktor x sqrt(sum of squared exceedances),
+#                with DDV. The whole-period MILP minimises it through cutting
+#                planes (`MILP_Household.StatutoryExcess`, LP first to gather
+#                the cuts, then the binaries seeded with them where there are
+#                any), every receding window prices it opened on what the month
+#                has already metered, and `Rule_Based_Control.
+#                price_interval_statutory` bills every controller with it.
+#   "ratchet"    what the study ran until 2026-10-20: `si_konica`'s linear
+#                max(0, running peak - A), without DDV, in the whole-period
+#                solve and the settlement, and NOTHING in the receding windows
+#                -- their objective was energy and wear alone. Kept runnable,
+#                and keyed out of every checkpoint, so the old results stay
+#                readable under the setting that produced them.
+#
+# Why it changed (measured in Energy_Community, `Agreed_Power_Study` /
+# `MPC_Excess_Study`): the ratchet prices ONE exceedance and the statute their
+# number. Under a contract re-agreed from the five highest draws of the month
+# before, a dispatch sits above its line routinely, so the ratchet under-bills
+# what the household pays and steers the optimizers towards crossing the line
+# often and a little, which is exactly what the statute charges most for.
+#
+# AU has no capacity charge; none of this reaches it.
+SI_EXCESS_POWER_MODEL = "statutory"
+EXCESS_POWER_MODELS = ("statutory", "ratchet")
+
+# Where the cut loops stop. The whole-period solve is the study's denominator and
+# `full_period_bound_check` holds every rule to it with one cent of slack, so its
+# model may under-price its own excess by at most a tenth of that. A receding
+# window commits one half-hour of its plan; Energy_Community closes its windows
+# to a tenth of a cent within 60 rounds (`Horizon_Comparison`), and so does this.
+# A loop that runs out of rounds still returns a feasible dispatch -- the bill is
+# always the meter's -- and is counted, never hidden.
+STATUTORY_FULL_TOL_EUR = 1e-3
+STATUTORY_FULL_MAX_ROUNDS = 100
+STATUTORY_WINDOW_TOL_EUR = 1e-3
+STATUTORY_WINDOW_MAX_ROUNDS = 60
+
+
+def excess_power_model(tariff: str) -> str | None:
+    """The excess-power model an arm on `tariff` runs, or None (no such charge)."""
+    if SI_EXCESS_POWER_MODEL not in EXCESS_POWER_MODELS:
+        raise ValueError(f"SI_EXCESS_POWER_MODEL must be one of {EXCESS_POWER_MODELS}, "
+                         f"got {SI_EXCESS_POWER_MODEL!r}")
+    return SI_EXCESS_POWER_MODEL if tariff == "SI" else None
+
+
+def excess_power_key(tariff: str) -> dict:
+    """What a result key carries for the SI power terms of the bill: `{}` or more.
+
+    Empty on AU and under "ratchet", the setting every result on disk before
+    2026-10-20 was produced under, so none of those keys moves; under
+    "statutory" the excess model, and with it the CONTRACT the excess is billed
+    against (`SI_CONTRACT`, from 2026-10-21) -- both are how the bill's power
+    line is formed, and every key that must move with one must move with the
+    other, the RL digests and teacher paths included. The same convention
+    `rl_features.FeatureSpec.config` keeps for a new input: a setting enters a
+    key only where it differs from what the results already stored were
+    produced by.
+    """
+    model = excess_power_model(tariff)
+    if model in (None, "ratchet"):
+        return {}
+    return {"si_excess_power": model, "si_contract": si_contract_tag()}
+
+
+def excess_power_suffix(tariff: str) -> str:
+    """`excess_power_key` for a cache PATH: "" or "+statutory+<contract>".
+
+    For the caches keyed by directory rather than digest (the RL teachers, the
+    contract study's reference bills): a whole-period solve or a settled bill
+    under one excess model, or one contract rule, is not the same file under
+    another.
+    """
+    key = excess_power_key(tariff)
+    return "" if not key else f"+{key['si_excess_power']}+{key['si_contract']}"
+
+
+# THE SI CONTRACT -- how the dogovorjena obracunska moc is set, and inside what.
+# (2026-10-21, the user's specification.)
+#
+#   the deadline  Month M's agreed power is FILED by the 20th of M-1 (Akt 12.
+#                 clen (3), `si_moc.ROK_SPREMEMBE_DAN`). Every controller but the
+#                 whole-period MILP files it by the operator's statistic -- the
+#                 mean of the five highest draws per block -- read off the window
+#                 that ENDS at the deadline: the 20th of M-2 to the 19th of M-1
+#                 (`si_moc.okno_oddaje_id`). Until now it was the calendar month
+#                 M-1, eleven days of which have not happened when the figure is
+#                 due. The leading months read the household's real no-battery
+#                 meter before the scored year (`history_days` of it), not a
+#                 bootstrap guess.
+#   the MILP      the whole-horizon, perfect-knowledge solve is the theoretical
+#                 optimum, so it files whatever contract minimises the total bill
+#                 together with its dispatch (`add_endogenous_agreed_power(
+#                 contract="free")`), inside the same limits, and is billed on
+#                 that contract. It replaces the one-sided `A >= top-5` link,
+#                 which under the statutory norm let the solve sit above the rule
+#                 the bill then applied: not a bound in 12 of 30 households.
+#   the fuse      the connection is the SECOND-smallest standard rating
+#                 (`si_moc.PRIKLJUCNE_MOCI_KW`, single- and three-phase alike)
+#                 whose power covers the largest no-battery draw anywhere in the
+#                 household's data. It sets both limits: the published minimum
+#                 for that connection is the floor on every agreed power
+#                 (`si_moc.minimalna_dogovorjena_moc`, the 2026 table: the floor
+#                 and the deadline are both the 2026 Akt), and the connection
+#                 power the ceiling -- on the agreed power, and on the draw
+#                 itself, which no controller's charging may push past
+#                 (`Environment.max_import_kwh`).
+#
+# AU has no contract; none of this reaches it.
+SI_CONTRACT = {"cutoff_day": 20, "fuse_rank": 2, "fuse_shelf": "1+3",
+               "floor_year": 2026, "milp": "free", "history_days": 70}
+
+
+def si_contract_tag() -> str:
+    """`SI_CONTRACT` as one short key string."""
+    c = SI_CONTRACT
+    return (f"d{c['cutoff_day']}_fuse{c['fuse_shelf']}r{c['fuse_rank']}"
+            f"y{c['floor_year']}_milp{c['milp']}_h{c['history_days']}")
+
+
+def _read_household(file_path: str) -> pd.DataFrame:
+    """The raw household file on `load_study_frames`' own index."""
+    raw = pd.read_csv(file_path)
+    raw.index = pd.to_datetime(raw["Timestamp_UTC"], format="ISO8601")
+    return raw
+
+
+_CONNECTION_CACHE: dict = {}
+
+
+def si_connection(file_path: str) -> dict:
+    """The household's inferred connection: fuse, connection power, floor.
+
+    The profiles carry no soglasje, so it is inferred (`SI_CONTRACT`): the
+    `fuse_rank`-th smallest standard rating on `fuse_shelf` whose power covers
+    the largest no-battery draw in the WHOLE file -- training years included,
+    since the connection is older than any one of them.
+    """
+    key = os.path.abspath(file_path)
+    if key not in _CONNECTION_CACHE:
+        raw = _read_household(file_path)
+        hours = (raw.index[1] - raw.index[0]).total_seconds() / 3600.0
+        peak = float(np.maximum(raw["Energy_Consumption"] - raw["Energy_Generation"],
+                                0.0).max()) / hours
+        c = SI_CONTRACT
+        shelf = sorted((float(kw), fuse) for fuse, kw in _si_moc.PRIKLJUCNE_MOCI_KW.items()
+                       if c["fuse_shelf"] == "1+3" or fuse.startswith("3x"))
+        fits = [x for x in shelf if x[0] >= peak - 1e-9]
+        if len(fits) < c["fuse_rank"]:
+            raise ValueError(f"{file_path}: no rank-{c['fuse_rank']} connection on "
+                             f"shelf {c['fuse_shelf']!r} covers {peak:.2f} kW")
+        kw, fuse = fits[c["fuse_rank"] - 1]
+        phases = 1 if fuse.startswith("1x") else 3
+        _CONNECTION_CACHE[key] = {
+            "peak_kw": peak, "fuse": fuse, "connection_kw": kw, "phases": phases,
+            "floor_kw": float(_si_moc.minimalna_dogovorjena_moc(
+                kw, faze=phases, leto=c["floor_year"]))}
+    return dict(_CONNECTION_CACHE[key])
+
+
+def si_contract_terms(file_path: str, start) -> dict:
+    """The environment's contract options for a household whose data starts at
+    `start`: `agreed_power=` for `build_household_env`."""
+    conn = si_connection(file_path)
+    raw = _read_household(file_path)
+    start = pd.Timestamp(start)
+    if raw.index.tz is not None and start.tz is None:
+        start = start.tz_localize(raw.index.tz)
+    before = raw.loc[raw.index < start]
+    hours = (raw.index[1] - raw.index[0]).total_seconds() / 3600.0
+    n = int(round(SI_CONTRACT["history_days"] * 24 / hours))
+    history = (np.maximum(before["Energy_Consumption"] - before["Energy_Generation"],
+                          0.0) / hours).iloc[-n:]
+    return {"connection_power_kw": conn["connection_kw"],
+            "min_agreed_power_kw": conn["floor_kw"],
+            "agreed_power_cutoff_day": SI_CONTRACT["cutoff_day"],
+            "agreed_power_history_kw": history}
+
+
+# WHAT THE FORECAST MPC HOLDS WHEN THE METER IS NOT THE FORECAST -- the
+# executor of `ReactiveController`, ported from Energy_Community
+# (`Horizon_Comparison.execute_interval`, measured in
+# `Optimization_Target_Study`, 2026-10-21).
+#
+# A window's first interval fixes two numbers: the battery power and the grid
+# exchange that power was planned to produce. Once the house differs from the
+# forecast only one of the two can be held.
+#
+#   "battery"  hold the battery power; the grid takes every forecast error. What
+#              this study ran until 2026-10-21. An over-forecast load discharges
+#              into an export credited at a fraction of the import price, an
+#              under-forecast one buys what the plan was avoiding, and every
+#              peak the forecast misses reaches the meter whole.
+#   "grid"     hold the planned exchange; the battery takes the error, inside
+#              its power and energy envelope (`execute_interval`).
+#   "import"   hold only a ceiling on import, (-inf, max(planned, 0)].
+#   "limit"    the plan as a bound both ways, [min(planned, 0), max(planned, 0)].
+#
+# And a RESERVE: the bottom `reserve_kwh` of the pack is hidden from the planner
+# (`UpstreamMILPScheduler(reserve_kwh=)`) and spent by the executor only to hold
+# the draw at the contract in force -- the guard. The plan refills it with its
+# next scheduled charge, which it sees as charging an empty battery.
+#
+# Measured in Energy_Community over 40 households, 10 kWh, GEN-I Dinamicni, the
+# statutory excess charge and the causal monthly contract, mean EUR/a:
+#
+#     no battery 986.5 | battery 927.2 | import 845.0 | grid 772.2
+#     limit 770.1 | grid + 1 kWh 764.9 | grid + 2 kWh 772.3
+#
+# Grid tracking beats battery tracking in 40 of 40 households (-155 EUR/a);
+# under battery tracking 16 of 40 households pay more than with no battery at
+# all, under grid tracking one does. The 1 kWh reserve cuts the intervals above
+# the contract from ~910 to ~120 a year and the excess charge 62 -> 45 EUR/a for
+# some energy back, and beats plain grid in 32 of 40 (-7.4 EUR/a); 2 kWh gives
+# the gain back. That optimum was found there, on Fluvius profiles and a 10 kWh
+# pack, and is adopted here, not re-searched.
+#
+# PER TARIFF, because the reserve is released by the contract guard alone: AU
+# has no contract, so a reserve there would be capacity the planner never sees
+# and nothing ever spends -- a smaller battery. AU therefore holds the grid
+# exchange with the whole pack.
+#
+# Only the FORECAST arm executes this. The forecast-blind MPC (`oracle`) plans on
+# the truth, where every band executes the same interval as the battery power
+# and a reserve could only cost it pack: it stays the plain executor with the
+# whole pack, so it remains the bound on what the forecast arm could reach, and
+# the oracle cache is not re-keyed (`_FORECAST_ONLY_KEYS`).
+MPC_TRACKING_MODES = ("battery", "grid", "import", "limit")
+MPC_EXECUTOR = {"AU": ("grid", 0.0), "SI": ("grid", 1.0)}
+
+
+def mpc_executor(tariff: str) -> tuple:
+    """`(tracking, reserve_kwh)` the forecast MPC on `tariff` executes with."""
+    tracking, reserve = MPC_EXECUTOR[tariff]
+    if tracking not in MPC_TRACKING_MODES:
+        raise ValueError(f"MPC_EXECUTOR[{tariff!r}] tracking must be one of "
+                         f"{MPC_TRACKING_MODES}, got {tracking!r}")
+    return tracking, float(reserve)
+
+
+def mpc_executor_key(tracking: str, reserve_kwh: float) -> dict:
+    """What a checkpoint key carries for the executor: `{}` or two entries.
+
+    Empty for ("battery", 0), the executor every checkpoint before 2026-10-21
+    was produced under -- the `excess_power_key` convention. A result under
+    another executor is a different quantity, not an older one, so the two never
+    share a key.
+    """
+    if tracking == "battery" and not reserve_kwh:
+        return {}
+    return {"mpc_tracking": tracking, "mpc_reserve_kwh": float(reserve_kwh)}
+
+
 def config_digest(config: dict) -> str:
     """Short stable digest of a config dict. Sorted, so key order cannot matter."""
     blob = json.dumps(config, sort_keys=True, default=str).encode("utf-8")
@@ -1043,7 +1300,10 @@ ORACLE_CACHE_DIR = os.environ.get(
 # What the oracle and the rules cannot see. Everything else in `study_config`
 # stays in the key.
 _FORECAST_ONLY_KEYS = ("forecaster_kind", "forecaster_digest",
-                       "refit_every_days", "leak_current_interval")
+                       "refit_every_days", "leak_current_interval",
+                       # The executor (`MPC_EXECUTOR`): the oracle runs the
+                       # plain one whatever the forecast arm holds.
+                       "mpc_tracking", "mpc_reserve_kwh")
 
 
 def oracle_config(config: dict, dataset_name: str) -> dict:
@@ -1325,6 +1585,7 @@ from MILP_Household import (            # noqa: E402
     add_endogenous_agreed_power,
     add_excess_power_ratchet,
     add_household_physics,
+    add_statutory_excess_power,
     agreed_power_by_month,
     build_household_env,
     floor_export_rates,
@@ -1333,12 +1594,17 @@ from MILP_Household import (            # noqa: E402
     household_data_rows,
     interval_rate_vectors,
     month_calendar,
+    statutory_excess_rate,
     step_energy_kwh,
+    tighten_statutory_excess,
+    StatutoryExcess,
 )
 import si_cas as _si_cas                # noqa: E402  (after MILP_Household)
+import si_moc as _si_moc                # noqa: E402  (the fuse tables, `si_connection`)
 from si_obracun import Pravila          # noqa: E402  (the SI ratchet's rule set)
 from Basic_Functions import (           # noqa: E402
     battery_delta,
+    fuse_charge_headroom,
     max_charge_now,
     max_discharge_now,
     pv_surplus,
@@ -1357,8 +1623,19 @@ def build_study_env(sample: pd.DataFrame,
                     cycle_cost_eur_per_efc: float | None = None,
                     contracted_power_kw=None,
                     agreed_power: dict | None = None,
-                    paket_id: str | None = None):
+                    paket_id: str | None = None,
+                    tariff: str | None = None,
+                    household: str | None = None):
     """The battery, sized by upstream's own factory rather than by hand.
+
+    `tariff="SI"` installs the study's contract (`SI_CONTRACT`): the filing
+    deadline, the household's inferred connection -- its floor and ceiling on
+    the agreed power and its fuse on the draw -- and the meter history before
+    `sample` begins. Those are properties of the HOUSEHOLD, so `household` (its
+    data file) is then required: an SI environment built without it would be a
+    household with no connection, which is a different study, and it is refused
+    rather than built. Entries of `agreed_power` override the terms. None, and
+    "AU", build the environment exactly as before.
 
     c_rate/inverter are chosen so `step_energy_kwh` lands on this study's p_max:
     a 10 kWh pack at 1.5 kW is C=0.15, well under upstream's residential 0.5
@@ -1384,6 +1661,15 @@ def build_study_env(sample: pd.DataFrame,
     """
     paket = "GENI_SAMO_DINAMICNI" if paket_id is None else str(paket_id)
     c_rate = p_max / float(battery_cap)
+    if tariff == "SI" and excess_power_model("SI") == "statutory":
+        if household is None:
+            raise ValueError("an SI environment needs `household=` (its data file): "
+                             "the connection and the meter history are the "
+                             "household's (`SI_CONTRACT`)")
+        agreed_power = {**si_contract_terms(household, sample.index[0]),
+                        **(agreed_power or {})}
+    elif tariff not in (None, "AU", "SI"):
+        raise ValueError(f"tariff must be None, 'AU' or 'SI', got {tariff!r}")
     env = build_household_env(
         sample,
         capacity_kwh=battery_cap,
@@ -1560,6 +1846,29 @@ class _HorizonModel:
         }
 
 
+class _PlannerBatteryView:
+    """The environment as a planner under a reserve sees it: a smaller pack.
+
+    Only the usable capacity differs; every other attribute -- envelope,
+    efficiencies, calendar, contract -- is the environment's own, read through.
+    The NAMEPLATE is pinned to the real pack's, so a wear price per equivalent
+    full cycle (`wear_objective_terms`) is the same price per kWh it always was.
+    """
+
+    def __init__(self, env, battery_capacity_kwh: float):
+        object.__setattr__(self, "_env", env)
+        object.__setattr__(self, "battery_capacity_kwh", float(battery_capacity_kwh))
+        object.__setattr__(self, "nominal_capacity_kwh", float(getattr(
+            env, "nominal_capacity_kwh", env.battery_capacity_kwh)))
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_env"), name)
+
+    def __setattr__(self, name, value):
+        raise AttributeError(f"the planner's view is read-only (set {name!r} on "
+                             f"the environment itself)")
+
+
 class UpstreamMILPScheduler:
     """MILPScheduler's interface over add_household_physics."""
 
@@ -1567,13 +1876,32 @@ class UpstreamMILPScheduler:
                  soc_max_pct: float, p_max: float, eff: float, delta_t: float,
                  parity: bool = False, exclusivity: str = "binary",
                  allow_spill: bool = True, metering_bounds: bool = True,
-                 solver=None, persistent: bool = True):
+                 solver=None, persistent: bool = True, reserve_kwh: float = 0.0):
         self.env      = env
         self.delta_t  = delta_t
         self.eff      = eff
         self.p_max    = p_max
-        self.soc_min  = battery_cap * soc_min_pct
+        # THE RESERVE (`MPC_EXECUTOR`): the bottom `reserve_kwh` of the usable
+        # window is hidden from every plan. The planner's battery is the pack
+        # above it -- its floor `soc_min` raised by the reserve, its capacity
+        # shrunk by it -- so a plan opened below the reserve opens empty, and one
+        # closed at a target closes the reserve's worth above the physical floor
+        # as well. `soc_floor` is the physical floor, which is what the
+        # controller clamps and the meter sees. 0 is the scheduler as it always
+        # was: the same environment object, the same floor, the same model.
+        self.reserve_kwh = float(reserve_kwh)
+        self.soc_floor = battery_cap * soc_min_pct
+        self.soc_min  = self.soc_floor + self.reserve_kwh
         self.soc_max  = battery_cap * soc_max_pct
+        if self.reserve_kwh:
+            if not 0.0 < self.reserve_kwh < float(env.battery_capacity_kwh):
+                raise ValueError(
+                    f"reserve_kwh={reserve_kwh} must lie inside the usable window "
+                    f"(0, {float(env.battery_capacity_kwh):g}) kWh")
+            self.plan_env = _PlannerBatteryView(
+                env, float(env.battery_capacity_kwh) - self.reserve_kwh)
+        else:
+            self.plan_env = env
         self.parity   = parity
         self.solver   = solver or make_solver()
 
@@ -1586,7 +1914,7 @@ class UpstreamMILPScheduler:
         # a household without a battery all get the rebuild.
         self.persistent = (bool(persistent) and solver is None
                            and SOLVER_NAME == "HiGHS"
-                           and float(env.battery_capacity_kwh) > 0)
+                           and float(self.plan_env.battery_capacity_kwh) > 0)
         self._models: dict = {}
         self.n_persistent_solves = 0
         self.n_audits = 0
@@ -1639,9 +1967,38 @@ class UpstreamMILPScheduler:
         # the LP is buying nothing and the run should know.
         self.n_solves = 0
         self.n_binary_solves = 0
+        # Of those, the windows whose LP plan would have executed charge and
+        # discharge at once and went to the binaries for it (`solve`).
+        self.n_does_both = 0
+        # The statutory windows (`solve(excess=...)`): how many needed the
+        # statutory model at all, the cut rounds they took, how many stopped
+        # short of STATUTORY_WINDOW_TOL_EUR and by how much at worst.
+        self.statutory = dict(windows=0, rounds=0, unclosed=0, max_shortfall_eur=0.0)
 
     def solve(self, soc_init: float, buy_rate, sell_rate,
-              p_gen, p_con, terminal_soc: float | None = None) -> dict:
+              p_gen, p_con, terminal_soc: float | None = None,
+              excess: dict | None = None) -> dict:
+        """The plan for one window.
+
+        `excess` prices the SI excess-power charge the way the invoice does,
+        opened mid-month (`ReactiveController._excess_window` builds it):
+        `blocks`, `months` and `agreed_t` per interval (block, absolute month
+        id, the contract in force for it in kW), `rate_fn(block, month)` in EUR
+        per RMS kW, and `carried`, `{(block, month): kW^2}`, the squared
+        exceedances the month has already metered. None is the objective this
+        scheduler always solved: energy and wear.
+
+        THE FAST PATH IS EXACT, not a heuristic. The statutory term is
+        `rate x sqrt(c0^2 + sum e_t^2)`, never below `rate x c0` and equal to it
+        exactly where no planned draw crosses its line. So a plan of the
+        energy-only model that crosses nowhere is an optimum of the statutory
+        model too -- nothing can undercut its energy, and nothing pays less
+        excess. Such a window is solved by the persistent, warm-started model
+        as before; only a window whose energy optimum crosses the contract is
+        rebuilt with the statutory term and cut (`_solve_rebuild(excess=)`).
+        The tie caveat of the persistent model applies to the plan, not to the
+        optimum, as everywhere else.
+        """
         dt = self.delta_t
 
         # Arrays from here on, whatever the caller held: the controller passes
@@ -1652,10 +2009,12 @@ class UpstreamMILPScheduler:
         # kW -> kWh per interval, and into upstream's 0..usable SoC frame.
         gen = np.asarray(p_gen, dtype=float) * dt
         con = np.asarray(p_con, dtype=float) * dt
+        # Into the PLANNER's frame: under a reserve, a SOC inside it opens the
+        # plan empty (`soc_min` is the reserve's top).
         soc0 = float(np.clip(soc_init - self.soc_min, 0.0,
-                             self.env.battery_capacity_kwh))
+                             self.plan_env.battery_capacity_kwh))
         soc_end = soc0 if terminal_soc is None else float(np.clip(
-            terminal_soc - self.soc_min, 0.0, self.env.battery_capacity_kwh))
+            terminal_soc - self.soc_min, 0.0, self.plan_env.battery_capacity_kwh))
 
         # The guard against the unbounded LP: where the delivered import rate is
         # negative, an unfloored export credit makes the buy/sell round trip
@@ -1697,14 +2056,77 @@ class UpstreamMILPScheduler:
 
         step = (soc_init, buy_rate, export, gen, con, soc0, soc_end,
                 exclusivity, n_floored)
+        plan = None
         if self.persistent:
             plan = self._solve_persistent(*step)
             # None is HiGHS not reaching optimal. The rebuild path owns what
             # that means -- the message, the idle plan -- so it is handed over
             # whole rather than half-answered here.
-            if plan is not None:
-                return plan
-        return self._solve_rebuild(*step)
+            if plan is not None and excess is not None and self._crosses(plan, excess):
+                plan = None
+        if plan is None:
+            plan = self._solve_rebuild(*step, excess=excess)
+        # The import-rate test above is not the only way an LP can be paid to
+        # destroy energy: where the window's EXPORT credit is negative, PV
+        # surplus that cannot be curtailed costs money to send out, and burning
+        # it as round-trip loss is cheaper. Under the plain executor no year of
+        # this study ever executed such a plan; holding the grid exchange
+        # (`MPC_EXECUTOR`) moves the SoC through states where one did (SI_H24_
+        # persist, Ausgrid 67) and the controller stopped on it. So, as
+        # Energy_Community's receding roll does (`_does_both`), a plan whose
+        # EXECUTED interval charges and discharges at once is not used: the
+        # binaries solve that window. Only the first interval is read -- it is
+        # the one executed at reoptimize_every=1 -- so a window that would have
+        # run before is solved exactly as it was.
+        if (exclusivity == "inverter" and plan["status"] == "Optimal"
+                and plan["x_ch"][0] > ACTION_TOL and plan["x_dis"][0] > ACTION_TOL):
+            self.n_binary_solves += 1
+            self.n_does_both += 1
+            plan = self._solve_rebuild(soc_init, buy_rate, export, gen, con, soc0,
+                                       soc_end, "binary", n_floored, excess=excess)
+        return plan
+
+    # Above the line by more than this, a planned draw is an exceedance. Solver
+    # noise on a vertex is ~1e-9 kW, and an exceedance this small costs
+    # rate x 1e-7 EUR, so the threshold can neither miss a real one nor send a
+    # tied window to the statutory model for nothing.
+    _CROSS_TOL_KW = 1e-7
+
+    def _crosses(self, plan, excess) -> bool:
+        """Does any planned draw sit above the contract in force for it?"""
+        buy = np.asarray(plan["p_buy"], dtype=float)
+        return bool(np.any(buy > np.asarray(excess["agreed_t"], dtype=float)
+                           + self._CROSS_TOL_KW))
+
+    def _add_statutory(self, prob, blk, excess, gen, con):
+        """The window's statutory excess charge, appended to `prob`'s objective.
+
+        `MILP_Household.StatutoryExcess` itself -- the class the whole-period
+        solve and Energy_Community's receding controller use -- with the
+        window's own (block, month) groups, the contract in force, and the
+        month's metered sum as the norm's constant coordinate.
+        """
+        groups, agreed = {}, {}
+        for t, (b, m) in enumerate(zip(excess["blocks"], excess["months"])):
+            key = (int(b), int(m))
+            groups.setdefault(key, []).append(t)
+            # One contract per (block, month): the same number every interval of
+            # the group was handed, read off the first.
+            agreed.setdefault(key, float(excess["agreed_t"][t]))
+        carried = {k: float(excess["carried"].get(k, 0.0)) for k in groups
+                   if float(excess["carried"].get(k, 0.0)) > 0.0}
+        model = StatutoryExcess(
+            prob, blk.buy, groups=groups, agreed=agreed,
+            coefficient={k: float(excess["rate_fn"](*k)) for k in groups},
+            hours=self.delta_t, name="S_exc_b{b}_m{m}", carried=carried)
+        model.add_interval_cuts()
+        # Tangents at the levels the window's own no-battery draw puts in reach
+        # -- on the plan's data, which is the forecast in the forecast arm.
+        model.add_reference_tangents(
+            np.maximum(np.asarray(con, dtype=float) - np.asarray(gen, dtype=float),
+                       0.0) / self.delta_t)
+        prob.setObjective(prob.objective + pulp.lpSum(model.objective_terms()))
+        return model
 
     def _build(self, buy_rate, export, gen, con, soc0, soc_end, exclusivity):
         """The problem for one horizon: upstream's physics, this study's bill.
@@ -1715,7 +2137,7 @@ class UpstreamMILPScheduler:
         H = len(buy_rate)
         prob = pulp.LpProblem("MILP_HEMS", pulp.LpMinimize)
         blk = add_household_physics(
-            prob, self.env, n_steps=H, gen=gen, con=con,
+            prob, self.plan_env, n_steps=H, gen=gen, con=con,
             initial_soc_kwh=soc0, final_soc_kwh=soc_end,
             exclusivity=exclusivity,
             metering_bounds=self.metering_bounds,
@@ -1726,19 +2148,38 @@ class UpstreamMILPScheduler:
 
         prob += pulp.lpSum(
             blk.buy[t] * buy_rate[t] - blk.sell[t] * export[t] for t in range(H)
-        ) + pulp.lpSum(wear_objective_terms(self.env, blk, H)), "MinNetCost"
+        ) + pulp.lpSum(wear_objective_terms(self.plan_env, blk, H)), "MinNetCost"
         return prob, blk
 
     def _solve_rebuild(self, soc_init, buy_rate, export, gen, con, soc0,
-                       soc_end, exclusivity, n_floored) -> dict:
-        """Assemble the model for this step and solve it. The reference path."""
+                       soc_end, exclusivity, n_floored, excess=None) -> dict:
+        """Assemble the model for this step and solve it. The reference path.
+
+        With `excess`, the window's statutory excess charge joins the objective
+        and the solve is a cut loop closed to STATUTORY_WINDOW_TOL_EUR.
+        """
         H  = len(buy_rate)
         dt = self.delta_t
         prob, blk = self._build(buy_rate.tolist(), export.tolist(), gen.tolist(),
                                 con.tolist(), soc0, soc_end, exclusivity)
+        statutory = (None if excess is None
+                     else self._add_statutory(prob, blk, excess, gen, con))
 
         prob.solve(self.solver)
         status = pulp.LpStatus[prob.status]
+        if statutory is not None:
+            def _resolve():
+                prob.solve(self.solver)
+                return pulp.LpStatus[prob.status]
+
+            status, rounds, shortfall = tighten_statutory_excess(
+                prob, statutory, _resolve, tol_eur=STATUTORY_WINDOW_TOL_EUR,
+                max_rounds=STATUTORY_WINDOW_MAX_ROUNDS)
+            st = self.statutory
+            st["windows"] += 1
+            st["rounds"] += rounds
+            st["unclosed"] += int(shortfall > STATUTORY_WINDOW_TOL_EUR)
+            st["max_shortfall_eur"] = max(st["max_shortfall_eur"], float(shortfall))
 
         if status != "Optimal":
             # Loud, and never mistaken for a valid do-nothing plan.
@@ -1870,7 +2311,10 @@ class UpstreamMILPScheduler:
 #                 they beat is not a ceiling. This is the concrete reason the
 #                 notebook's old caveat -- "the MILP optimises energy only ...
 #                 which is why a peak-shaving rule can beat it there" -- does
-#                 not apply to this solve.
+#                 not apply to this solve. Priced as the invoice prices it
+#                 (`SI_EXCESS_POWER_MODEL`): the statutory norm, through cuts
+#                 closed to STATUTORY_FULL_TOL_EUR, so the bound is over the
+#                 same excess charge the settlement bills every rule.
 #   fixed         SI only, and not optional. The dogovorjena moc is ENDOGENOUS
 #                 (`agreed_power_from_dispatch`), so the network power charge is
 #                 linear in a variable this solve sets. That variable needs its
@@ -1909,7 +2353,7 @@ def solve_full_period(env, rates, tariff, n_steps, soc_init_kwh, delta_t,
     when the contract has no in-LP form. It costs a handful of extra solves and
     only ever fires on a horizon too short for the study's own arms.
     """
-    if _agreed_power_is_endogenous_in_lp(env, n_steps) is False and getattr(
+    if _agreed_power_is_endogenous_in_lp(env, n_steps, tariff) is False and getattr(
             env, "agreed_power_from_dispatch", False):
         hours = float(delta_t)
         out = {}
@@ -1930,15 +2374,27 @@ def solve_full_period(env, rates, tariff, n_steps, soc_init_kwh, delta_t,
         terminal_soc_kwh, solver, closeout_rate, verbose)
 
 
-def _agreed_power_is_endogenous_in_lp(env, n_steps) -> bool:
+def milp_contract(tariff: str) -> str:
+    """How the whole-period MILP holds its contract: "free" (it files the
+    contract that minimises its bill, `SI_CONTRACT`) or "rule" (tied to its
+    own peaks by the operator's statistic, the study before 2026-10-21)."""
+    if tariff == "SI" and excess_power_model("SI") == "statutory":
+        return SI_CONTRACT["milp"]
+    return "rule"
+
+
+def _agreed_power_is_endogenous_in_lp(env, n_steps, tariff=None) -> bool:
     """Can this horizon decide its own contract inside one solve?
 
-    Only if a month in it reads its line from another month in it, which needs
-    more months than the lag. Same test `_solve_full_period_once` applies; it
-    lives here so the wrapper can ask it before building anything.
+    A filed ("free") contract always can: no month reads another. Under the
+    rule, only if a month in it reads its line from another month in it, which
+    needs more months than the lag. Same test `_solve_full_period_once` applies;
+    it lives here so the wrapper can ask it before building anything.
     """
     if not getattr(env, "agreed_power_from_dispatch", False):
         return False
+    if tariff is not None and milp_contract(tariff) == "free":
+        return True
     lag = getattr(env, "agreed_power_lag_months", None)
     if not lag:
         return False
@@ -1948,8 +2404,34 @@ def _agreed_power_is_endogenous_in_lp(env, n_steps) -> bool:
 
 def _solve_full_period_once(env, rates, tariff, n_steps, soc_init_kwh, delta_t,
                             soc_min_kwh, terminal_soc_kwh=None, solver=None,
-                            closeout_rate=None, verbose=True):
-    """One whole-period solve, under the contract currently in force."""
+                            closeout_rate=None, verbose=True, binaries=True,
+                            statutory_seed_cuts=None):
+    """One whole-period solve, under the contract currently in force.
+
+    On SI under the statutory excess model the solve is a cut loop
+    (`MILP_Household.tighten_statutory_excess`), and where the year carries
+    binaries it is two: the LP form first (`binaries=False`), which only
+    gathers cuts -- every cut is valid whatever the dispatch, so the form that
+    finds them cannot move the result -- and then the binary model seeded with
+    them (`statutory_seed_cuts`). That is Energy_Community's
+    `Agreed_Power_Study.solve_formulation`, measured there: the seeded binary
+    solve needed no further round where a cold one took five and ended above
+    the seeded one's true cost.
+    """
+    if (binaries and statutory_seed_cuts is None
+            and tariff == "SI" and excess_power_model(tariff) == "statutory"):
+        import_rates = np.asarray(rates[0][:int(n_steps)], dtype=float)
+        if np.any(import_rates <= 0.0):
+            lp = _solve_full_period_once(
+                env, rates, tariff, n_steps, soc_init_kwh, delta_t, soc_min_kwh,
+                terminal_soc_kwh, None, closeout_rate, verbose, binaries=False)
+            seeded = _solve_full_period_once(
+                env, rates, tariff, n_steps, soc_init_kwh, delta_t, soc_min_kwh,
+                terminal_soc_kwh, solver, closeout_rate, verbose,
+                statutory_seed_cuts=lp["statutory_cut_log"])
+            seeded["runtime_s"] += lp["runtime_s"]
+            seeded["statutory_lp_rounds"] = lp["statutory_rounds"]
+            return seeded
     H_steps = int(n_steps)
     dt = float(delta_t)
     hours = dt
@@ -2004,7 +2486,9 @@ def _solve_full_period_once(env, rates, tariff, n_steps, soc_init_kwh, delta_t,
     # A year of binaries is 17,520 of them and a genuinely hard MIP; a year of
     # this is 1 on SI and 0 on AU. Same guarantee, LP speed.
     negative = [t for t in range(H_steps) if import_rates[t] <= 0.0]
-    for t in negative:
+    # `binaries=False` is the statutory LP stage above: the same model without
+    # them, solved only to collect cuts and never executed.
+    for t in (negative if binaries else ()):
         flag = pulp.LpVariable(f"B_charging_{t}", cat="Binary")
         add_battery_exclusivity(
             prob, charge_t=blk.charge[t], discharge_t=blk.discharge[t],
@@ -2031,6 +2515,7 @@ def _solve_full_period_once(env, rates, tariff, n_steps, soc_init_kwh, delta_t,
         ]
     wear_terms = wear_objective_terms(env, blk, H_steps)
     peak_terms, agreed_terms, agreed_vars = [], [], None
+    statutory = None
 
     if tariff == "SI":
         pricing_options = dict(env.pricing_options or {})
@@ -2040,45 +2525,126 @@ def _solve_full_period_once(env, rates, tariff, n_steps, soc_init_kwh, delta_t,
         block_arr = env.tariff_blocks[:H_steps]
         agreed_by_month = agreed_power_by_month(env, 0, months_sorted)
 
-        # The contract the solve sets for itself, where the horizon is long
-        # enough to contain a month whose line is read from one inside it. A
-        # whole year always is; the guard mirrors solve_household's.
+        # The contract the solve sets for itself. FILED ("free", `SI_CONTRACT`):
+        # every month's, within the connection's floor and ceiling, whatever
+        # the horizon. Under the RULE, only where the horizon is long enough to
+        # contain a month whose line is read from one inside it. A whole year
+        # always is; the guard mirrors solve_household's.
+        contract = milp_contract(tariff)
         if (getattr(env, "agreed_power_from_dispatch", False)
-                and getattr(env, "agreed_power_lag_months", None)
-                and len(months_sorted) > int(env.agreed_power_lag_months)):
+                and (contract == "free"
+                     or (getattr(env, "agreed_power_lag_months", None)
+                         and len(months_sorted) > int(env.agreed_power_lag_months)))):
             agreed_vars, agreed_terms = add_endogenous_agreed_power(
                 prob, env, buy=blk.buy, hours=hours,
                 months_sorted=months_sorted, month_idx_t=month_idx_t,
                 blocks=block_arr, dates=dates,
                 interval_minutes=interval_minutes,
                 pricing_options=pricing_options,
+                contract=contract,
                 agreed_by_month=agreed_by_month, n_steps=H_steps,
             )
-        _, _, peak_terms = add_excess_power_ratchet(
-            prob, env, blk.buy,
-            blocks=block_arr, month_idx_t=month_idx_t,
-            months_sorted=months_sorted, agreed_by_month=agreed_by_month,
-            agreed_vars=agreed_vars, start_idx=0, n_steps=H_steps,
-            hours=hours, pravila=Pravila.za_leto(
-                int(pricing_options["pricing_reference_year"])),
-        )
+        pravila = Pravila.za_leto(int(pricing_options["pricing_reference_year"]))
+        if excess_power_model(tariff) == "statutory":
+            # The norm is over WHOLE calendar months, so the horizon must open
+            # on nothing already metered. It always does here: every caller
+            # solves from row 0 of an environment built on its own window, and
+            # an environment's first window carries no seed. Checked rather
+            # than assumed, because a partial month seeded from history would
+            # be billed from the meter and optimised from zero.
+            if any(v > 0.0 for v in env.compute_seed_peak_kw(0).values()):
+                raise ValueError("the statutory excess charge is a norm over the "
+                                 "whole month; this horizon opens on a metered peak.")
+            statutory = add_statutory_excess_power(
+                prob, env, blk.buy, blocks=block_arr, month_idx_t=month_idx_t,
+                months_sorted=months_sorted, agreed_by_month=agreed_by_month,
+                agreed_vars=agreed_vars, hours=hours, pravila=pravila,
+                n_steps=H_steps,
+                # The tangent seeds: the no-battery draw, where the exceedance
+                # pattern of a lower contract is already visible.
+                reference_power_kw=np.maximum(np.asarray(con) - np.asarray(gen),
+                                              0.0) / hours,
+                apply_ddv=bool(pricing_options.get("apply_ddv", True)),
+            )
+            statutory.replay(statutory_seed_cuts)
+            peak_terms = statutory.objective_terms()
+            # A billed block with NO agreed power (a seasonal block missing from
+            # a fixed bootstrap contract) makes every draw in it an exceedance:
+            # under the statute that is the whole month's load in one norm, which
+            # the cut loop prices slowly (measured: a 92-day slice opening in a
+            # high-season July on a low-season bootstrap stalled 1 EUR short after
+            # 40 rounds). None of the study's 30 scored years has one; said aloud
+            # if a horizon does.
+            zero = sorted((b, months_sorted[m]) for (b, m), a in statutory.agreed.items()
+                          if not isinstance(a, pulp.LpVariable) and float(a) <= 0.0)
+            if zero and verbose:
+                print(f"  [full period] {len(zero)} billed (block, month) with no agreed "
+                      f"power: {zero[:4]}{' ...' if len(zero) > 4 else ''} -- every draw "
+                      f"there is an exceedance")
+        else:
+            _, _, peak_terms = add_excess_power_ratchet(
+                prob, env, blk.buy,
+                blocks=block_arr, month_idx_t=month_idx_t,
+                months_sorted=months_sorted, agreed_by_month=agreed_by_month,
+                agreed_vars=agreed_vars, start_idx=0, n_steps=H_steps,
+                hours=hours, pravila=pravila,
+            )
 
     prob += (pulp.lpSum(energy_terms) + pulp.lpSum(terminal_terms)
              + pulp.lpSum(wear_terms) + pulp.lpSum(peak_terms)
              + pulp.lpSum(agreed_terms)), "MinInvoice"
 
+    n_binaries = len(negative) if binaries else 0
     if solver is None:
         # An LP once the binaries are counted, so the study's exact solver; a
         # real MIP only if a price series is negative often enough to matter,
         # and then the whole-period gap upstream already settled on.
-        solver = make_solver() if len(negative) <= 8 else full_period_solver()
+        solver = make_solver() if n_binaries <= 8 else full_period_solver()
     if verbose:
-        print(f"  [full period] {H_steps} steps, {len(negative)} binary "
-              f"interval(s), {n_floored} export rate(s) floored; solving...")
+        stage = "" if binaries else " (statutory LP stage: cuts only)"
+        print(f"  [full period] {H_steps} steps, {n_binaries} binary "
+              f"interval(s), {n_floored} export rate(s) floored; solving{stage}...")
     t0 = datetime.datetime.now()
     prob.solve(solver)
-    elapsed = (datetime.datetime.now() - t0).total_seconds()
     status = pulp.LpStatus[prob.status]
+
+    statutory_rounds, statutory_shortfall = 0, 0.0
+    if statutory is not None:
+        # A MIP returned within a relative gap moves its point by that much
+        # between re-solves, and no cut pins it down more finely; the study's
+        # own solver is exact, and an LP is held to the tolerance.
+        gap_rel = (float(getattr(solver, "optionsDict", {}).get("gapRel") or 0.0)
+                   if prob.isMIP() else 0.0)
+
+        def _resolve():
+            prob.solve(solver)
+            return pulp.LpStatus[prob.status]
+
+        status, statutory_rounds, statutory_shortfall = tighten_statutory_excess(
+            prob, statutory, _resolve, tol_eur=STATUTORY_FULL_TOL_EUR,
+            max_rounds=STATUTORY_FULL_MAX_ROUNDS, gap_rel=gap_rel,
+            verbose=verbose and not binaries)
+        if verbose:
+            print(f"  [full period] statutory excess: {statutory_rounds} cut "
+                  f"round(s), {statutory.n_cuts} cuts, shortfall "
+                  f"{statutory_shortfall:.5f} EUR")
+        if statutory_shortfall > max(STATUTORY_FULL_TOL_EUR,
+                                     gap_rel * abs(float(pulp.value(prob.objective) or 0.0))):
+            # Loud, because `full_period_bound_check` reads this solve as a
+            # lower bound and an unclosed loop leaves it short of one by up to
+            # the shortfall. The dispatch itself is feasible and billed exactly.
+            print(f"  !!! [full period] statutory cut loop stopped after "
+                  f"{statutory_rounds} rounds, {statutory_shortfall:.4f} EUR short "
+                  f"of its own excess charge")
+    elapsed = (datetime.datetime.now() - t0).total_seconds()
+    # CBC stopped by its time limit is labelled "Optimal" by pulp; only the
+    # solution status says the incumbent was never proven within the gap. Only
+    # reachable on the CBC branch (more than 8 binaries), never on the study's.
+    stopped_on_limit = bool(prob.isMIP()
+                            and prob.sol_status == pulp.LpSolutionIntegerFeasible)
+    if stopped_on_limit:
+        print(f"  !!! [full period] stopped on the solver's time limit: an "
+              f"unproven incumbent, not an optimum within the gap")
 
     if status != "Optimal":
         # Never silently a do-nothing plan: this number is the denominator every
@@ -2094,7 +2660,7 @@ def _solve_full_period_once(env, rates, tariff, n_steps, soc_init_kwh, delta_t,
     if verbose:
         print(f"  [full period] {status} in {elapsed:.0f} s, "
               f"objective {float(pulp.value(prob.objective) or 0.0):.2f}")
-    return {
+    out = {
         "status": status,
         "x_ch":  [val(blk.charge[t]) / dt for t in range(H_steps)],
         "x_dis": [val(blk.discharge[t]) / dt for t in range(H_steps)],
@@ -2103,10 +2669,31 @@ def _solve_full_period_once(env, rates, tariff, n_steps, soc_init_kwh, delta_t,
         "soc_plan": [val(blk.soc[t + 1]) + soc_min_kwh for t in range(H_steps)],
         "objective": float(pulp.value(prob.objective) or 0.0),
         "wear_eur": float(sum(pulp.value(x) or 0.0 for x in wear_terms)),
-        "n_binary_intervals": len(negative),
+        "n_binary_intervals": n_binaries,
         "n_floored": n_floored,
         "runtime_s": elapsed,
+        "stopped_on_limit": stopped_on_limit,
+        "excess_power_model": excess_power_model(tariff),
     }
+    if agreed_vars is not None:
+        # The contract the LP signed for itself. `add_endogenous_agreed_power`
+        # holds it AT OR ABOVE the rule's top-k mean, and the settlement bills
+        # the rule exactly, so the two are compared rather than assumed equal.
+        from MILP_Household import solved_agreed_power_schedule
+        out["agreed_schedule"] = solved_agreed_power_schedule(
+            env, agreed_vars, months_sorted)
+    if statutory is not None:
+        evaluation = statutory.evaluate()
+        out.update({
+            # What the solve priced its own excess at (the true norm at its
+            # point), and by how much its model fell short of that.
+            "statutory_excess_eur": float(statutory.excess_eur(evaluation)),
+            "statutory_shortfall_eur": float(statutory_shortfall),
+            "statutory_rounds": int(statutory_rounds),
+            "statutory_cuts": int(statutory.n_cuts),
+            "statutory_cut_log": list(statutory.log),
+        })
+    return out
 
 
 # =====================================================================
@@ -2942,9 +3529,13 @@ def build_settlement(tariff, env, rates, delta_t):
     if tariff == "AU":
         return make_au_settlement(rates, delta_t)
     if tariff == "SI":
-        # The full SI walk: a running per-block peak dropped on each ratchet
-        # window, priced against the dogovorjena moc in force -- which is itself
-        # rolled from the peaks this controller realized the month before.
+        # The full SI walk, priced against the dogovorjena moc in force -- which
+        # is itself rolled from the peaks this controller realized the month
+        # before. The excess-power line is the statutory norm the invoice bills
+        # (`rbc.price_interval_statutory`), or under "ratchet" the running
+        # per-block peak dropped on each window, as the study billed it before.
+        if excess_power_model(tariff) == "statutory":
+            return rbc.price_interval_statutory
         return rbc.price_interval
     raise ValueError(f"unknown tariff {tariff!r}; expected 'AU' or 'SI'")
 
@@ -3111,6 +3702,24 @@ def rule_roster(tariff):
     return out
 
 
+def statutory_metrics(stats, name) -> dict:
+    """A receding run's statutory-window counts as checkpoint metrics.
+
+    `{}` for a run that priced no excess charge. Never prefixed `cost_`: that
+    prefix is the controller namespace (`controller_columns`).
+    """
+    if not stats:
+        return {}
+    if stats["unclosed"]:
+        print(f"  !!! [{name}] {stats['unclosed']} statutory window(s) stopped "
+              f"short of {STATUTORY_WINDOW_TOL_EUR} EUR (worst "
+              f"{stats['max_shortfall_eur']:.4f} EUR); their plans were executed")
+    return {f"statutory_windows_{name}": int(stats["windows"]),
+            f"statutory_rounds_{name}": int(stats["rounds"]),
+            f"statutory_unclosed_{name}": int(stats["unclosed"]),
+            f"statutory_max_shortfall_{name}": float(stats["max_shortfall_eur"])}
+
+
 def settle_trajectory(env, net_kwh, settle, sig, soc_start=None, soc_end=None):
     """Price an executed trajectory through the arm's evaluator.
 
@@ -3190,6 +3799,96 @@ def _settle_trajectory_once(env, net_kwh, settle, sig, soc_start=None,
 SOC_TOL    = 1e-6   # kWh
 ACTION_TOL = 1e-6   # kW
 
+
+# The executor of `MPC_EXECUTOR`, one interval at a time. Ported from
+# Energy_Community's `Horizon_Comparison._tracking_band` / `execute_interval`,
+# less the curtailment this study's MPC does not do (`allow_spill=False`).
+def _tracking_band(tracking, planned_net):
+    """[low, high] the executed net exchange is held inside, kWh per interval."""
+    if tracking == "battery":
+        return -np.inf, np.inf
+    if tracking == "grid":
+        return planned_net, planned_net
+    if tracking == "import":
+        return -np.inf, max(planned_net, 0.0)
+    if tracking == "limit":
+        return min(planned_net, 0.0), max(planned_net, 0.0)
+    raise ValueError(f"tracking must be one of {MPC_TRACKING_MODES}, got {tracking!r}")
+
+
+def execute_interval(env, *, tracking, plan_ch, plan_dis, plan_con, plan_gen,
+                     con, gen, soc, reserve_kwh=0.0, guard_kwh=None):
+    """Execute one planned interval against the metered house.
+
+    Everything in kWh per interval on the AC side; `soc` is the stored energy
+    in the ENVIRONMENT's frame (0 at the physical floor). `plan_*` is the plan's
+    first interval -- including the forecast load and PV it balanced -- and
+    `con`/`gen` what the meter reads. Returns `(charge, discharge, net, guard)`,
+    `guard` being the extra discharge (or charging withheld) the reserve
+    released.
+
+    The battery is moved, as a signed power, to put the executed exchange back
+    inside the band (`_tracking_band`) around the planned one, clipped to the
+    envelope the MILP solves under (`Basic_Functions.max_charge_now` /
+    `max_discharge_now`) -- so charge and discharge stay exclusive and an
+    executed interval is always one the planner could have chosen. Tracking may
+    not discharge into the bottom `reserve_kwh`; whatever the clip leaves over
+    goes to the grid.
+
+    The FUSE (`env.max_import_kwh`) is held on the meter whatever the band:
+    charging stops where it would push the metered draw past the connection
+    (`Basic_Functions.fuse_charge_headroom`). A plan respects it on the forecast
+    it was made on; only the executor sees the house it actually meets.
+
+    The reserve is released by the GUARD alone: where the executed draw would
+    still sit above `guard_kwh` (the contract in force for the interval's block,
+    as energy), charging is cut and the whole pack, reserve included, discharges
+    down to that line. None disables it.
+    """
+    ch, dis = float(plan_ch), float(plan_dis)
+    base = con - gen                                  # the house alone
+    net = con + ch - gen - dis
+    planned = float(plan_con) + float(plan_ch) - float(plan_gen) - float(plan_dis)
+    low, high = _tracking_band(tracking, planned)
+    headroom = fuse_charge_headroom(con, gen, getattr(env, "max_import_kwh", None))
+    if net > high or net < low:
+        b_min = -max_discharge_now(max(soc - reserve_kwh, 0.0),
+                                   env.discharge_efficiency, env.max_discharge_kwh)
+        b_max = min(max_charge_now(soc, env.charge_efficiency, env.max_charge_kwh,
+                                   env.battery_capacity_kwh), headroom)
+        target = high if net > high else low
+        # The plan's own power lies inside [b_min, b_max] -- it was solved on the
+        # same state with the reserve hidden -- so the clip only ever stops the
+        # move short; it never pushes the battery the other way.
+        b = min(max(target - base, b_min), b_max)
+        ch, dis = max(b, 0.0), max(-b, 0.0)
+        net = con + ch - gen - dis
+    if ch > headroom:
+        ch = headroom
+        net = con + ch - gen - dis
+    guard = 0.0
+    if guard_kwh is not None and net > guard_kwh:
+        b_floor = -max_discharge_now(soc, env.discharge_efficiency, env.max_discharge_kwh)
+        b_now = ch - dis
+        b = max(guard_kwh - base, b_floor)
+        if b < b_now:
+            guard = b_now - b
+            ch, dis = max(b, 0.0), max(-b, 0.0)
+            net = con + ch - gen - dis
+    return ch, dis, net, guard
+
+
+def executor_metrics(stats, name) -> dict:
+    """A receding run's executor counts as checkpoint metrics; `{}` for the plain one.
+
+    Which executor it was is the config's (`mpc_executor_key`), and
+    `collect_results` reads it from there.
+    """
+    if not stats:
+        return {}
+    return {f"{k}_{name}": v for k, v in stats.items()}
+
+
 class ReactiveController:
 
     def __init__(self,
@@ -3202,10 +3901,38 @@ class ReactiveController:
                  freq:                    str   = "30min",
                  steps_per_day:           int   = 48,
                  rate_vectors:            tuple | None = None,
-                 leak_current_interval:   bool  = False):
+                 leak_current_interval:   bool  = False,
+                 excess_power:            str | None = None,
+                 tracking:                str   = "battery"):
         self.sched    = scheduler
+        # What is held when the meter is not the forecast (`MPC_EXECUTOR`). The
+        # reserve is the SCHEDULER's -- it is the battery the planner was built
+        # on -- and this controller is what releases it.
+        _tracking_band(tracking, 0.0)                 # refuse an unknown mode
+        self.tracking = tracking
+        self.reserve  = float(getattr(scheduler, "reserve_kwh", 0.0))
+        self.executor = tracking != "battery" or self.reserve > 0.0
+        # The physical floor; above `soc_min` by the reserve under one.
+        self.soc_floor = float(getattr(scheduler, "soc_floor", scheduler.soc_min))
         self.fc       = forecaster
         self.data     = real_data
+        # The SI excess-power charge inside every window (`excess_power_model`):
+        # "statutory" prices it, None and "ratchet" leave the windows on energy
+        # and wear -- the receding controller never carried the ratchet, so
+        # "ratchet" reproduces the study as it ran before the statutory move.
+        if excess_power not in (None, *EXCESS_POWER_MODELS):
+            raise ValueError(f"excess_power must be None or one of "
+                             f"{EXCESS_POWER_MODELS}, got {excess_power!r}")
+        self.statutory = excess_power == "statutory"
+        if self.statutory and not hasattr(scheduler, "env"):
+            raise ValueError("the statutory excess charge needs a scheduler that "
+                             "carries the arm's environment (UpstreamMILPScheduler)")
+        if self.reserve > 0.0 and not self.statutory:
+            # The guard is what spends the reserve, and the guard's line is the
+            # contract the statutory machinery keeps in force. Without it the
+            # reserve is pack nobody ever uses.
+            raise ValueError("a reserve is released only to hold the draw at the "
+                             "contract; it needs excess_power='statutory'")
         self.soc0     = soc_init
         # The CONTROL horizon: how far ahead each solve looks. The day-ahead
         # arm uses 48, the gate-closure arm 22 (11 h). It is deliberately NOT
@@ -3231,10 +3958,10 @@ class ReactiveController:
 
         # The default soc_init=10.0 is above soc_max for the study battery
         # (0.80 * 10.0 = 8.0); catch it here rather than in an infeasible LP.
-        if not (scheduler.soc_min <= soc_init <= scheduler.soc_max):
+        if not (self.soc_floor <= soc_init <= scheduler.soc_max):
             raise ValueError(
                 f"soc_init={soc_init} outside the battery's usable window "
-                f"[{scheduler.soc_min}, {scheduler.soc_max}]"
+                f"[{self.soc_floor}, {scheduler.soc_max}]"
             )
 
         # Supplied by the study so the controller is tariff-agnostic; the AU
@@ -3337,8 +4064,18 @@ class ReactiveController:
         plan     = None
         plan_pos = 0
         history  = []
+        if self.statutory:
+            self._open_statutory(T_total)
+            stat0 = dict(self.sched.statutory)
+        # What the executor did beyond holding the battery power, kWh: energy
+        # moved to hold the plan's exchange, exchange the envelope could not
+        # hold, and reserve the guard released.
+        self._ex = dict(tracked_kwh=0.0, untracked_kwh=0.0, guard_kwh=0.0,
+                        guard_intervals=0)
 
         for k in range(T_total):
+            if self.statutory:
+                self._contract_through(k)
             # Clamped by the DATA, not by the scored window. Clamping by
             # `T_total - k` shrinks the horizon over the final day, which
             # penalises a long horizon more than a short one and so contaminates
@@ -3357,8 +4094,12 @@ class ReactiveController:
             # Corrected, it is 0 by construction: the plan's action is applied
             # verbatim and the SoC recursion carries no noise. It is kept as a
             # live invariant, not as a trigger - see `need_reopt` below.
+            # Under any other executor the executed SoC leaves the plan on
+            # purpose -- that is what holding the grid exchange means -- and
+            # under a reserve the plan's SoC is in the planner's frame.
             soc_dev = 0.0
-            if plan is not None and 0 < plan_pos <= len(plan["soc_plan"]):
+            if (not self.executor and plan is not None
+                    and 0 < plan_pos <= len(plan["soc_plan"])):
                 soc_dev = abs(soc_cur - plan["soc_plan"][plan_pos - 1])
                 # Recorded AND enforced: the executed SoC follows the plan to
                 # solver precision, so any real drift is a bug in the loop.
@@ -3383,8 +4124,20 @@ class ReactiveController:
             if need_reopt:
                 fn = self._forecast_slice if use_forecast else self._real_slice
                 buy_h, sell_h, p_gen_h, p_con_h = fn(k, horizon)
-                plan     = self.sched.solve(soc_cur, buy_h, sell_h, p_gen_h, p_con_h)
+                plan     = self.sched.solve(
+                    soc_cur, buy_h, sell_h, p_gen_h, p_con_h,
+                    excess=self._excess_window(k, horizon) if self.statutory else None)
                 plan_pos = 0
+                if self.executor:
+                    if plan["status"] != "Optimal":
+                        # The idle plan a failed solve hands back plans an
+                        # exchange of zero; holding THAT would empty the pack
+                        # into the house. Energy_Community discarded a run that
+                        # executed failed windows; here one stops the run.
+                        raise RuntimeError(
+                            f"step {k}: window ended {plan['status']!r} under the "
+                            f"{self.tracking!r} executor (SoC {soc_cur:.4f} kWh)")
+                    plan_con_h, plan_gen_h = p_con_h, p_gen_h
 
             act_ch  = plan["x_ch"][plan_pos]
             act_dis = plan["x_dis"][plan_pos]
@@ -3419,6 +4172,40 @@ class ReactiveController:
             real_gen       = self._gen[k]
             real_con       = self._con[k]
 
+            if self.executor:
+                # The plan's first interval, held against the metered house
+                # (`execute_interval`), in kWh and the environment's frame. The
+                # guard's line is the contract in force for this interval's
+                # block, the one `_meter` books exceedances against.
+                dt = self.sched.delta_t
+                b_plan = (act_ch - act_dis) * dt
+                ch, dis, _, released = execute_interval(
+                    self.sched.env, tracking=self.tracking,
+                    plan_ch=act_ch * dt, plan_dis=act_dis * dt,
+                    plan_con=plan_con_h[plan_pos] * dt,
+                    plan_gen=plan_gen_h[plan_pos] * dt,
+                    con=real_con * dt, gen=real_gen * dt,
+                    soc=soc_cur - self.soc_floor, reserve_kwh=self.reserve,
+                    guard_kwh=(float(self._st_agreed[k]) * dt
+                               if self.reserve > 0.0 else None))
+                planned = (plan_con_h[plan_pos] + act_ch
+                           - plan_gen_h[plan_pos] - act_dis) * dt
+                low, high = _tracking_band(self.tracking, planned)
+                net_kwh = real_con * dt + ch - real_gen * dt - dis
+                ex = self._ex
+                ex["tracked_kwh"] += abs((ch - dis) - b_plan) - released
+                if released == 0.0:
+                    ex["untracked_kwh"] += max(net_kwh - high, low - net_kwh, 0.0)
+                ex["guard_kwh"] += released
+                ex["guard_intervals"] += int(released > 0.0)
+                act_ch, act_dis = ch / dt, dis / dt
+                if not (-ACTION_TOL <= act_ch  <= max_ch  + ACTION_TOL and
+                        -ACTION_TOL <= act_dis <= max_dis + ACTION_TOL):
+                    raise AssertionError(
+                        f"step {k}: executed action outside charge "
+                        f"[0, {max_ch:.6f}] / discharge [0, {max_dis:.6f}] kW "
+                        f"(charge {act_ch:.9f}, discharge {act_dis:.9f})")
+
             p_net_real = real_con + act_ch - real_gen - act_dis
             if p_net_real > 0:
                 act_buy  = p_net_real
@@ -3434,14 +4221,16 @@ class ReactiveController:
             # saturation to absorb. Matches Environment.py:461-495 upstream.
             delta_soc = (act_ch * self.sched.eff - act_dis / self.sched.eff) * self.sched.delta_t
             soc_next  = soc_cur + delta_soc
-            if not (self.sched.soc_min - SOC_TOL <= soc_next <= self.sched.soc_max + SOC_TOL):
+            if not (self.soc_floor - SOC_TOL <= soc_next <= self.sched.soc_max + SOC_TOL):
                 raise AssertionError(
                     f"step {k}: SoC {soc_next:.9f} kWh outside "
-                    f"[{self.sched.soc_min}, {self.sched.soc_max}] "
+                    f"[{self.soc_floor}, {self.sched.soc_max}] "
                     f"(was {soc_cur:.9f}, charge {act_ch:.6f}, discharge {act_dis:.6f})"
                 )
             # Only the floating-point overshoot is trimmed.
-            soc_cur = float(min(max(soc_next, self.sched.soc_min), self.sched.soc_max))
+            soc_cur = float(min(max(soc_next, self.soc_floor), self.sched.soc_max))
+            if self.statutory:
+                self._meter(k, p_net_real)
 
 
             step_cost = (act_buy * real_buy_rate - act_sell * real_sell_rate) * self.sched.delta_t
@@ -3468,7 +4257,119 @@ class ReactiveController:
             })
             plan_pos += 1
 
-        return pd.DataFrame(history).set_index("Timestamp")
+        out = pd.DataFrame(history).set_index("Timestamp")
+        if self.executor:
+            # Under any executor but the plain one the year need not close where
+            # the plan would have: the settlement values the difference
+            # (`Cost_EUR_Closed`), and the closing SoC is reported, not asserted.
+            out.attrs["executor"] = {**self._ex, "final_soc_kwh": soc_cur}
+        if self.statutory:
+            # The contract adopted along the way was this run's working state,
+            # not a result: `settle_trajectory` converges the bill's own contract
+            # on the executed trace. The environment is left as the run found it.
+            self.sched.env.clear_achieved_power()
+            st = self.sched.statutory
+            out.attrs["statutory"] = {
+                "windows": st["windows"] - stat0["windows"],
+                "rounds": st["rounds"] - stat0["rounds"],
+                "unclosed": st["unclosed"] - stat0["unclosed"],
+                # The worst over the scheduler's life; a scheduler serves the two
+                # arms of one household, so this is at worst the household's.
+                "max_shortfall_eur": st["max_shortfall_eur"],
+            }
+        return out
+
+    # --- The SI excess-power charge, priced inside every window -------------
+    #
+    # What a receding controller standing at interval k knows about the excess
+    # charge, and nothing more:
+    #
+    #   the contract   in force this month, FILED by its deadline: on the 20th
+    #                  of M-1 month M's contract is set by the operator's
+    #                  statistic over the window that closed the day before
+    #                  (`SI_CONTRACT`, `_contract_through`) -- executed draw, and
+    #                  the walked-in meter before the run. Only the newly filed
+    #                  month's entry is adopted: the leading month keeps the
+    #                  contract its history filed, and a month already billed
+    #                  keeps its line. A window's tail past the deadline is priced
+    #                  against the contract just filed; before it, against the
+    #                  environment's entry, which is the no-battery line a
+    #                  controller expects before it has filed.
+    #   the meter      the squared exceedances the month has already metered,
+    #                  from what was EXECUTED (`_meter`), never planned. The
+    #                  window prices sqrt(c0^2 + its own), so once a month has
+    #                  been crossed a lot a small further crossing is nearly
+    #                  free and a large one is not.
+    #
+    # The rest of the month beyond the window is assumed to add nothing -- the
+    # same myopia every receding controller has about what it cannot see.
+    #
+    # One difference from the bill to keep in view: the leading month's contract
+    # under `settle_trajectory`'s convergence is re-read off the executed trace
+    # (the "cyclic" bootstrap reads the year's last month), where this run
+    # priced against the no-battery bootstrap -- a controller in that month
+    # cannot know its own December. One month of twelve, and only its line.
+    def _open_statutory(self, T_total):
+        env = self.sched.env
+        env.clear_achieved_power()
+        self._st_blocks = np.asarray(env.tariff_blocks, dtype=np.int64)
+        self._st_months = np.asarray(env.month_ids, dtype=np.int64)
+        if len(self._st_blocks) < len(self.data):
+            raise ValueError("the environment does not cover the controller's data")
+        self._st_hours = float(self.sched.delta_t)
+        self._st_schedule = env.agreed_power_schedule
+        # The latest month whose contract has been FILED at each row
+        # (`Environment.filing_window_ids`): the 20th of M-1 files month M.
+        self._st_filing = np.asarray(env.filing_window_ids, dtype=np.int64)
+        self._st_month = int(self._st_filing[0])
+        self._st_net = np.zeros(T_total, dtype=float)
+        self._st_metered = {}
+        self._st_rate = lambda b, m: rbc._statutory_rate(env, b, m)
+        self._st_refresh()
+
+    def _st_refresh(self):
+        """The contract in force per row, under the schedule as it now stands."""
+        env = self.sched.env
+        agreed = np.zeros(len(self._st_blocks), dtype=float)
+        for m in np.unique(self._st_months):
+            line = env.agreed_power_kw(int(m))
+            rows = self._st_months == m
+            for b in np.unique(self._st_blocks[rows]):
+                agreed[rows & (self._st_blocks == b)] = float(line.get(int(b), 0.0))
+        self._st_agreed = agreed
+
+    def _contract_through(self, k):
+        """File the contract whose deadline `k` reaches, off the executed meter.
+
+        On the filing deadline of month m (`SI_CONTRACT`) month m+1's contract is
+        filed from the window that closed the day before -- executed draw, and
+        the walked-in history before the run. Without a deadline it is the
+        month `k` opens, re-agreed off the months already executed.
+        """
+        month = int(self._st_filing[k])
+        if month == self._st_month:
+            return
+        env = self.sched.env
+        env.set_achieved_power_kw(np.maximum(self._st_net[:k], 0.0), start_idx=0)
+        rolled = env.agreed_power_schedule
+        if month in rolled:
+            self._st_schedule[month] = dict(rolled[month])
+        env.apply_agreed_power_schedule(self._st_schedule)
+        self._st_month = month
+        self._st_refresh()
+
+    def _excess_window(self, k, h):
+        return {"blocks": self._st_blocks[k:k + h], "months": self._st_months[k:k + h],
+                "agreed_t": self._st_agreed[k:k + h], "rate_fn": self._st_rate,
+                "carried": self._st_metered}
+
+    def _meter(self, k, net_kw):
+        """Book interval k's executed draw onto the month's statutory norm."""
+        self._st_net[k] = max(float(net_kw), 0.0)
+        over = float(net_kw) - float(self._st_agreed[k])
+        if over > 0.0:
+            key = (int(self._st_blocks[k]), int(self._st_months[k]))
+            self._st_metered[key] = self._st_metered.get(key, 0.0) + over * over
 
 
 # =====================================================================
@@ -4158,7 +5059,9 @@ def run_pipeline_for_file(file_path: str,
                            holiday_country: str = "AU",
                            holiday_subdiv: str | None = "NSW",
                            high_season_months: tuple = (5, 6, 7, 8),
-                           local_timezone: str = "naive") -> dict:
+                           local_timezone: str = "naive",
+                           mpc_tracking: str | None = None,
+                           mpc_reserve_kwh: float | None = None) -> dict:
     """
     Runs the full pipeline (train Prophet, run reactive + oracle,
     KPI, plots) for ONE dataset, and saves all results
@@ -4170,6 +5073,11 @@ def run_pipeline_for_file(file_path: str,
     # solve looks: 48 for the day-ahead arm, 22 (11 h) for the gate-closure arm.
     # Both arms read the SAME cached 24 h forecast.
     control_horizon = H if control_horizon is None else int(control_horizon)
+    # The forecast MPC's executor: the tariff's (`MPC_EXECUTOR`) unless an
+    # experiment names another.
+    _tracking, _reserve = mpc_executor(tariff)
+    mpc_tracking = _tracking if mpc_tracking is None else mpc_tracking
+    mpc_reserve_kwh = float(_reserve if mpc_reserve_kwh is None else mpc_reserve_kwh)
     if not 1 <= control_horizon <= H:
         raise ValueError(
             f"control_horizon={control_horizon} must be within 1..{H} steps"
@@ -4284,6 +5192,14 @@ def run_pipeline_for_file(file_path: str,
         # The clock every block, local day and clock rule is read on. It changes
         # which interval is peak, so it changes the answer and must invalidate.
         local_timezone=local_timezone,
+        # How the SI excess-power charge is priced, by the optimizers and the
+        # settlement alike. Absent on AU and under "ratchet", so every checkpoint
+        # written before the statutory move keeps its key (`excess_power_key`).
+        **excess_power_key(tariff),
+        # What the forecast MPC holds when the meter is not the forecast, and
+        # the reserve it keeps from the planner. Absent for the plain executor,
+        # so every checkpoint written before 2026-10-21 keeps its key.
+        **mpc_executor_key(mpc_tracking, mpc_reserve_kwh),
         # The clock rule's windows. They are a study choice, they were re-tuned
         # once already, and a checkpoint produced under different ones is a
         # different controller wearing the same column name.
@@ -4340,6 +5256,7 @@ def run_pipeline_for_file(file_path: str,
             df_ctrl_kwh, battery_cap=battery_cap, soc_min_pct=soc_min_pct,
             soc_max_pct=soc_max_pct, p_max=p_max, eff=eff, delta_t=delta_t, H=H,
             cycle_cost_eur_per_efc=cycle_cost_eur_per_efc,
+            tariff=tariff, household=file_path,
         ),
         p_max, eff, delta_t,
     )
@@ -4432,52 +5349,62 @@ def run_pipeline_for_file(file_path: str,
     # Going through `parity=False` would also switch curtailment and the
     # metering bounds on, which is three model changes wearing one flag, so the
     # inverter branch is built explicitly instead.
-    if milp_exclusivity == "auto":
-        scheduler = UpstreamMILPScheduler(
-            env,
-            battery_cap=battery_cap, soc_min_pct=soc_min_pct,
-            soc_max_pct=soc_max_pct, p_max=p_max, eff=eff, delta_t=delta_t,
-            parity=False, exclusivity="auto",
-            allow_spill=False,        # as parity: no curtailment
-            metering_bounds=True,     # the LP branch needs them to stay bounded
-        )
-        # parity=False skips the envelope check, and that check is the only
-        # thing standing between this and the MILP quietly driving a battery
-        # 5 % larger than the rules do.
-        _step = p_max * delta_t
-        _want = (_step * eff, _step / eff)
-        _got = (float(env.max_charge_kwh), float(env.max_discharge_kwh))
-        if max(abs(a - b) for a, b in zip(_want, _got)) > 1e-9:
+    def _make_scheduler(reserve_kwh=0.0):
+        # One per executor: the forecast arm plans under the reserve
+        # (`MPC_EXECUTOR`), the oracle on the whole pack. The reserve is a
+        # property of the battery the model is BUILT on, so it cannot be
+        # switched on a kept instance.
+        if milp_exclusivity == "auto":
+            scheduler = UpstreamMILPScheduler(
+                env, reserve_kwh=reserve_kwh,
+                battery_cap=battery_cap, soc_min_pct=soc_min_pct,
+                soc_max_pct=soc_max_pct, p_max=p_max, eff=eff, delta_t=delta_t,
+                parity=False, exclusivity="auto",
+                allow_spill=False,        # as parity: no curtailment
+                metering_bounds=True,     # the LP branch needs them to stay bounded
+            )
+            # parity=False skips the envelope check, and that check is the only
+            # thing standing between this and the MILP quietly driving a battery
+            # 5 % larger than the rules do.
+            _step = p_max * delta_t
+            _want = (_step * eff, _step / eff)
+            _got = (float(env.max_charge_kwh), float(env.max_discharge_kwh))
+            if max(abs(a - b) for a, b in zip(_want, _got)) > 1e-9:
+                raise ValueError(
+                    f"milp_exclusivity='auto' needs the same AC-symmetric "
+                    f"envelope parity does: expected {_want[0]:.6f}/{_want[1]:.6f}, "
+                    f"got {_got[0]:.6f}/{_got[1]:.6f}")
+        elif milp_exclusivity == "binary":
+            scheduler = UpstreamMILPScheduler(
+                env,
+                battery_cap=battery_cap,
+                soc_min_pct=soc_min_pct,
+                soc_max_pct=soc_max_pct,
+                p_max=p_max,
+                eff=eff,
+                delta_t=delta_t,
+                parity=milp_parity, reserve_kwh=reserve_kwh,
+            )
+        else:
+            # "inverter" -- always the pure LP -- used to be selectable here and is
+            # deliberately not any more. It is unsafe the moment a price series goes
+            # negative (see UpstreamMILPScheduler.solve), it was measurably no faster
+            # than "auto" on any series that does not, and the only thing it could do
+            # for a caller was silently produce a dispatch that destroys energy.
+            # "auto" already spends the LP everywhere it is provably equivalent.
             raise ValueError(
-                f"milp_exclusivity='auto' needs the same AC-symmetric "
-                f"envelope parity does: expected {_want[0]:.6f}/{_want[1]:.6f}, "
-                f"got {_got[0]:.6f}/{_got[1]:.6f}")
-    elif milp_exclusivity == "binary":
-        scheduler = UpstreamMILPScheduler(
-            env,
-            battery_cap=battery_cap,
-            soc_min_pct=soc_min_pct,
-            soc_max_pct=soc_max_pct,
-            p_max=p_max,
-            eff=eff,
-            delta_t=delta_t,
-            parity=milp_parity,
-        )
-    else:
-        # "inverter" -- always the pure LP -- used to be selectable here and is
-        # deliberately not any more. It is unsafe the moment a price series goes
-        # negative (see UpstreamMILPScheduler.solve), it was measurably no faster
-        # than "auto" on any series that does not, and the only thing it could do
-        # for a caller was silently produce a dispatch that destroys energy.
-        # "auto" already spends the LP everywhere it is provably equivalent.
-        raise ValueError(
-            f"milp_exclusivity must be 'auto' (LP where provably equivalent, "
-            f"binaries where they bind) or 'binary' (always binaries, the "
-            f"parity model); got {milp_exclusivity!r}")
+                f"milp_exclusivity must be 'auto' (LP where provably equivalent, "
+                f"binaries where they bind) or 'binary' (always binaries, the "
+                f"parity model); got {milp_exclusivity!r}")
+        return scheduler
+
+    scheduler = _make_scheduler()
+    fc_scheduler = (_make_scheduler(mpc_reserve_kwh) if mpc_reserve_kwh
+                    else scheduler)
 
     print("\n--- Reactive mode (consumption + generation via Prophet) ---")
     ctrl_fc = ReactiveController(
-        scheduler=scheduler,
+        scheduler=fc_scheduler,
         forecaster=fc_table,
         real_data=df_ctrl,
         soc_init=soc_init,
@@ -4487,6 +5414,8 @@ def run_pipeline_for_file(file_path: str,
         freq="30min",
         rate_vectors=rates,
         leak_current_interval=leak_current_interval,
+        excess_power=excess_power_model(tariff),
+        tracking=mpc_tracking,
     )
     df_fc = ctrl_fc.run(num_days=n_sim, use_forecast=True)
     print(f"Simulated steps: {len(df_fc)} | Reopt.: {df_fc['Reoptimized'].sum()}")
@@ -4526,6 +5455,7 @@ def run_pipeline_for_file(file_path: str,
             reoptimize_every=1,
             freq="30min",
             rate_vectors=rates,
+            excess_power=excess_power_model(tariff),
         )
         _df_pk = ctrl_pk.run(num_days=n_sim, use_forecast=False)
         # The deployable alternative, on realized data deliberately: an inverter
@@ -4561,10 +5491,33 @@ def run_pipeline_for_file(file_path: str,
         _df_full.attrs.update({k: _full[k] for k in
                                ("objective", "wear_eur", "n_binary_intervals",
                                 "runtime_s")})
+        # How the statutory excess charge was solved, in the metrics because
+        # those are what the oracle cache keeps (the frames go through CSV and
+        # lose their attrs): the oracle arm's windows, and the whole-period cut
+        # loop. A loop that stopped short is a number the reader must see.
+        _m.update(statutory_metrics(_df_pk.attrs.get("statutory"), "oracle"))
+        if "statutory_rounds" in _full:
+            _m.update({
+                "statutory_rounds_milp_full": _full["statutory_rounds"],
+                "statutory_shortfall_milp_full": _full["statutory_shortfall_eur"],
+                "statutory_excess_milp_full": _full["statutory_excess_eur"],
+            })
+        _m["stopped_on_limit_milp_full"] = bool(_full.get("stopped_on_limit", False))
+        if milp_contract(tariff) == "free" and "agreed_schedule" in _full:
+            # The contract the solve filed, which is what it is billed on. In the
+            # metrics because those are what the oracle cache keeps; taken back
+            # out below, before the metrics become a checkpoint.
+            _m["milp_full_agreed_schedule"] = {
+                str(m): {str(b): float(kw) for b, kw in v.items()}
+                for m, v in _full["agreed_schedule"].items()}
         return _df_pk, _m, _rows, _df_full
 
     df_pk, rule_metrics, rule_rows, df_full = load_or_build_oracle(
         dataset_name, cfg, _solve_forecast_blind, cache_dir=oracle_cache_dir)
+    rule_metrics = dict(rule_metrics)
+    milp_schedule = rule_metrics.pop("milp_full_agreed_schedule", None)
+    if milp_contract(tariff) == "free" and milp_schedule is None:
+        raise RuntimeError("the whole-period solve filed no contract to be billed on")
 
     # Every controller re-priced through the arm's ONE evaluator, the two MILP
     # arms included: ReactiveController accumulates a running cost as it goes,
@@ -4574,8 +5527,19 @@ def run_pipeline_for_file(file_path: str,
     for _name, _frame in (("oracle", df_pk), ("prophet", df_fc),
                           ("milp_full", df_full)):
         _net = (_frame["Buy_kW"] - _frame["Sell_kW"]).to_numpy() * delta_t
-        _s = settle_trajectory(env, _net, settle, sig, soc_start=soc_init,
-                               soc_end=float(_frame["SoC_kWh"].iloc[-1]))
+        if _name == "milp_full" and milp_schedule is not None:
+            # Billed on the contract it FILED (`SI_CONTRACT`), not one re-derived
+            # from its peaks: choosing that contract is half of what the
+            # theoretical optimum optimises.
+            env.apply_agreed_power_schedule(
+                {int(m): {int(b): kw for b, kw in v.items()}
+                 for m, v in milp_schedule.items()})
+            _s = _settle_trajectory_once(env, _net, settle, sig, soc_start=soc_init,
+                                         soc_end=float(_frame["SoC_kWh"].iloc[-1]))
+            env.clear_achieved_power()
+        else:
+            _s = settle_trajectory(env, _net, settle, sig, soc_start=soc_init,
+                                   soc_end=float(_frame["SoC_kWh"].iloc[-1]))
         # OVERWRITE what KPITracker put here. Its cost_prophet / cost_oracle are
         # the controller's own running total: buy x rate - sell x rate, with no
         # standing charge and -- on SI -- no capacity charge at all. Every rule's
@@ -4601,6 +5565,8 @@ def run_pipeline_for_file(file_path: str,
         kpi_raw[f"efc_{_name}"] = _stored / (2.0 * nominal_kwh)
 
     kpi_raw.update(rule_metrics)
+    kpi_raw.update(statutory_metrics(df_fc.attrs.get("statutory"), "prophet"))
+    kpi_raw.update(executor_metrics(df_fc.attrs.get("executor"), "prophet"))
     for _r in rule_rows:
         print(f"  {_r['controller']:30s} {_r['Cost_EUR_Closed']:9.2f} EUR"
               f"   EFC {_r['Equivalent_Full_Cycles']:6.1f}"
@@ -4612,7 +5578,8 @@ def run_pipeline_for_file(file_path: str,
         kpi_raw, tariff, cycle_cost_eur_per_efc,
         reporting_cycle_cost_eur_per_efc=cycle_cost_reporting_eur_per_efc,
         bound_is_exact=(tariff != "SI"
-                        or _agreed_power_is_endogenous_in_lp(env, len(sig.import_rate)))))
+                        or _agreed_power_is_endogenous_in_lp(env, len(sig.import_rate),
+                                                             tariff))))
     # Forecast quality alongside the cost, because a forecasting-in-the-loop
     # result is not interpretable without it.
     fc_err = forecast_error_metrics(fc_table.table, df_sim, H, history=df_train)
@@ -5337,6 +6304,10 @@ def collect_results(output_root=None, arms=None) -> pd.DataFrame:
                       "milp_parity", "cycle_cost_eur_per_efc", "n_sim",
                       "battery_cap"):
             row[field] = cfg.get(field)
+        # The forecast MPC's executor; a checkpoint without the keys ran the
+        # plain one (`mpc_executor_key`).
+        row["mpc_tracking"] = cfg.get("mpc_tracking", "battery")
+        row["mpc_reserve_kwh"] = float(cfg.get("mpc_reserve_kwh", 0.0))
         try:
             uid = int(str(dataset).rsplit(" ", 1)[-1])
             row["cluster"] = int(units.loc[uid, "cluster"])
@@ -5653,7 +6624,13 @@ def merge_learned_controllers(df: pd.DataFrame, controllers=None, arms=None,
     # arm cannot silently be billed at a different rate than its twin.
     rate = pd.Series(shadow_wear_rate(out), index=out.index)
 
-    found = {}
+    # A result the RL driver would re-train is not joined: one trained and
+    # scored under the ratchet billed beside statutory arms would be two
+    # excess models in one frame. Imported here, not at the top: the driver
+    # imports this module.
+    import run_rl_benchmark as _rb
+
+    found, stale = {}, {}
     for method, variant in controllers:
         name = f"{method}_{variant}"
         cost = pd.Series(np.nan, index=out.index)
@@ -5670,6 +6647,9 @@ def merge_learned_controllers(df: pd.DataFrame, controllers=None, arms=None,
                 continue
             with open(path, encoding="utf-8") as fh:
                 r = _json.load(fh)
+            if not _rb.result_is_current(r):
+                stale[name] = stale.get(name, 0) + 1
+                continue
             # `Cost_EUR_Closed`, the same column every rule is compared on.
             cost[i] = r["cost_eur_closed"]
             efc[i] = r["efc"]
@@ -5691,7 +6671,9 @@ def merge_learned_controllers(df: pd.DataFrame, controllers=None, arms=None,
     if verbose:
         for name, n in found.items():
             print(f"  learned: {name:18s} joined onto {n} row(s)"
-                  + ("" if n else "  -- no screen results found"))
+                  + ("" if n else "  -- no screen results found")
+                  + (f"  ({stale[name]} stale result(s) left out)"
+                     if stale.get(name) else ""))
     return out
 
 

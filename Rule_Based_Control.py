@@ -49,13 +49,14 @@ simple" and "the rule cannot see the future".
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 
-from Basic_Functions import max_charge_now, max_discharge_now
+from Basic_Functions import fuse_charge_headroom, max_charge_now, max_discharge_now
 from Pricing_Functions import calculate_interval_price
 from Environment import converge_agreed_power
 from MILP_Household import (
@@ -64,8 +65,10 @@ from MILP_Household import (
     floor_export_rates,
     interval_rate_vectors,
     month_calendar,
+    statutory_excess_rate,
     steps_by_day,
 )
+from si_obracun import Pravila   # after MILP_Household, which puts it on the path
 
 # --- Study configuration ---------------------------------------------------
 # The pack sizes a capacity sweep walks. 2.5 kWh is included deliberately: at a
@@ -173,6 +176,116 @@ def price_interval(env, idx, net_kwh, peak_state):
         float(res["constant_price_aud"]),
         dict(res["new_peak_kw"]),
     )
+
+
+# --- The excess-power charge as the invoice bills it -------------------------
+# `price_interval` bills crossing the agreed power the way `si_konica`'s ratchet
+# does: max(0, running peak - A) per block and month, without DDV. The invoice
+# (`si_obracun.MesecniObracun`) bills
+#
+#     rate_b x faktor_presezne_moci x sqrt(sum over the month of e_t^2),  + DDV
+#
+# which is never smaller -- the norm dominates its largest term -- and grows
+# with the NUMBER of exceedances: 86 equal ones cost sqrt(86) ~ 9.3 times what
+# the ratchet charges for them. Under a contract re-agreed from the top five
+# draws of the month before, exceedances are routine by construction, so the
+# gap is not rounding. Energy_Community measured it and moved its optimizers
+# onto the statutory norm (`MILP_Household.StatutoryExcess`); this is the
+# evaluator half of the same move, so what a controller is SCORED on is what
+# the optimizers now minimise and what the household is invoiced.
+#
+# The norm is not a sum over intervals, but its increments are, exactly:
+#
+#     charge_t = rate x (sqrt(S_{t-1} + e_t^2) - sqrt(S_{t-1})),  S = running sum
+#
+# telescopes to rate x sqrt(S_month). So the walk keeps `price_interval`'s shape
+# and carries S beside the running peak, in the same `peak_state` every walker
+# already threads through (`run_policy`, `settle_trajectory`, the RL walks):
+# under the key `("sumsq", block, month id)`, which no int-keyed reader sees and
+# which `_drop_peak_on_window_start` drops with the peaks. Keyed by month, so a
+# window wider than a month could not carry one month's norm into the next.
+# The ratchet peaks stay in the state: the ratchet-aware RULES read them to
+# decide, and a rule's decision logic is the household's installed device, not
+# the bill.
+_SUMSQ = "sumsq"
+
+
+def _statutory_rate(env, block, month_id):
+    """`statutory_excess_rate` for one (block, month), cached on the env."""
+    cache = env.__dict__.get("_statutory_rates")
+    if cache is None:
+        opts = env.pricing_options or {}
+        pravila = opts.get("pravila") or Pravila.za_leto(
+            int(opts.get("pricing_reference_year", env.pricing_reference_year)))
+        cache = env._statutory_rates = {"pravila": pravila,
+                                        "ddv": bool(opts.get("apply_ddv", True))}
+    key = (int(block), int(month_id))
+    rate = cache.get(key)
+    if rate is None:
+        year, month0 = divmod(int(month_id), 12)
+        rate = cache[key] = statutory_excess_rate(
+            cache["pravila"], year, month0 + 1, block, apply_ddv=cache["ddv"])
+    return rate
+
+
+def price_interval_statutory(env, idx, net_kwh, peak_state):
+    """`price_interval`, with the excess-power charge billed as the invoice bills it.
+
+    Same signature and the same returns, so it drops into `run_policy(settle=)`
+    and every other walker unchanged. `energy` and `fixed` are
+    `price_interval`'s own; `power` is the increment the interval adds to the
+    month's statutory norm (see the note above), and `variable` is energy plus
+    that. Summed over a month the increments are the invoice's
+    `omreznina_presezna_moc` with DDV, which `test_hems_study` holds to
+    `si_invoice.InvoiceBuilder` itself.
+    """
+    variable, energy, _ratchet, fixed, new_state = price_interval(
+        env, idx, net_kwh, peak_state)
+    power = 0.0
+    if net_kwh > 0.0:
+        block = int(env.tariff_blocks[idx])
+        over = (float(net_kwh) / (env.interval_minutes / 60.0)
+                - float(env.agreed_power_at(idx).get(block, 0.0)))
+        if over > 0.0:
+            month = int(env.month_ids[idx])
+            key = (_SUMSQ, block, month)
+            before = float(new_state.get(key, 0.0))
+            after = before + over * over
+            # `new_state` is the fresh dict `price_interval` built, so writing
+            # into it cannot reach a state some other walker still holds.
+            new_state[key] = after
+            power = _statutory_rate(env, block, month) * (math.sqrt(after) - math.sqrt(before))
+    return energy + power, energy, power, fixed, new_state
+
+
+def seed_statutory_state(env, idx):
+    """The month-to-date squared exceedances a walk STARTING at `idx` inherits.
+
+    The statutory twin of `HouseholdEnvironment.compute_seed_peak_kw`, and read
+    off the same profile (`_contract_power_kw`: the no-battery draw, or the one
+    a dispatch registered), against the contract in force. An episode opening
+    mid-month on an empty norm would be told that the month's first exceedance
+    is still ahead of it -- where sqrt is steepest -- when most of the month is
+    already on the meter. `{}` at a month boundary.
+    """
+    month_ids = np.asarray(env.month_ids)
+    idx = int(idx)
+    if idx <= 0 or idx >= len(month_ids):
+        return {}
+    month = int(month_ids[idx])
+    start = int(np.searchsorted(month_ids, month, side="left"))
+    if start >= idx:
+        return {}
+    power = np.asarray(env._contract_power_kw()[start:idx], dtype=float)
+    blocks = np.asarray(env.tariff_blocks[start:idx])
+    agreed = env.agreed_power_kw(month)
+    out = {}
+    for block in np.unique(blocks):
+        over = power[blocks == block] - float(agreed.get(int(block), 0.0))
+        sumsq = float(np.sum(np.square(over[over > 0.0])))
+        if sumsq > 0.0:
+            out[(_SUMSQ, int(block), month)] = sumsq
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -980,12 +1093,16 @@ def _run_policy_once(env, policy, n_steps=None, signals=None, keep_traces=False,
     # and the endogenous contract is re-rolled from it.
     net_trace = np.zeros(n_steps, dtype=float)
 
+    fuse_kwh = getattr(env, "max_import_kwh", None)
     t_start = time.time()
     for idx in range(n_steps):
         peak_state = _drop_peak_on_window_start(peak_state, sig.windows, idx)
 
         lo = -max_discharge_now(soc, sig.eta_dis, env.max_discharge_kwh)
         hi = max_charge_now(soc, sig.eta_ch, env.max_charge_kwh, capacity)
+        # The fuse: charging may not push the draw past the connection.
+        hi = min(hi, fuse_charge_headroom(sig.consumption[idx], sig.generation[idx],
+                                          fuse_kwh))
         if daily_budget is not None:
             day = int(sig.day_idx[idx])
             remaining = max(0.0, daily_budget - day_used[day])

@@ -25,6 +25,7 @@ calculate_interval_price = _PRICING.calculate_interval_price
 compute_prorated_fixed_charge_eur = _PRICING.compute_prorated_fixed_charge_eur
 resolve_block_for_datetime = _PRICING.resolve_block_for_datetime
 resolve_reset_window_id = _PRICING.resolve_reset_window_id
+resolve_filing_window_id = _PRICING.resolve_filing_window_id
 
 PRIVZETO_REFERENCNO_LETO = _PRICING.PRIVZETO_REFERENCNO_LETO
 SUPPORTED_SCHEMES = _PRICING.SUPPORTED_SCHEMES
@@ -38,6 +39,8 @@ TipOdkupa = _PRICING.TipOdkupa
 
 # --- Agreed billing power (dogovorjena obracunska moc), per-block kW -------
 PRIKLJUCNA_MOC_3X16A_KW = _MOC.PRIKLJUCNA_MOC_3X16A_KW
+PRIKLJUCNE_MOCI_KW = _MOC.PRIKLJUCNE_MOCI_KW
+ROK_SPREMEMBE_DAN = _MOC.ROK_SPREMEMBE_DAN
 minimalna_dogovorjena_moc = _MOC.minimalna_dogovorjena_moc
 uskladi_bloke = _MOC.uskladi_bloke
 dogovorjena_moc_iz_konic = _MOC.dogovorjena_moc_iz_konic

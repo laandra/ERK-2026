@@ -395,7 +395,8 @@ def tuning_households(n: int, seed: int = 2026) -> list:
     a, b = rb.TEACH_SPAN
 
     def _has_teacher(i):
-        return all(os.path.exists(os.path.join(rb.MODELS, "teacher", t,
+        return all(os.path.exists(os.path.join(rb.MODELS, "teacher",
+                                               rb.teacher_dir(t),
                                                f"d{a}-{b}", f"{i}.npz"))
                    for t in TARIFFS)
 
@@ -476,7 +477,8 @@ class _IdleNet:
 
 def _baseline_digest(tariff, reward=None):
     base = {"tariff": tariff, "val": rb.VAL_BLOCKS,
-            "soc": rb.SOC_INIT_USABLE, "variant": VARIANT}
+            "soc": rb.SOC_INIT_USABLE, "variant": VARIANT,
+            **hs.excess_power_key(tariff)}
     if reward is not None:
         import rl_reward as rr
         base.update({"reward": reward, "contract": CONTRACT,
@@ -816,7 +818,9 @@ def study_settings(tariff: str, method: str, tag: str = "", households=None,
     name = f"{tariff}_{method}" + (f"_{tag}" if tag else "")
     base = dict(rb.TUNED.get((tariff, method), {}))
     algo = {"rl": rl.ALGO_VERSION, "bc": rl.BC_ALGO_VERSION}
-    extra = {}
+    # A study searched under the ratchet bill is not the study under the
+    # statutory one; empty on AU and under the ratchet (`excess_power_key`).
+    extra = dict(hs.excess_power_key(tariff))
     if reward is not None:
         import rl_reward as rr
         import run_rl_contract as rc

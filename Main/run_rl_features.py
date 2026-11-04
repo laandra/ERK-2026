@@ -732,6 +732,7 @@ def pool_digest(tariff, variant, width, seed, members) -> str:
     return rb._digest(pool_specs(tariff)[variant].config(),
                       rb._method_config(cfg, "bc", clone),
                       {"tariff": tariff, "algo": rl.BC_ALGO_VERSION,
+                       **hs.excess_power_key(tariff),
                        "train_days": rb.TRAIN_BLOCKS, "val_days": rb.VAL_BLOCKS,
                        "teach_span": rb.TEACH_SPAN, "members": list(members)})
 

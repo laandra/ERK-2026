@@ -317,7 +317,7 @@ def train_dqn_pool(members, val_members, fb, cfg: rl.TrainConfig,
         d0 = int(starts[rng.integers(len(starts))])
         idx0 = d0 * spd
         soc = soc_target if rng.random() < 0.5 else float(rng.uniform(0, capacity))
-        peak_state = rl.seed_peak_state(m.env, idx0)
+        peak_state = rl.seed_peak_state(m.env, idx0, m.settle)
         ep_return = 0.0
         pending = deque()
 
@@ -341,7 +341,7 @@ def train_dqn_pool(members, val_members, fb, cfg: rl.TrainConfig,
         for k in range(ep_steps):
             idx = idx0 + k
             peak_state = rl._drop_on_boundary(peak_state, sig.windows, idx)
-            lo, hi = walk.bounds(soc)
+            lo, hi = walk.bounds(soc, idx)
 
             eps = cfg.eps_end + (eps_start - cfg.eps_end) * max(
                 0.0, 1.0 - step / decay_steps)
@@ -698,13 +698,13 @@ def daily_costs(net, fb, member, start_day: int, end_day: int, soc_init: float,
     spd = int(round(24.0 / sig.hours))
     walk = rl._Walk(sig, member.settle, env, 0.0)
     soc = soc_init
-    peak = rl.seed_peak_state(env, start_day * spd)
+    peak = rl.seed_peak_state(env, start_day * spd, member.settle)
     out = np.zeros(end_day - start_day)
     net.eval()
     with torch.no_grad():
         for idx in range(start_day * spd, end_day * spd):
             peak = rl._drop_on_boundary(peak, sig.windows, idx)
-            lo, hi = walk.bounds(soc)
+            lo, hi = walk.bounds(soc, idx)
             obs = np.concatenate([member.static_norm[idx],
                                   fb.dynamic(sig, idx, soc, peak)])
             a = int(net(torch.from_numpy(obs).unsqueeze(0)).argmax(dim=1).item())

@@ -58,7 +58,9 @@ def contexts(tariff, households, n_sim=365, data_dir=None):
                                   n_sim=n_sim, verbose=False)
         env = hs.align_envelope(
             hs.build_study_env(fr["df_ctrl_kwh"], delta_t=0.5, H=48,
-                               cycle_cost_eur_per_efc=WEAR, **BATTERY),
+                               cycle_cost_eur_per_efc=WEAR, tariff=tariff,
+                               household=os.path.join(data_dir, f"{name}.csv"),
+                               **BATTERY),
             BATTERY["p_max"], BATTERY["eff"], 0.5)
         rates = hs.build_rate_vectors(tariff, env, fr["df_ctrl"].index,
                                       fr["df_ctrl"]["SMP"].values, 30)

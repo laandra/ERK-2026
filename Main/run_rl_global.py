@@ -410,7 +410,8 @@ def cache_digest(tariff: str) -> str:
     return _digest(spec.config(), {"tariff": tariff, "teach_span": rb.TEACH_SPAN,
                                    "bc_algo": rl.BC_ALGO_VERSION,
                                    "n_train": rb.N_TRAIN,
-                                   "soc_init": rb.SOC_INIT_USABLE})
+                                   "soc_init": rb.SOC_INIT_USABLE,
+                                   **hs.excess_power_key(tariff)})
 
 
 def cache_path(tariff: str, ident: int) -> str:
@@ -1033,7 +1034,9 @@ def _full_bundle(prep, tariff):
     env = hs.align_envelope(
         hs.build_study_env(df, battery_cap=rb.BATTERY_CAP, soc_min_pct=rb.SOC_MIN,
                            soc_max_pct=rb.SOC_MAX, p_max=rb.P_MAX, eff=rb.EFF,
-                           delta_t=rb.DELTA_T, H=H), rb.P_MAX, rb.EFF, rb.DELTA_T)
+                           delta_t=rb.DELTA_T, H=H, tariff=tariff,
+                           household=rb.household_path(prep["ident"])),
+        rb.P_MAX, rb.EFF, rb.DELTA_T)
     df_kw = df.copy()
     df_kw[["Energy_Generation", "Energy_Consumption"]] /= rb.DELTA_T
     rates = hs.build_rate_vectors(tariff, env, df_kw.index, df_kw["SMP"].values,
@@ -1065,14 +1068,17 @@ def _roll_teacher(prep, full, tariff, ident, d0, a=None):
     on that span ALONE, so a label never reads a day outside it -- neither the
     month it serves nor, under the strong guard, the check days."""
     a = d0 - ROLL_WINDOW if a is None else a
-    cache = os.path.join(ROLL_TEACH, tariff, str(ident), f"d{a}-{d0}.npz")
+    cache = os.path.join(ROLL_TEACH, tariff + hs.excess_power_suffix(tariff),
+                         str(ident), f"d{a}-{d0}.npz")
     if os.path.exists(cache):
         return np.load(cache)["setpoints_kwh"]
     df_w = full["df"].iloc[a * H: d0 * H]
     env = hs.align_envelope(
         hs.build_study_env(df_w, battery_cap=rb.BATTERY_CAP, soc_min_pct=rb.SOC_MIN,
                            soc_max_pct=rb.SOC_MAX, p_max=rb.P_MAX, eff=rb.EFF,
-                           delta_t=rb.DELTA_T, H=H), rb.P_MAX, rb.EFF, rb.DELTA_T)
+                           delta_t=rb.DELTA_T, H=H, tariff=tariff,
+                           household=rb.household_path(ident)),
+        rb.P_MAX, rb.EFF, rb.DELTA_T)
     rates = hs.build_rate_vectors(tariff, env, df_w.index, df_w["SMP"].values,
                                   int(round(rb.DELTA_T * 60)))
     sol = hs.solve_full_period(env, rates, tariff, n_steps=(d0 - a) * H,

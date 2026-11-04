@@ -30,6 +30,7 @@ from Pricing_Functions import (
     KONICNI_BLOKI,
     ST_KONIC,
     resolve_block_for_datetime,
+    resolve_filing_window_id,
     resolve_reset_window_id,
 )
 
@@ -359,6 +360,8 @@ class HouseholdEnvironment(gym.Env):
         agreed_power_from_dispatch=True,
         agreed_power_n_peaks=ST_KONIC,
         agreed_power_n_months_window=1,
+        agreed_power_cutoff_day=None,
+        agreed_power_history_kw=None,
         pricing_validate_pv=True,
         generate_monthly_invoice=False,
         generate_period_invoice=False,
@@ -549,6 +552,20 @@ class HouseholdEnvironment(gym.Env):
         # maximum; (5, 12) is the rolling form of the Akt's own annual window.
         self.agreed_power_n_peaks = max(int(agreed_power_n_peaks), 1)
         self.agreed_power_n_months_window = max(int(agreed_power_n_months_window), 1)
+        # THE FILING DEADLINE (`si_moc.ROK_SPREMEMBE_DAN`). Month M's contract is
+        # filed by this day of M-1, so its peaks are read from the window that
+        # ends there -- the 20th of M-2 to the 19th of M-1 -- rather than from the
+        # calendar month M-1, which has not ended when the deadline passes. None
+        # is the calendar-month rule this environment always ran.
+        self.agreed_power_cutoff_day = (
+            None if agreed_power_cutoff_day is None else int(agreed_power_cutoff_day))
+        self._filing_id_arr = self._precompute_filing_ids()
+        # THE METER HISTORY the household walks in with: its grid draw in kW,
+        # indexed by the timestamps BEFORE this dataset begins. Pooled in front
+        # of the dataset's own draw wherever the contract is read, so a leading
+        # month is contracted off the real meter rather than a bootstrap guess.
+        # It is history: no dispatch here ever moves it.
+        self._history_pool = self._precompute_history_pool(agreed_power_history_kw)
         # Whether a runner should converge the contract onto the peaks its own
         # dispatch achieves. Inert when an explicit `contracted_power_kw` was
         # signed, and read (not obeyed) here: the loop belongs to whoever owns
@@ -652,6 +669,14 @@ class HouseholdEnvironment(gym.Env):
         """Per-row absolute calendar-month id (year*12 + month - 1), local time."""
         return self._month_id_arr
 
+    @property
+    def filing_window_ids(self):
+        """Per-row contract window id (`si_moc.okno_oddaje_id`); the month id
+        when there is no filing deadline. At row k it is also the latest month
+        whose contract has been FILED: on or after the deadline of month m it is
+        m+1, before it m."""
+        return self._filing_id_arr
+
     def _naive_import_power_kw(self):
         """Grid draw in kW the household would have had with no battery."""
         hours_per_interval = self.interval_minutes / 60.0
@@ -687,12 +712,78 @@ class HouseholdEnvironment(gym.Env):
             out[i] = mid
         return out
 
+    def _precompute_filing_ids(self):
+        """Per-row contract window id (`si_moc.okno_oddaje_id`); the calendar
+        month id when there is no filing deadline."""
+        if self.agreed_power_cutoff_day is None:
+            return self._month_id_arr
+        cache, out = {}, np.empty(self.data_length, dtype=np.int64)
+        for i in range(self.data_length):
+            ts = self.dataset.index[i]
+            key = (ts.year, ts.month, ts.day, ts.hour)
+            fid = cache.get(key)
+            if fid is None:
+                fid = cache[key] = resolve_filing_window_id(
+                    ts, self.agreed_power_cutoff_day)
+            out[i] = fid
+        return out
+
+    def _precompute_history_pool(self, history_kw):
+        """(power kW, block, contract window id) arrays of the walked-in meter."""
+        if history_kw is None or len(history_kw) == 0:
+            return None
+        index = history_kw.index
+        if len(self.dataset.index) and index[-1] >= self.dataset.index[0]:
+            raise ValueError("agreed_power_history_kw must end before the dataset "
+                             "begins: it is the meter the household walked in with")
+        power = np.maximum(np.asarray(history_kw, dtype=np.float64), 0.0)
+        blocks = np.empty(len(index), dtype=np.int64)
+        ids = np.empty(len(index), dtype=np.int64)
+        cache = {}
+        for i, ts in enumerate(index):
+            key = (ts.year, ts.month, ts.day, ts.hour)
+            hit = cache.get(key)
+            if hit is None:
+                hit = cache[key] = (
+                    resolve_block_for_datetime(
+                        ts, pricing_reference_year=self.pricing_reference_year),
+                    resolve_filing_window_id(ts, self.agreed_power_cutoff_day))
+            blocks[i], ids[i] = hit
+        return power, blocks, ids
+
+    def _contract_pool(self):
+        """(power kW, block, window id) of every reading the contract is read from:
+        the walked-in history, then this dataset's draw."""
+        power = self._contract_power_kw()
+        if self._history_pool is None:
+            return power, self._block_arr, self._filing_id_arr
+        hp, hb, hi = self._history_pool
+        return (np.concatenate([hp, power]), np.concatenate([hb, self._block_arr]),
+                np.concatenate([hi, self._filing_id_arr]))
+
     def _monthly_top_peaks_by_block(self):
-        """{month id: {block: top-n kW}} of this household's billed grid draw."""
+        """{window id: {block: top-n kW}} of this household's billed grid draw.
+
+        Keyed by the contract window (`agreed_power_cutoff_day`) -- the calendar
+        month when there is no deadline -- and including the walked-in history.
+        """
+        power, blocks, ids = self._contract_pool()
         return monthly_top_peaks_by_block(
-            self._contract_power_kw(), self._block_arr, self._month_id_arr,
-            n_peaks=self.agreed_power_n_peaks,
+            power, blocks, ids, n_peaks=self.agreed_power_n_peaks,
         )
+
+    @property
+    def max_import_kwh(self):
+        """The fuse: the most the connection carries per interval, kWh, or None.
+
+        `connection_power_kw` is the priključna moč, which is both the
+        ceiling on the agreed power (`si_moc.uskladi_bloke`) and the physical
+        limit on the draw. Every runner caps charging at it
+        (`Basic_Functions.fuse_charge_headroom`) and every MILP bounds `buy` by it.
+        """
+        if self.connection_power_kw is None:
+            return None
+        return float(self.connection_power_kw) * self.interval_minutes / 60.0
 
     def _monthly_peak_kw_by_block(self):
         """{month id: {block: single highest kW}}, for reporting only."""
@@ -705,9 +796,9 @@ class HouseholdEnvironment(gym.Env):
         return month_completeness(self._month_id_arr, self.steps_per_day)
 
     def _bootstrap_peak_kw(self, peaks, first_month=None):
-        """Per-block peaks standing in for the month before `first_month`."""
+        """Per-block peaks standing in for the window before `first_month`."""
         return bootstrap_peak_kw(
-            peaks, self._month_id_arr, self.steps_per_day,
+            peaks, self._contract_pool()[2], self.steps_per_day,
             mode=self.agreed_power_bootstrap, first_month=first_month,
         )
 

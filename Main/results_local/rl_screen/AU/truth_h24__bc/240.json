@@ -68,7 +68,7 @@
  "wall_s": 3.5728211402893066,
  "ref_cost_no_battery": 563.7713099670804,
  "ref_cost_self_consumption": 459.30152689187713,
- "ref_cost_prophet": 502.99553223647376,
+ "ref_cost_prophet": 416.89636089242543,
  "ref_cost_oracle": 372.92590285550153,
  "ref_cost_milp_full": 370.7258945028819,
  "ref_cost_price_threshold": 398.9763169152561,

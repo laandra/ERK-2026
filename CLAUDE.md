@@ -12,12 +12,28 @@ household could actually install, on two price signals:
 | arm | tariff |
 |---|---|
 | **AU** | Ausgrid EA025 time-of-use, working-day aware, spot-linked. Energy + standing charge, **no capacity charge**. |
-| **SI** | GEN-I Dinamični under `si_samooskrba`. Energy, standing charge **and an excess-power charge** against a *dogovorjena obračunska moč* that is re-agreed monthly from the peaks the controller itself realised. |
+| **SI** | GEN-I Dinamični under `si_samooskrba`. Energy, standing charge **and an excess-power charge** against a *dogovorjena obračunska moč* that is filed monthly, by the 20th, from the peaks the controller itself realised, inside the household's fuse. |
 
 The SI contract is therefore **endogenous**: a controller that shaves its peaks is
-then held to the lower contract it earned. The MILP decides it inside the LP
-(`MILP_Household.add_endogenous_agreed_power`); rules iterate to the same fixed
-point through `Environment.converge_agreed_power`.
+then held to the lower contract it earned (`hs.SI_CONTRACT`, 2026-10-21).
+- **Deadline:** month M is filed by the 20th of M-1 (Akt 12. člen (3),
+  `si_moc.ROK_SPREMEMBE_DAN`), off the mean of the 5 highest draws per block in
+  the window that ends there (20th of M-2 to the 19th of M-1,
+  `si_moc.okno_oddaje_id`). The opening months read the real pre-sample meter.
+  Rules iterate to that contract through `Environment.converge_agreed_power`;
+  the MPC files it causally at each deadline.
+- **Whole-period MILP:** the theoretical optimum, so it FILES whatever contract
+  minimises its total bill (`add_endogenous_agreed_power(contract="free")`) and
+  is billed on it. The one-sided `A >= top-5` link is not a bound under the
+  statutory norm.
+- **Fuse:** the second-smallest standard rating (single- or three-phase) that
+  carries the largest no-battery draw in the household's file. Its published
+  minimum is the floor and its connection power the ceiling, on the contract
+  and on the draw (`Environment.max_import_kwh`,
+  `Basic_Functions.fuse_charge_headroom`, the fuse rows of
+  `add_household_physics`): charging may never push the draw past it. An SI env
+  is built with `build_study_env(tariff="SI", household=<file>)`, and without
+  the household it refuses.
 
 Python 3.14, no virtualenv checked in. Dependencies pinned in `requirements.txt`
 (pulp/CBC + highspy for the LP, cvxpy for the ported forecaster, Prophet,
@@ -173,6 +189,19 @@ These are load-bearing. Breaking one makes two numbers in the paper incomparable
   are shared, never re-implemented.
 - **One invoice generator.** Every path — RL env, MILP, real meter profiles —
   accumulates into `si_invoice.InvoiceBuilder`. No invoice math anywhere else.
+- **One excess-power model, in the optimizers and the bill.** On SI the excess
+  charge is the statute's `rate x faktor x sqrt(sum of squared exceedances)` +
+  DDV per block and month (`hs.SI_EXCESS_POWER_MODEL = "statutory"`, ported from
+  Energy_Community): the whole-period MILP minimises it through cutting planes
+  (`MILP_Household.StatutoryExcess`, `tighten_statutory_excess`; LP first to
+  gather cuts, binaries seeded after), every MPC window prices it opened on the
+  month's metered exceedances against a causally re-agreed contract, and
+  `rbc.price_interval_statutory` bills every controller with it (the running
+  sum rides in `peak_state` as `("sumsq", block, month)`). The rate is formed in
+  one place, `MILP_Household.statutory_excess_rate`. `"ratchet"` is the study
+  before 2026-10-20 (linear running peak, no DDV, nothing in the MPC) and keys
+  out of every checkpoint/RL digest (`hs.excess_power_key` / `_suffix`); never
+  mix the two in one frame.
 - **One env factory.** `MILP_Household.build_household_env`. Nothing about a
   particular study is defaulted there; each study passes its own price list,
   capacity and agreed-power rule.
@@ -191,6 +220,18 @@ These are load-bearing. Breaking one makes two numbers in the paper incomparable
   scheduler audits itself against the rebuild path (`persistent=False`) and
   raises. A data-carrying row added to the builder but not to
   `household_data_bounds` is what that audit is for.
+- **The forecast MPC holds the planned GRID exchange, not the planned battery
+  power** (`hs.MPC_EXECUTOR`, ported 2026-10-21 from Energy_Community's
+  `Optimization_Target_Study`). `execute_interval` moves the battery, inside the
+  shared envelope, to put the metered exchange back on the plan's. On SI the
+  bottom 1 kWh is hidden from the planner (`UpstreamMILPScheduler(reserve_kwh=)`)
+  and spent only by the guard, which holds the draw at the contract in force. AU
+  tracks with no reserve, because it has no contract to guard. Only the forecast
+  arm executes this: the oracle stays plain with the whole pack, and the keys
+  are in `_FORECAST_ONLY_KEYS`. A checkpoint carries `mpc_tracking` /
+  `mpc_reserve_kwh` (keyed out at "battery"/0). A year may close below 50 %;
+  `Cost_EUR_Closed` values that, and nothing asserts it. A window whose LP plan
+  would execute charge and discharge at once is re-solved on the binaries.
 - **One battery.** Physical constants in `MILP_Household`, economics in
   `Battery_Economics`, so two studies cannot quietly price the same pack differently.
 - **Physics vs. nameplate.** `battery_capacity_kwh` is the usable window everything

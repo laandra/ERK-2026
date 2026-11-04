@@ -68,6 +68,9 @@ TUNE_OUT = os.path.join(OUT, "_tune")
 TUNE_MODELS = os.path.join(MODELS, "_tune")
 
 TARIFF = "SI"
+# The reference bills' directory. They are settled bills, so they carry the
+# excess-power model they were billed under (`hs.excess_power_suffix`).
+REFS = "refs" + hs.excess_power_suffix(TARIFF)
 VARIANT = "fc_h24"                  # the panel's reference observation contract
 METHODS = ["bc", "bc_dqn", "dqn"]
 H, N_TRAIN, N_SIM = rb.H, rb.N_TRAIN, rb.N_SIM
@@ -196,10 +199,10 @@ def prepare(ident, contract: str) -> dict:
     prep["contract_kwargs"] = kw
     prep["train"] = rb.build_bundle(
         TARIFF, frames["df_all_kwh"].iloc[: N_TRAIN * H], frames["df_train"],
-        N_TRAIN * H, contract=kw["train"])
+        N_TRAIN * H, contract=kw["train"], household=rb.household_path(prep["ident"]))
     prep["sim"] = rb.build_bundle(
         TARIFF, frames["df_ctrl_kwh"], frames["df_ctrl"], N_SIM * H,
-        contract=kw["sim"])
+        contract=kw["sim"], household=rb.household_path(prep["ident"]))
     return prep
 
 
@@ -282,7 +285,7 @@ def references(ident, contract: str, verbose: bool = False) -> dict:
     these are the reference arm's own numbers recomputed (and
     `test_rl_reward` holds them to the arm's checkpoint).
     """
-    path = os.path.join(OUT, contract, "refs", f"{ident}.json")
+    path = os.path.join(OUT, contract, REFS, f"{ident}.json")
     if os.path.exists(path):
         with open(path, encoding="utf-8") as fh:
             return json.load(fh)
@@ -399,7 +402,8 @@ def run_digest(contract, arm, method, cfg, overrides=None, base=None) -> str:
                       reward,
                       {"contract": contract, "arm": arm, "method": method,
                        "algo": version, "train_days": rb.TRAIN_BLOCKS,
-                       "val_days": rb.VAL_BLOCKS, "teach_span": rb.TEACH_SPAN})
+                       "val_days": rb.VAL_BLOCKS, "teach_span": rb.TEACH_SPAN,
+                       **hs.excess_power_key(TARIFF)})
 
 
 def _result_path(contract, arm, method, ident, out_root=OUT):
@@ -703,7 +707,7 @@ def _report_failures(flat, err_index) -> bool:
 # ---------------------------------------------------------------------------
 def phase_refs(ids, contracts, n_jobs):
     tasks = [(i, c) for c in contracts for i in ids
-             if not os.path.exists(os.path.join(OUT, c, "refs", f"{i}.json"))]
+             if not os.path.exists(os.path.join(OUT, c, REFS, f"{i}.json"))]
     res = _parallel(_refs_worker, tasks, n_jobs, "refs")
     if not _report_failures(res, 2):
         print("ALL DONE")
@@ -928,7 +932,7 @@ def load_refs():
     import pandas as pd
     rows = []
     for contract in rr.ALL_TYPES:
-        d = os.path.join(OUT, contract, "refs")
+        d = os.path.join(OUT, contract, REFS)
         if not os.path.isdir(d):
             continue
         for f in sorted(os.listdir(d)):

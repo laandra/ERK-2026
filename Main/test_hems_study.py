@@ -20,7 +20,7 @@ import hems_study as hs          # first: it puts the repo root on sys.path
 import Battery_Economics as be
 import Rule_Based_Control as rbc
 from Basic_Functions import cumulative_interval_price_series
-from MILP_Household import build_household_env
+from MILP_Household import build_household_env, floor_export_rates
 
 BATTERY = dict(battery_cap=10.0, soc_min_pct=0.10, soc_max_pct=0.80,
                p_max=1.5, eff=0.95)
@@ -702,6 +702,598 @@ def test_full_period_is_a_bound(kwh):
               f"optimum {opt:.2f} vs best rule {worst[0]} {worst[1]:.2f}")
 
 
+def _spiky(env, n, every=5, extra_kwh=0.6):
+    """A draw that crosses its contract often: the no-battery net plus a charge
+    every `every` intervals -- the pattern the statute prices and the ratchet
+    does not."""
+    net = (np.asarray(env.arr_consumption[:n], dtype=float)
+           - np.asarray(env.arr_generation[:n], dtype=float))
+    net[::every] += extra_kwh
+    return net
+
+
+def test_statutory_settlement_is_the_invoice():
+    """The SI evaluator's excess charge must be the invoice's, month by month.
+
+    `rbc.price_interval_statutory` bills the statutory norm as a running sum of
+    increments, `rate x (sqrt(S + e^2) - sqrt(S))`, so that it keeps the
+    per-interval signature every walker in the study uses. That is only the
+    invoice if the increments telescope to `si_obracun`'s
+    `rate x faktor x sqrt(sum e^2)` (+ DDV) exactly -- same blocks, same months,
+    same contract, same rate. Held to `si_invoice.InvoiceBuilder` itself, on a
+    draw that crosses its line hundreds of times, across a month boundary.
+
+    Also: an episode opened mid-month on `rbc.seed_statutory_state` must owe
+    exactly what the month-long walk owes from that point on, and the old
+    ratchet must bill visibly less on the same draw (it prices one exceedance).
+    """
+    import datetime as _dt
+    from Pricing_Functions import InvoiceBuilder, calculate_interval_price
+    from si_tarife import DDV, PRIVZETO_REFERENCNO_LETO, ima_tarifne_postavke
+    kwh, _ = load(n_days=40, start="2012-07-10 00:30:00")
+    env = make_env(kwh)
+    n = len(kwh)
+    net = _spiky(env, n)
+    windows = rbc.reset_windows(env, n)
+
+    def walk(settle, start=0, state=None):
+        state = {b: 0.0 for b in rbc._BLOCKS} if state is None else state
+        power = {}
+        for idx in range(start, n):
+            if idx > start:
+                state = rbc._drop_peak_on_window_start(state, windows, idx)
+            _, _, p, _, state = settle(env, idx, float(net[idx]), state)
+            m = int(env.month_ids[idx])
+            power[m] = power.get(m, 0.0) + p
+        return power
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        statutory = walk(rbc.price_interval_statutory)
+        ratchet = walk(rbc.price_interval)
+        invoice = []
+
+        def _on_month(_key, _rows, racun):
+            invoice.append(float(
+                racun.postavke.get("omreznina_presezna_moc", 0.0)) * (1.0 + DDV))
+
+        # The invoice keys its months on the local clock moved into the pricing
+        # reference year (`Pravila.preslikaj_v_leto`), so (leto, mesec) is not
+        # the data's month id; inside a 40-day window the calendar month alone
+        # names it.
+        by_month = {int(m) % 12 + 1: int(m) for m in np.unique(env.month_ids[:n])}
+        # The year whose tariff act the intervals are priced under. The study's
+        # 2024 has no tables, so `Pravila.za_leto` -- the interval pricing and
+        # `statutory_excess_rate` alike -- falls back to 2026, while
+        # `si_invoice.resolve_invoice_pravila` has no such fallback and raises.
+        # Handed the year that is actually in force, the invoice prices the same
+        # act the settlement does.
+        invoice_year = int(env.pricing_reference_year)
+        if (invoice_year < 2027 and invoice_year != PRIVZETO_REFERENCNO_LETO
+                and not ima_tarifne_postavke(_dt.date(invoice_year, 1, 1))):
+            invoice_year = PRIVZETO_REFERENCNO_LETO
+        builder = InvoiceBuilder(
+            dogovorjena_moc=lambda leto, mesec: env.agreed_power_kw(by_month[mesec]),
+            pricing_scheme=env.pricing_scheme, interval_minutes=env.interval_minutes,
+            run_label="test_statutory", pricing_reference_year=invoice_year,
+            obracunaj_presezno_moc=True, on_month=_on_month)
+        for idx in range(n):
+            builder.add_interval(calculate_interval_price(
+                smp_market_price_kwh=env.arr_price[idx],
+                total_consumed_kwh=float(net[idx]), utc_date=env.dataset.index[idx],
+                interval_minutes=env.interval_minutes, scheme=env.pricing_scheme,
+                dogovorjena_moc=env.agreed_power_at(idx),
+                prev_peak_kw={b: 0.0 for b in rbc._BLOCKS}, include_raw=True,
+                **env.pricing_options))
+        builder.finalize()
+
+    ours = [statutory[m] for m in sorted(statutory)]
+    worst = (max(abs(a - b) for a, b in zip(ours, invoice))
+             if len(ours) == len(invoice) else float("inf"))
+    check("statutory settlement == the invoice's excess line, per month",
+          len(invoice) >= 2 and worst < 1e-9 and sum(invoice) > 0.0,
+          f"{len(invoice)} months, {sum(invoice):.4f} EUR, worst gap {worst:.1e}")
+    check("the ratchet under-bills the same draw",
+          sum(ratchet.values()) < sum(statutory.values()),
+          f"ratchet {sum(ratchet.values()):.4f} vs statutory {sum(statutory.values()):.4f} EUR")
+
+    # Mid-month: the seed carries the month so far. Registered as the env's own
+    # profile so the seed (which reads the contract profile) sees this draw.
+    env.set_achieved_power_kw(np.maximum(net, 0.0) / DELTA_T)
+    statutory = walk(rbc.price_interval_statutory)       # under that contract
+    first = int(env.month_ids[0])
+    mid = int(np.searchsorted(env.month_ids[:n], first + 1)) + 9 * H + 7
+    state = {int(b): float(v) for b, v in env.compute_seed_peak_kw(mid).items()}
+    state.update(rbc.seed_statutory_state(env, mid))
+    month = int(env.month_ids[mid])
+    tail = walk(rbc.price_interval_statutory, start=mid, state=state)
+    head = 0.0
+    st = {b: 0.0 for b in rbc._BLOCKS}
+    for idx in range(int(np.searchsorted(env.month_ids[:n], month)), mid):
+        _, _, p, _, st = rbc.price_interval_statutory(env, idx, float(net[idx]), st)
+        head += p
+    check("a mid-month walk seeded by seed_statutory_state owes the rest of the month",
+          abs(head + tail[month] - statutory[month]) < 1e-9,
+          f"{head:.4f} + {tail[month]:.4f} vs {statutory[month]:.4f} EUR")
+    env.clear_achieved_power()
+
+
+def test_statutory_full_period():
+    """The whole-period solve must close its cut loop and price what it is billed.
+
+    Three things, on the three-month SI slice the bound test uses:
+      the loop     closes to STATUTORY_FULL_TOL_EUR -- an unclosed loop leaves
+                   the denominator short of a bound by up to its shortfall;
+      the excess   it priced is the statutory charge the settlement bills its
+                   trajectory under the contract the LP signed -- one rate, one
+                   norm. NOT under the contract the settlement converges: the LP
+                   holds the contract at or above the rule's top-5 mean, and
+                   under the statutory norm signing above it can pay (many
+                   small crossings cost ~sqrt(N) of one), so the floor goes
+                   slack where the settlement bills the rule exactly. Measured
+                   on Ausgrid 127's year: 9.67 vs 18.68 EUR of excess, the
+                   difference moved onto the standing charge, totals 398.90 vs
+                   398.88. The split is printed; the bound test holds the total;
+      the point    of the change: billed on the statutory invoice, it is never
+                   dearer than the solve the study ran before (the ratchet).
+    """
+    # The study's own calendar, set here rather than inherited from whichever
+    # test ran before, and a slice whose months share their blocks with the
+    # month the bootstrap contract is read from. A slice opening in a
+    # high-season July bootstraps from a low-season September with no block-1
+    # line, every block-1 draw is then an exceedance, and the cut loop crawls
+    # (1 EUR short after 40 rounds) on a case no scored year contains.
+    hs._si_cas.nastavi_koledar(drzava="AU", podrocje="NSW",
+                               visja_sezona_meseci={5, 6, 7, 8}, casovni_pas="naive")
+    kwh, _ = load(n_days=91, start="2012-09-01 00:30:00")
+    soc_min = BATTERY["battery_cap"] * BATTERY["soc_min_pct"]
+    bills = {}
+    full = None
+    for model in ("statutory", "ratchet"):
+        keep = hs.SI_EXCESS_POWER_MODEL
+        hs.SI_EXCESS_POWER_MODEL = model
+        try:
+            env = make_env(kwh)
+            rates = hs.build_rate_vectors("SI", env, kwh.index, kwh["SMP"].values, 30)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                sig = rbc.build_signals(env, n_steps=len(kwh))
+            sol = hs.solve_full_period(
+                env, rates, "SI", n_steps=len(kwh), soc_init_kwh=5.0,
+                delta_t=DELTA_T, soc_min_kwh=soc_min,
+                closeout_rate=float(np.mean(sig.import_rate)), verbose=False)
+        finally:
+            hs.SI_EXCESS_POWER_MODEL = keep
+        # Both billed on the STATUTORY invoice: what the household pays.
+        net = (np.asarray(sol["p_buy"]) - np.asarray(sol["p_sell"])) * DELTA_T
+        s = hs.settle_trajectory(env, net, rbc.price_interval_statutory, sig,
+                                 soc_start=5.0, soc_end=sol["soc_plan"][-1])
+        bills[model] = s["Cost_EUR_Closed"] + s["Fixed_EUR"]
+        if model == "statutory":
+            full, settled = sol, s
+            env.apply_agreed_power_schedule(
+                {**env.agreed_power_schedule, **sol["agreed_schedule"]})
+            own = hs._settle_trajectory_once(
+                env, net, rbc.price_interval_statutory, sig,
+                soc_start=5.0, soc_end=sol["soc_plan"][-1])
+            env.clear_achieved_power()
+    check("statutory whole-period solve: the cut loop closes",
+          full["statutory_shortfall_eur"] <= hs.STATUTORY_FULL_TOL_EUR,
+          f"{full['statutory_rounds']} rounds, {full['statutory_cuts']} cuts, "
+          f"shortfall {full['statutory_shortfall_eur']:.2e} EUR")
+    check("statutory whole-period solve: priced excess == excess billed on its contract",
+          abs(full["statutory_excess_eur"] - own["Power_EUR"]) < 1e-6,
+          f"{full['statutory_excess_eur']:.4f} vs {own['Power_EUR']:.4f} EUR; on the "
+          f"rule's contract {settled['Power_EUR']:.2f} excess, total "
+          f"{settled['Cost_EUR_Closed'] + settled['Fixed_EUR']:.2f} vs "
+          f"{own['Cost_EUR_Closed'] + own['Fixed_EUR']:.2f} on its own")
+    check("statutory solve is never dearer on the invoice than the ratchet solve",
+          bills["statutory"] <= bills["ratchet"] + 0.01,
+          f"{bills['statutory']:.2f} vs {bills['ratchet']:.2f} EUR (invoice, "
+          f"{bills['ratchet'] - bills['statutory']:+.2f} saved)")
+
+
+def test_statutory_windows(kwh, kw):
+    """The receding windows' statutory term: exact fast path, causal contract.
+
+      exactness  The persistent model solves energy and wear only, and a window
+                 whose plan crosses nowhere is accepted from it unchanged. That
+                 is exact only if such a plan is optimal for the statutory
+                 model too. Held, window by window, against the rebuild path
+                 that always solves the statutory model -- with a month that
+                 has already been crossed (`carried`), where the norm's
+                 marginal price is lowest and a crossing most tempting.
+      the run    A statutory year closes every window, and leaves the
+                 environment's contract as it found it.
+      contract   Re-agreed at a month's first interval from the executed
+                 months, it is the contract the settlement's own convergence
+                 reads off the same trace for that month.
+    """
+    kwh2, kw2 = load(n_days=12, start="2012-07-25 00:30:00")   # crosses into August
+
+    def scheduler(env, persistent):
+        return hs.UpstreamMILPScheduler(
+            env, delta_t=DELTA_T, parity=False, exclusivity="auto",
+            allow_spill=False, metering_bounds=True, persistent=persistent,
+            **BATTERY)
+
+    env = make_env(kwh2)
+    rates = hs.build_rate_vectors("SI", env, kwh2.index, kwh2["SMP"].values, 30)
+    ctrl = hs.ReactiveController(
+        scheduler=scheduler(env, True), forecaster=None, real_data=kw2,
+        soc_init=5.0, horizon_steps=H, steps_per_day=H, reoptimize_every=1,
+        freq="30min", rate_vectors=rates, excess_power="statutory")
+    ref = scheduler(env, False)
+    ctrl._open_statutory(len(kwh2))
+    gaps, crossed, forced = [], 0, []
+    rate = ctrl._st_rate
+    for k in range(0, 8 * H, 5):
+        spec = ctrl._excess_window(k, H)
+        # A month already well over its line, so every window opens on c0 > 0.
+        spec = dict(spec, carried={(int(b), int(m)): 9.0 for b, m in
+                                   zip(spec["blocks"], spec["months"])})
+        args = (5.0, rates[0][k:k + H], rates[1][k:k + H],
+                kw2["Energy_Generation"].to_numpy()[k:k + H],
+                kw2["Energy_Consumption"].to_numpy()[k:k + H])
+        fast = ctrl.sched.solve(*args, excess=spec)
+        slow = ref.solve(*args, excess=spec)
+
+        def total(plan):
+            # energy + wear as the plan reports it (persistent: energy only;
+            # rebuild: its objective, statutory s included -- so recompute that
+            # part from the plan's own draw, the same way for both).
+            buy = np.asarray(plan["p_buy"])
+            sell = np.asarray(plan["p_sell"])
+            export, _ = floor_export_rates(np.asarray(args[1], dtype=float),
+                                           np.asarray(args[2], dtype=float))
+            energy = float(np.sum(buy * np.asarray(args[1]) - sell * export)) * DELTA_T
+            exc = {}
+            for t, (b, m) in enumerate(zip(spec["blocks"], spec["months"])):
+                over = max(buy[t] - spec["agreed_t"][t], 0.0)
+                exc[(int(b), int(m))] = exc.get((int(b), int(m)), 9.0) + over * over
+            return energy + sum(rate(*key) * np.sqrt(v) for key, v in exc.items())
+
+        crossed += int(ctrl.sched._crosses(fast, spec))
+        gaps.append(abs(total(fast) - total(slow)))
+        # And where the energy optimum DOES cross (a contract pulled down to
+        # 0.5 kW), the statutory solve must beat that plan on the statutory bill.
+        low = dict(spec, agreed_t=np.minimum(np.asarray(spec["agreed_t"]), 0.5))
+        spec = low
+        energy_only = ref.solve(*args)
+        statutory_plan = ctrl.sched.solve(*args, excess=low)
+        forced.append(total(statutory_plan) - total(energy_only))
+    check("statutory window: the fast path reaches the statutory optimum",
+          max(gaps) <= 2 * hs.STATUTORY_WINDOW_TOL_EUR,
+          f"{len(gaps)} windows ({crossed} sent to the statutory model), "
+          f"largest gap {max(gaps):.1e} EUR")
+    check("statutory window: where the energy plan crosses, the statutory one is cheaper",
+          max(forced) <= hs.STATUTORY_WINDOW_TOL_EUR and min(forced) < -1e-3,
+          f"{len(forced)} windows, statutory minus energy-only "
+          f"{min(forced):+.3f}..{max(forced):+.1e} EUR")
+    env.clear_achieved_power()
+
+    # A whole run, across a month boundary.
+    env = make_env(kwh2)
+    ctrl = hs.ReactiveController(
+        scheduler=scheduler(env, True), forecaster=None, real_data=kw2,
+        soc_init=5.0, horizon_steps=H, steps_per_day=H, reoptimize_every=1,
+        freq="30min", rate_vectors=rates, excess_power="statutory")
+    df = ctrl.run(num_days=len(kwh2) // H - 1, use_forecast=False)
+    st = df.attrs["statutory"]
+    check("statutory run: every window closes, env contract restored",
+          st["unclosed"] == 0 and not env.agreed_power_is_endogenous,
+          f"{st['windows']} statutory windows of {len(df)}, {st['rounds']} rounds, "
+          f"worst shortfall {st['max_shortfall_eur']:.1e} EUR")
+    aug = int(env.month_ids[len(df) - 1])
+    net_kw = np.maximum((df["Buy_kW"] - df["Sell_kW"]).to_numpy(), 0.0)
+    env.set_achieved_power_kw(net_kw)
+    want = env.agreed_power_schedule[aug]
+    got = ctrl._st_schedule[aug]
+    check("the causal contract is the one the trace sets",
+          aug != int(env.month_ids[0])
+          and all(abs(got[b] - want[b]) < 1e-9 for b in want),
+          f"month {aug}: " + ", ".join(f"B{b} {got[b]:.3f}/{want[b]:.3f}" for b in sorted(want)))
+    env.clear_achieved_power()
+
+
+def test_mpc_executor():
+    """The forecast MPC's executor (`MPC_EXECUTOR`): what it holds, and when.
+
+      key        The plain executor ("battery", no reserve) keys out of a
+                 checkpoint, so results written before it existed keep theirs;
+                 any other is in the key, and out of the oracle's.
+      foresight  On the truth the plan and the meter agree, so every band
+                 executes the battery power the plan chose -- the target only
+                 matters once the controller plans on a forecast.
+      grid       On a forecast, the executed exchange IS the planned one
+                 wherever the envelope allows, and the battery never leaves it.
+      reserve    The planner never sees the bottom of the pack: tracking stops
+                 at it, only the guard spends it, and the guard only ever
+                 brings the draw down to the contract.
+    """
+    check("executor key: the plain executor keys out, the protocol keys in",
+          hs.mpc_executor_key("battery", 0.0) == {}
+          and hs.mpc_executor_key(*hs.mpc_executor("SI"))
+          == {"mpc_tracking": "grid", "mpc_reserve_kwh": 1.0}
+          and not set(hs.oracle_config(
+              {"tariff": "SI", **hs.mpc_executor_key("grid", 1.0)}, "x"))
+          & {"mpc_tracking", "mpc_reserve_kwh"})
+
+    kwh_all, kw_all = load(n_days=12, start="2012-07-25 00:30:00")
+    kwh, kw = kwh_all.iloc[2 * H:], kw_all.iloc[2 * H:]   # two days of history
+    fc = hs.SeasonalNaiveForecaster(kw_all, H)
+
+    def run(tracking="battery", reserve=0.0, use_forecast=True):
+        env = make_env(kwh)
+        rates = hs.build_rate_vectors("SI", env, kwh.index, kwh["SMP"].values, 30)
+        sched = hs.UpstreamMILPScheduler(
+            env, delta_t=DELTA_T, parity=False, exclusivity="auto",
+            allow_spill=False, metering_bounds=True, reserve_kwh=reserve, **BATTERY)
+        ctrl = hs.ReactiveController(
+            scheduler=sched, forecaster=fc, real_data=kw, soc_init=5.0,
+            horizon_steps=H, steps_per_day=H, reoptimize_every=1, freq="30min",
+            rate_vectors=rates, excess_power="statutory", tracking=tracking)
+        df = ctrl.run(num_days=len(kwh) // H - 1, use_forecast=use_forecast)
+        return df, ctrl, env
+
+    cols = ["Charge_kW", "Discharge_kW", "Buy_kW", "Sell_kW", "SoC_kWh"]
+    plain, _, _ = run(use_forecast=False)
+    worst = max(float(np.max(np.abs(run(t, use_forecast=False)[0][cols].to_numpy()
+                                    - plain[cols].to_numpy())))
+                for t in ("grid", "import", "limit"))
+    check("executor: under perfect foresight every band executes the plan",
+          worst < 1e-6, f"largest difference {worst:.1e}")
+
+    fc_plain, _, _ = run()
+    grid, ctrl, env = run("grid")
+    ex = grid.attrs["executor"]
+    moved = float(np.max(np.abs(grid["Charge_kW"] - fc_plain["Charge_kW"])))
+    check("executor: grid tracking moves the battery off the plan, within the envelope",
+          moved > 1e-3 and ex["tracked_kwh"] > 0.0 and ex["guard_kwh"] == 0.0
+          and float(grid["Charge_kW"].max()) <= ctrl.sched.max_ch_kw + 1e-9
+          and float(grid["Discharge_kW"].max()) <= ctrl.sched.max_dis_kw + 1e-9
+          and not bool(((grid["Charge_kW"] > 1e-9) & (grid["Discharge_kW"] > 1e-9)).any()),
+          f"tracked {ex['tracked_kwh']:.2f} kWh, untracked {ex['untracked_kwh']:.2f} kWh, "
+          f"largest move off the plan {moved:.3f} kW")
+
+    # One interval, by hand: planned exchange 0.30 kWh, the house 0.20 kWh
+    # heavier than forecast. Grid holds 0.30 by discharging 0.20 more.
+    ch, dis, n, g = hs.execute_interval(
+        env, tracking="grid", plan_ch=0.0, plan_dis=0.10, plan_con=0.60,
+        plan_gen=0.20, con=0.80, gen=0.20, soc=3.0)
+    check("executor: grid holds the planned exchange",
+          abs(n - 0.30) < 1e-12 and abs(dis - 0.30) < 1e-12 and ch == 0.0 and g == 0.0,
+          f"net {n:.3f}, discharge {dis:.3f}")
+    ch, dis, n, g = hs.execute_interval(
+        env, tracking="battery", plan_ch=0.0, plan_dis=0.10, plan_con=0.60,
+        plan_gen=0.20, con=0.80, gen=0.20, soc=3.0)
+    check("executor: battery holds the plan's power, the grid takes the error",
+          dis == 0.10 and ch == 0.0 and abs(n - 0.50) < 1e-12)
+    # The same, 0.25 kWh above the floor with a 1 kWh reserve: tracking may not
+    # touch it; the guard at 0.45 kWh releases what it takes to get there.
+    ch, dis, n, g = hs.execute_interval(
+        env, tracking="grid", plan_ch=0.0, plan_dis=0.0, plan_con=0.60,
+        plan_gen=0.20, con=0.80, gen=0.20, soc=0.25, reserve_kwh=1.0)
+    check("executor: tracking stops at the reserve", dis == 0.0 and abs(n - 0.60) < 1e-12)
+    ch, dis, n, g = hs.execute_interval(
+        env, tracking="grid", plan_ch=0.0, plan_dis=0.0, plan_con=0.60,
+        plan_gen=0.20, con=0.80, gen=0.20, soc=0.25, reserve_kwh=1.0, guard_kwh=0.45)
+    check("executor: the guard spends the reserve down to the contract, no further",
+          abs(n - 0.45) < 1e-12 and abs(g - 0.15) < 1e-12 and abs(dis - 0.15) < 1e-12)
+
+    res, rctrl, _ = run("grid", reserve=1.0)
+    rex = res.attrs["executor"]
+    floor = BATTERY["battery_cap"] * BATTERY["soc_min_pct"]
+    soc = res["SoC_kWh"].to_numpy()
+    check("executor: a reserve plans on the pack above it, the guard spends it",
+          rctrl.sched.soc_min == floor + 1.0
+          and rctrl.sched.plan_env.battery_capacity_kwh == env.battery_capacity_kwh - 1.0
+          and float(soc.min()) >= floor - 1e-9
+          and rex["guard_intervals"] > 0 and rex["guard_kwh"] > 0.0,
+          f"lowest SoC {soc.min():.3f} kWh (floor {floor}, reserve top {floor + 1.0}), "
+          f"guard {rex['guard_kwh']:.3f} kWh over {rex['guard_intervals']} intervals, "
+          f"closing SoC {rex['final_soc_kwh']:.3f}")
+    try:
+        hs.ReactiveController(
+            scheduler=hs.UpstreamMILPScheduler(
+                env, delta_t=DELTA_T, parity=False, exclusivity="auto",
+                allow_spill=False, metering_bounds=True, reserve_kwh=1.0, **BATTERY),
+            forecaster=fc, real_data=kw, soc_init=5.0, horizon_steps=H,
+            steps_per_day=H, tracking="grid", excess_power=None,
+            rate_vectors=hs.build_rate_vectors("SI", env, kwh.index, kwh["SMP"].values, 30))
+        refused = False
+    except ValueError:
+        refused = True
+    check("executor: a reserve without a contract to guard is refused", refused)
+    env.clear_achieved_power()
+
+
+def test_si_contract():
+    """The SI contract (`SI_CONTRACT`): filed by the deadline, inside the fuse.
+
+      fuse       The connection is the second-smallest standard rating that
+                 carries the household's largest no-battery draw; its published
+                 minimum is the floor, its power the ceiling.
+      deadline   Month M's contract is read from the 20th of M-2 to the 19th of
+                 M-1: a draw on the 25th of July cannot reach August's contract
+                 and does reach September's; one on the 10th reaches August's.
+      history    The leading month is filed off the meter before the data.
+      limits     Every filed contract lies inside [floor, connection], and no
+                 controller -- rule, MPC or MILP -- draws past the fuse, which
+                 is tightened here until grid charging would cross it.
+      bound      The whole-period solve, billed on the contract it filed, is
+                 below every rule and the receding MPC -- the property the
+                 one-sided `A >= top-5` link lost under the statutory norm.
+    """
+    hs._si_cas.nastavi_koledar(drzava="AU", podrocje="NSW",
+                               visja_sezona_meseci={5, 6, 7, 8}, casovni_pas="naive")
+    raw = pd.read_csv(DATA)
+    peak = float(np.maximum(raw["Energy_Consumption"] - raw["Energy_Generation"], 0.0).max()) / DELTA_T
+    fits = sorted((kw, f) for f, kw in hs._si_moc.PRIKLJUCNE_MOCI_KW.items() if kw >= peak)
+    conn = hs.si_connection(DATA)
+    want_floor = hs._si_moc.minimalna_dogovorjena_moc(
+        fits[1][0], faze=int(fits[1][1][0]), leto=2026)
+    check("SI contract: the fuse is the second-smallest rating that carries the house",
+          conn["fuse"] == fits[1][1] and conn["connection_kw"] == fits[1][0]
+          and conn["floor_kw"] == want_floor,
+          f"peak {peak:.2f} kW -> {conn['fuse']} / {conn['connection_kw']:g} kW, "
+          f"floor {conn['floor_kw']:g} kW")
+
+    kwh_all, kw_all = load(n_days=94, start="2012-06-29 00:30:00")
+    kwh, kw = kwh_all.iloc[2 * H:], kw_all.iloc[2 * H:]
+    n = len(kwh) - H                      # the scored window; one day of lookahead
+
+    def si_env(**override):
+        return hs.align_envelope(
+            hs.build_study_env(kwh, delta_t=DELTA_T, H=H, tariff="SI",
+                               household=DATA, agreed_power=override or None,
+                               **BATTERY),
+            BATTERY["p_max"], BATTERY["eff"], DELTA_T)
+
+    env = si_env()
+    fid = np.asarray(env.filing_window_ids)
+    days = np.asarray(kwh.index.day)
+    month = np.asarray(env.month_ids)
+    check("SI contract: the window turns at the 20th",
+          bool(np.all(fid[days < 20] == month[days < 20]))
+          and bool(np.all(fid[days >= 20] == month[days >= 20] + 1)))
+
+    base = env.agreed_power_schedule
+    draw = np.maximum(kwh["Energy_Consumption"] - kwh["Energy_Generation"], 0.0).to_numpy() / DELTA_T
+    jul = int(month[0])
+
+    blocks = np.asarray(env.tariff_blocks)
+
+    def spiked(late):
+        # In block 4, which July, August and September are all billed for (a
+        # seasonal block is absent from a month that does not bill it) and which
+        # tops the monotone chain, so a lone peak there always reaches the line;
+        # on the first July day on or after the 20th that has one, or before it.
+        # Five of them, so the top-five mean itself moves above the line block 1
+        # already holds the chain at.
+        side = (days >= 20) if late else (days < 20)
+        at = np.flatnonzero((month == jul) & side & (blocks == 4))[:5]
+        d = draw.copy()
+        d[at] += 6.0
+        sched = env.set_achieved_power_kw(d)
+        env.clear_achieved_power()
+        return sched
+
+    late, early = spiked(True), spiked(False)
+    check("SI contract: filed by the 20th -- a late draw skips a month, an early one does not",
+          late[jul + 1] == base[jul + 1] and late[jul + 2] != base[jul + 2]
+          and early[jul + 1] != base[jul + 1])
+
+    blind = hs.align_envelope(
+        hs.build_study_env(kwh, delta_t=DELTA_T, H=H, tariff="SI", household=DATA,
+                           agreed_power={"agreed_power_history_kw": None}, **BATTERY),
+        BATTERY["p_max"], BATTERY["eff"], DELTA_T)
+    check("SI contract: the leading month is filed off the walked-in meter",
+          blind.agreed_power_schedule[jul] != base[jul],
+          f"July {base[jul]} with history, {blind.agreed_power_schedule[jul]} without")
+    inside = all(conn["floor_kw"] - 1e-9 <= kw_ <= conn["connection_kw"] + 1e-9
+                 for m in base for kw_ in base[m].values())
+    check("SI contract: every filed contract lies inside [floor, connection]", inside)
+
+    # A fuse tight enough to bind. No rule here draws above the house's own peak,
+    # so a connection that carries that peak never binds on this slice; 3 kW is
+    # below it, which the bound is built for: charging stops at the fuse, the
+    # house is never cut -- every draw stays under max(fuse, house).
+    fuse_kw = 3.0
+    allowed = np.maximum(fuse_kw, draw[:n])
+    tight = si_env(connection_power_kw=fuse_kw, min_agreed_power_kw=1.0)
+    loose = si_env(connection_power_kw=None, min_agreed_power_kw=1.0)
+    out = {}
+    for name, e in (("tight", tight), ("loose", loose)):
+        rates = hs.build_rate_vectors("SI", e, kwh.index, kwh["SMP"].values, 30)
+        settle = hs.build_settlement("SI", e, rates, DELTA_T)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            sig = rbc.build_signals(e, n_steps=n, rates=rates)
+        over = 0.0
+        for pol in hs.rule_roster("SI"):
+            r = rbc.run_policy(e, pol, n_steps=n, signals=sig, keep_traces=True,
+                               settle=settle, soc_init_kwh=4.0)
+            p = np.asarray(r["_setpoints"])
+            net_kw = (sig.consumption[:n] + np.maximum(p, 0.0) - sig.generation[:n]
+                      - np.maximum(-p, 0.0)) / DELTA_T
+            over = max(over, float(np.max(net_kw - allowed)))
+        metrics, _ = hs.run_rules(e, settle, "SI", signals=sig, soc_init_kwh=4.0)
+        out[name] = (e, rates, settle, sig, metrics, over)
+    check("SI contract: no rule charges past the fuse, and without it some would",
+          out["tight"][5] <= 1e-9 and out["loose"][5] > 0.1,
+          f"fuse {fuse_kw:g} kW; worst draw over max(fuse, house) "
+          f"{out['tight'][5]:+.3f} kW with it, {out['loose'][5]:+.3f} kW without")
+
+    e, rates, settle, sig, metrics, _ = out["tight"]
+    soc_min = BATTERY["battery_cap"] * BATTERY["soc_min_pct"]
+    full = hs.solve_full_period(e, rates, "SI", n_steps=n, soc_init_kwh=5.0,
+                                delta_t=DELTA_T, soc_min_kwh=soc_min,
+                                closeout_rate=float(np.mean(sig.import_rate)),
+                                verbose=False)
+    net = (np.asarray(full["p_buy"]) - np.asarray(full["p_sell"])) * DELTA_T
+    e.apply_agreed_power_schedule(full["agreed_schedule"])
+    own = hs._settle_trajectory_once(e, net, settle, sig, soc_start=5.0,
+                                     soc_end=full["soc_plan"][-1])
+    e.clear_achieved_power()
+    opt = own["Cost_EUR_Closed"] + own["Fixed_EUR"]
+    filed = [kw_ for m, v in full["agreed_schedule"].items() for b, kw_ in v.items()
+             if kw_ > 0.0]
+    check("SI contract: the MILP files inside the limits and draws inside the fuse",
+          float(np.max(np.asarray(full["p_buy"]) - allowed)) <= 1e-6
+          and min(filed) >= 1.0 - 1e-6 and max(filed) <= fuse_kw + 1e-6,
+          f"largest draw {max(full['p_buy']):.3f} kW, filed {min(filed):.2f}..{max(filed):.2f} kW")
+
+    sched = hs.UpstreamMILPScheduler(
+        e, delta_t=DELTA_T, parity=False, exclusivity="auto", allow_spill=False,
+        metering_bounds=True, reserve_kwh=1.0, **BATTERY)
+    ctrl = hs.ReactiveController(
+        scheduler=sched, forecaster=hs.SeasonalNaiveForecaster(kw_all, H),
+        real_data=kw, soc_init=5.0, horizon_steps=H, steps_per_day=H,
+        reoptimize_every=1, freq="30min", rate_vectors=rates,
+        excess_power="statutory", tracking="grid")
+    mpc = ctrl.run(num_days=n // H, use_forecast=True)
+    mpc_net = (mpc["Buy_kW"] - mpc["Sell_kW"]).to_numpy() * DELTA_T
+    m = hs.settle_trajectory(e, mpc_net, settle, sig, soc_start=5.0,
+                             soc_end=float(mpc["SoC_kWh"].iloc[-1]))
+    totals = {name: metrics[f"cost_{name}"] + metrics[f"fixed_{name}"]
+              for name in (k[5:] for k in metrics if k.startswith("cost_"))}
+    totals["mpc"] = m["Cost_EUR_Closed"] + m["Fixed_EUR"]
+    best = min(totals, key=totals.get)
+    check("SI contract: the MPC draws inside the fuse",
+          float(np.max(mpc["Buy_kW"].to_numpy()[:n] - allowed)) <= 1e-6,
+          f"largest draw {mpc['Buy_kW'].max():.3f} kW")
+    check("SI contract: the whole-period solve on its own contract bounds every controller",
+          opt <= totals[best] + 0.01,
+          f"optimum {opt:.2f} vs best {best} {totals[best]:.2f} (MPC {totals['mpc']:.2f})")
+
+
+def test_excess_power_switch():
+    """`SI_EXCESS_POWER_MODEL` reaches every place it must, and keys nothing else.
+
+    "ratchet" must be the study as it ran before: the ratchet settlement, no
+    statutory term anywhere, and an EMPTY key so every checkpoint and RL digest
+    written before the switch still matches. Under "statutory" the key carries
+    the contract the excess is billed against as well (`SI_CONTRACT`). AU never
+    carries either.
+    """
+    keep = hs.SI_EXCESS_POWER_MODEL
+    try:
+        hs.SI_EXCESS_POWER_MODEL = "ratchet"
+        old = (hs.build_settlement("SI", None, None, DELTA_T) is rbc.price_interval
+               and hs.excess_power_key("SI") == {} and hs.excess_power_suffix("SI") == "")
+        hs.SI_EXCESS_POWER_MODEL = "statutory"
+        new = (hs.build_settlement("SI", None, None, DELTA_T) is rbc.price_interval_statutory
+               and hs.excess_power_key("SI") == {"si_excess_power": "statutory",
+                                                 "si_contract": hs.si_contract_tag()}
+               and hs.excess_power_suffix("SI") == f"+statutory+{hs.si_contract_tag()}")
+        au = hs.excess_power_key("AU") == {} and hs.excess_power_model("AU") is None
+    finally:
+        hs.SI_EXCESS_POWER_MODEL = keep
+    check("excess-power switch: ratchet is the old study, statutory keyed, AU untouched",
+          old and new and au)
+
+
 def test_accounting_rate_survives_a_zero_dispatch_rate():
     """A no-degradation arm must still be BILLED for the cycles it spends.
 
@@ -981,6 +1573,12 @@ if __name__ == "__main__":
     test_persistent_model_solves_the_rebuilt_model(kwh, kw)
     test_data_bounds_are_what_the_builder_writes(kwh)
     test_full_period_is_a_bound(kwh)
+    test_excess_power_switch()
+    test_statutory_settlement_is_the_invoice()
+    test_statutory_full_period()
+    test_statutory_windows(kwh, kw)
+    test_mpc_executor()
+    test_si_contract()
     test_accounting_rate_survives_a_zero_dispatch_rate()
     test_a_rule_has_no_objective_to_price()
     test_the_totals_are_billed_at_the_pack_price()

@@ -38,6 +38,8 @@
     "local_timezone": "naive",
     "milp_exclusivity": "auto",
     "milp_parity": null,
+    "mpc_reserve_kwh": 0.0,
+    "mpc_tracking": "grid",
     "n_sim": 365,
     "n_train": 730,
     "p_max": 1.5,
@@ -150,6 +152,11 @@
     "cost_price_oracle": 431.97366418524115,
     "efc_price_oracle": 238.86144424999992,
     "fixed_price_oracle": 705.3016666664521,
+    "tracked_kwh_prophet": 0.0,
+    "untracked_kwh_prophet": 0.0,
+    "guard_kwh_prophet": 0.0,
+    "guard_intervals_prophet": 0,
+    "final_soc_kwh_prophet": 1.0,
     "total_delayed_pv_charge": 555.6471228501963,
     "total_fixed_schedule": 561.5080267530076,
     "total_milp_full": 513.924096364776,
@@ -174,7 +181,7 @@
     "con_skill_vs_naive": 0.14324592081527698,
     "con_mae_first_month": 0.2802343838243035,
     "con_mae_last_month": 0.2921953249824256,
-    "runtime_s": 6.322054291958921,
+    "runtime_s": 7.375782459042966,
     "cycle_cost_reporting_eur_per_efc": 0.4166666666666667
   }
 }

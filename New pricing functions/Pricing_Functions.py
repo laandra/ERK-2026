@@ -36,6 +36,7 @@ from si_obracun import Pravila, dobava, samooskrba
 from si_paketi import PAKETI, Paket, TipCene, TipOdkupa
 from si_tarife import DDV, PRIVZETO_REFERENCNO_LETO, ima_tarifne_postavke, ove_spte_eur_kw
 from si_konica import marginal_excess_charge_eur, reset_window_id, update_running_peak
+from si_moc import okno_oddaje_id
 
 # -----------------------------------------------------------------------------
 # Public scheme names
@@ -580,6 +581,14 @@ def resolve_reset_window_id(
     """Monotonic reset-window id for the ratchet peak tracker (see si_konica)."""
     lok = v_lokalni_cas(utc_date)
     return reset_window_id(lok.year, lok.month, peak_reset_months)
+
+
+def resolve_filing_window_id(utc_date: datetime.datetime,
+                             rok_dan: Optional[int]) -> int:
+    """The agreed-power contract window of a timestamp (`si_moc.okno_oddaje_id`),
+    read on the same local clock as `resolve_reset_window_id`."""
+    lok = v_lokalni_cas(utc_date)
+    return okno_oddaje_id(lok.year, lok.month, lok.day, rok_dan)
 
 
 def compute_prorated_fixed_charge_eur(

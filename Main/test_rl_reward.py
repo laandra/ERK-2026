@@ -46,21 +46,22 @@ def check(name, ok, detail=""):
 N_DAYS, H = 180, 48
 N_STEPS = N_DAYS * H
 rb._calendar("SI")
-frames = hs.load_study_frames(os.path.join(rb.DATA, "Ausgrid 1.csv"))
+HOUSEHOLD = rb.household_path(1)   # an SI env is the household's (`hs.SI_CONTRACT`)
+frames = hs.load_study_frames(HOUSEHOLD)
 df_kwh = frames["df_all_kwh"].iloc[:N_STEPS + H]
 df_kw = df_kwh.copy()
 df_kw[["Energy_Generation", "Energy_Consumption"]] /= 0.5
 
 au = rb.build_bundle("AU", df_kwh, df_kw, N_STEPS)
-monthly = rb.build_bundle("SI", df_kwh, df_kw, N_STEPS)
-annual = rb.build_bundle("SI", df_kwh, df_kw, N_STEPS,
+monthly = rb.build_bundle("SI", df_kwh, df_kw, N_STEPS, household=HOUSEHOLD)
+annual = rb.build_bundle("SI", df_kwh, df_kw, N_STEPS, household=HOUSEHOLD,
                          contract=rr.contract_env_kwargs("annual"))
 signed = rr.operator_contract(monthly["sig"], 0, N_STEPS)
-fixed = rb.build_bundle("SI", df_kwh, df_kw, N_STEPS,
+fixed = rb.build_bundle("SI", df_kwh, df_kw, N_STEPS, household=HOUSEHOLD,
                         contract=rr.contract_env_kwargs("fixed", signed))
 by_price = {"monthly": monthly}
 for _c in ("active", "single"):
-    by_price[_c] = rb.build_bundle("SI", df_kwh, df_kw, N_STEPS,
+    by_price[_c] = rb.build_bundle("SI", df_kwh, df_kw, N_STEPS, household=HOUSEHOLD,
                                    contract=rr.contract_env_kwargs(_c))
 sig = monthly["sig"]
 CAP = sig.capacity_kwh
